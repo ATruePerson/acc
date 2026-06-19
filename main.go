@@ -80,7 +80,7 @@ func main() {
 		}()
 
 		stopChan := make(chan bool, 1)
-		RunTUI(cfg.Port, stopChan)
+		RunTUI(cfg, stopChan)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -441,4 +441,3 @@ func killPortOwner(port int) {
 		}
 	}
 }
-

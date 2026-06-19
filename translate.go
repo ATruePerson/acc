@@ -10,9 +10,9 @@ import (
 // dies: image blocks become data: URLs instead of being dropped.
 func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRequest, error) {
 	or := &OpenAIRequest{
-		Model:     route.Model,
-		MaxTokens: ar.MaxTokens,
-		Stream:    ar.Stream,
+		Model:       route.Model,
+		MaxTokens:   ar.MaxTokens,
+		Stream:      ar.Stream,
 		Temperature: ar.Temperature,
 	}
 

@@ -15,7 +15,7 @@ func (s *server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 func (s *server) handleDashboardLogs(w http.ResponseWriter, r *http.Request) {
 	tuiLogsMu.Lock()
 	defer tuiLogsMu.Unlock()
-	
+
 	// Prepare JSON payload
 	data := map[string]any{
 		"uptime": time.Since(startTime).Round(time.Second).String(),

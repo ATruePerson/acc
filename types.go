@@ -5,13 +5,13 @@ import "encoding/json"
 // ---------- Config ----------
 
 type Config struct {
-	Port      int                       `json:"port"`
-	Providers map[string]Provider       `json:"providers"`
-	Routes    map[string]Route          `json:"routes"`
+	Port      int                 `json:"port"`
+	Providers map[string]Provider `json:"providers"`
+	Routes    map[string]Route    `json:"routes"`
 	// Vision route is used whenever a request contains an image, regardless
 	// of the requested model slot — so screenshots always hit a model with eyes.
-	Vision    *Route                    `json:"vision"`
-	Effort    map[string]EffortMap      `json:"effort"`
+	Vision *Route               `json:"vision"`
+	Effort map[string]EffortMap `json:"effort"`
 	// SystemPrepend is prepended to every system prompt — use it to force
 	// behavior the upstream model otherwise ignores (e.g. respond in English).
 	SystemPrepend string `json:"system_prepend"`
@@ -36,14 +36,14 @@ type EffortMap struct {
 // ---------- Anthropic request (front) ----------
 
 type AnthropicRequest struct {
-	Model     string             `json:"model"`
-	MaxTokens int                `json:"max_tokens"`
-	System    json.RawMessage    `json:"system,omitempty"` // string OR []block
-	Messages  []AnthropicMessage `json:"messages"`
-	Stream    bool               `json:"stream"`
-	Tools     []AnthropicTool    `json:"tools,omitempty"`
-	Thinking  *Thinking          `json:"thinking,omitempty"`
-	Temperature *float64         `json:"temperature,omitempty"`
+	Model       string             `json:"model"`
+	MaxTokens   int                `json:"max_tokens"`
+	System      json.RawMessage    `json:"system,omitempty"` // string OR []block
+	Messages    []AnthropicMessage `json:"messages"`
+	Stream      bool               `json:"stream"`
+	Tools       []AnthropicTool    `json:"tools,omitempty"`
+	Thinking    *Thinking          `json:"thinking,omitempty"`
+	Temperature *float64           `json:"temperature,omitempty"`
 }
 
 type Thinking struct {

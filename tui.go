@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"sync"
 	"time"
 )
@@ -55,7 +56,31 @@ func readKeypresses(ch chan<- string) {
 	}
 }
 
-func drawDashboard(port int) {
+// orderedRoutes returns config routes with the common slots first (opus,
+// sonnet, haiku) and any remaining slots sorted alphabetically, so the
+// dashboard renders the same order every refresh instead of Go's random
+// map iteration order.
+func orderedRoutes(routes map[string]Route) []string {
+	preferred := []string{"opus", "sonnet", "haiku"}
+	seen := map[string]bool{}
+	var slots []string
+	for _, p := range preferred {
+		if _, ok := routes[p]; ok {
+			slots = append(slots, p)
+			seen[p] = true
+		}
+	}
+	var rest []string
+	for slot := range routes {
+		if !seen[slot] {
+			rest = append(rest, slot)
+		}
+	}
+	sort.Strings(rest)
+	return append(slots, rest...)
+}
+
+func drawDashboard(cfg *Config) {
 	cyan := "\033[1;36m"
 	green := "\033[1;32m"
 	yellow := "\033[1;33m"
@@ -75,14 +100,24 @@ func drawDashboard(port int) {
 
 	// Server info
 	uptime := time.Since(startTime).Round(time.Second)
-	fmt.Printf(" %sSTATUS:%s %sOnline%s  │  %sPORT:%s %d  │  %sUPTIME:%s %s\n\n", bold, reset, green, reset, bold, reset, port, bold, reset, uptime)
+	fmt.Printf(" %sSTATUS:%s %sOnline%s  │  %sPORT:%s %d  │  %sUPTIME:%s %s\n\n", bold, reset, green, reset, bold, reset, cfg.Port, bold, reset, uptime)
 
-	// Routing mappings
-	fmt.Printf(" %sACTIVE MODELS & ROUTING (HIGH EFFORT)%s\n", magenta, reset)
-	fmt.Printf(" ├─ %santhropic/opencode/big-pickle%s   →  %sbig-pickle%s (%sopencode%s)\n", cyan, reset, bold, reset, yellow, reset)
-	fmt.Printf(" ├─ %santhropic/claude_step_3.7_flash%s →  %sstep-3.7-flash%s (%snvidia%s)\n", cyan, reset, bold, reset, yellow, reset)
-	fmt.Printf(" ├─ %santhropic/claude_K_2%s            →  %skimi-k2.6%s (%snvidia%s)\n", cyan, reset, bold, reset, yellow, reset)
-	fmt.Printf(" └─ %santhropic/claude_M_2.6%s            →  %smimo-v2.5-free%s (%sopencode%s)\n\n", cyan, reset, bold, reset, yellow, reset)
+	// Routing mappings — read live from the loaded config so the dashboard
+	// always reflects config.json instead of stale hardcoded names.
+	fmt.Printf(" %sACTIVE MODELS & ROUTING%s\n", magenta, reset)
+	slots := orderedRoutes(cfg.Routes)
+	for i, slot := range slots {
+		branch := "├─"
+		if i == len(slots)-1 && cfg.Vision == nil {
+			branch = "└─"
+		}
+		r := cfg.Routes[slot]
+		fmt.Printf(" %s %s%-8s%s →  %s%s%s (%s%s%s)\n", branch, cyan, slot, reset, bold, r.Model, reset, yellow, r.Provider, reset)
+	}
+	if cfg.Vision != nil {
+		fmt.Printf(" └─ %s%-8s%s →  %s%s%s (%s%s%s)\n", cyan, "vision", reset, bold, cfg.Vision.Model, reset, yellow, cfg.Vision.Provider, reset)
+	}
+	fmt.Println()
 
 	// Live logs header
 	fmt.Printf(" %sLIVE REQ LOGS (LAST 15)%s\n", magenta, reset)
@@ -122,7 +157,7 @@ func drawDashboard(port int) {
 	fmt.Printf(" %s[C]%s Clear Logs   │   %s[R]%s Restart   │   %s[Q / Ctrl+C]%s Quit TUI\n", bold, reset, bold, reset, bold, reset)
 }
 
-func RunTUI(port int, stopChan chan bool) {
+func RunTUI(cfg *Config, stopChan chan bool) {
 	tuiActive = true
 	if err := setRawMode(true); err != nil {
 		fmt.Printf("Failed to set raw mode: %v\n", err)
@@ -131,7 +166,7 @@ func RunTUI(port int, stopChan chan bool) {
 	defer setRawMode(false)
 
 	defer fmt.Print("\033[?25h\033[H\033[2J") // Restore cursor, clear screen
-	fmt.Print("\033[?25l")                   // Hide cursor
+	fmt.Print("\033[?25l")                    // Hide cursor
 
 	keypressChan := make(chan string)
 	go readKeypresses(keypressChan)
@@ -140,7 +175,7 @@ func RunTUI(port int, stopChan chan bool) {
 	defer ticker.Stop()
 
 	for {
-		drawDashboard(port)
+		drawDashboard(cfg)
 
 		select {
 		case <-ticker.C:

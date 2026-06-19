@@ -1,8 +1,23 @@
 # acc
 
+[![CI](https://github.com/ATruePerson/acc/actions/workflows/ci.yml/badge.svg)](https://github.com/ATruePerson/acc/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/ATruePerson/acc.svg)](https://pkg.go.dev/github.com/ATruePerson/acc)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+
 Anthropic API → OpenAI-compatible proxy. Routes Claude SDK calls to
 third-party providers (NVIDIA NIM, Gemini, OpenRouter, OpenCode, ZAI) by
 translating message format, tool use, streaming, and images between protocols.
+
+Point Claude Code (or any Anthropic-SDK client) at acc, and your requests get
+re-routed to cheaper or alternative models without the client knowing the
+difference.
+
+## Dashboard
+
+Run with `-tui` for a live terminal dashboard showing active routes and
+per-request logs:
+
+![acc dashboard](docs/dashboard.png)
 
 ## Quick Start
 

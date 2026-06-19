@@ -94,10 +94,10 @@ func TestRouteFor(t *testing.T) {
 	}
 
 	testCases := []struct {
-		inputModel      string
-		expectedModel   string
-		expectedProv    string
-		expectedEffort  string
+		inputModel     string
+		expectedModel  string
+		expectedProv   string
+		expectedEffort string
 	}{
 		{"anthropic/claude_step_3.7_flash", "stepfun-ai/step-3.7-flash", "nvidia", "max"},
 		{"anthropic/stepfun-ai/step-3.7-flash", "stepfun-ai/step-3.7-flash", "nvidia", "max"},
@@ -130,4 +130,3 @@ func TestRouteFor(t *testing.T) {
 		}
 	}
 }
-

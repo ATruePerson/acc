@@ -1,0 +1,40 @@
+{
+  "port": 9999,
+  "system_prepend": "Always respond in English unless the user explicitly writes in another language.",
+  "providers": {
+    "nvidia": {
+      "base_url": "https://integrate.api.nvidia.com/v1",
+      "api_key": "${NVIDIA_NIM_API_KEY}"
+    },
+    "gemini": {
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "api_key": "${GEMINI_API_KEY}"
+    },
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key": "${OPENROUTER_API_KEY}"
+    },
+    "zai": {
+      "base_url": "https://api.z.ai/api/paas/v4",
+      "api_key": "${ZAI_API_KEY}"
+    },
+    "opencode": {
+      "base_url": "https://opencode.ai/zen/v1",
+      "api_key": "${OPENCODE_API_KEY}"
+    }
+  },
+  "routes": {
+    "opus":   { "provider": "nvidia",   "model": "z-ai/glm-5.1" },
+    "sonnet": { "provider": "opencode", "model": "big-pickle" },
+    "haiku":  { "provider": "nvidia",   "model": "stepfun-ai/step-3.7-flash" }
+  },
+  "vision": { "provider": "gemini", "model": "gemini-2.5-flash" },
+  "effort": {
+    "low":       { "budget": 2000,  "reasoning": "low" },
+    "medium":    { "budget": 6000,  "reasoning": "low" },
+    "high":      { "budget": 16000, "reasoning": "medium" },
+    "xhigh":     { "budget": 24000, "reasoning": "high" },
+    "max":       { "budget": 32000, "reasoning": "high" },
+    "ultracode": { "budget": 48000, "reasoning": "high" }
+  }
+}

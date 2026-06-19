@@ -1,0 +1,159 @@
+package main
+
+import "encoding/json"
+
+// ---------- Config ----------
+
+type Config struct {
+	Port      int                       `json:"port"`
+	Providers map[string]Provider       `json:"providers"`
+	Routes    map[string]Route          `json:"routes"`
+	// Vision route is used whenever a request contains an image, regardless
+	// of the requested model slot — so screenshots always hit a model with eyes.
+	Vision    *Route                    `json:"vision"`
+	Effort    map[string]EffortMap      `json:"effort"`
+	// SystemPrepend is prepended to every system prompt — use it to force
+	// behavior the upstream model otherwise ignores (e.g. respond in English).
+	SystemPrepend string `json:"system_prepend"`
+}
+
+type Provider struct {
+	BaseURL string `json:"base_url"`
+	APIKey  string `json:"api_key"`
+}
+
+type Route struct {
+	Provider        string `json:"provider"`
+	Model           string `json:"model"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+}
+
+type EffortMap struct {
+	Budget    int    `json:"budget"`
+	Reasoning string `json:"reasoning"`
+}
+
+// ---------- Anthropic request (front) ----------
+
+type AnthropicRequest struct {
+	Model     string             `json:"model"`
+	MaxTokens int                `json:"max_tokens"`
+	System    json.RawMessage    `json:"system,omitempty"` // string OR []block
+	Messages  []AnthropicMessage `json:"messages"`
+	Stream    bool               `json:"stream"`
+	Tools     []AnthropicTool    `json:"tools,omitempty"`
+	Thinking  *Thinking          `json:"thinking,omitempty"`
+	Temperature *float64         `json:"temperature,omitempty"`
+}
+
+type Thinking struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens"`
+}
+
+type AnthropicMessage struct {
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"` // string OR []block
+}
+
+type AnthropicBlock struct {
+	Type string `json:"type"`
+	// text
+	Text string `json:"text,omitempty"`
+	// image
+	Source *ImageSource `json:"source,omitempty"`
+	// tool_use
+	ID    string          `json:"id,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
+	// tool_result
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   json.RawMessage `json:"content,omitempty"`
+}
+
+type ImageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
+}
+
+type AnthropicTool struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema json.RawMessage `json:"input_schema"`
+}
+
+// ---------- OpenAI request (back) ----------
+
+type OpenAIRequest struct {
+	Model           string          `json:"model"`
+	MaxTokens       int             `json:"max_tokens,omitempty"`
+	Messages        []OpenAIMessage `json:"messages"`
+	Stream          bool            `json:"stream"`
+	Tools           []OpenAITool    `json:"tools,omitempty"`
+	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
+	Temperature     *float64        `json:"temperature,omitempty"`
+	StreamOptions   *StreamOptions  `json:"stream_options,omitempty"`
+}
+
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
+type OpenAIMessage struct {
+	Role       string           `json:"role"`
+	Content    json.RawMessage  `json:"content,omitempty"` // string OR []part
+	ToolCalls  []OpenAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
+}
+
+type OpenAIContentPart struct {
+	Type     string          `json:"type"`
+	Text     string          `json:"text,omitempty"`
+	ImageURL *OpenAIImageURL `json:"image_url,omitempty"`
+}
+
+type OpenAIImageURL struct {
+	URL string `json:"url"`
+}
+
+type OpenAITool struct {
+	Type     string         `json:"type"`
+	Function OpenAIFunction `json:"function"`
+}
+
+type OpenAIFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
+type OpenAIToolCall struct {
+	Index    int            `json:"index,omitempty"`
+	ID       string         `json:"id,omitempty"`
+	Type     string         `json:"type,omitempty"`
+	Function OpenAIFuncCall `json:"function"`
+}
+
+type OpenAIFuncCall struct {
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+}
+
+// ---------- OpenAI response (back) ----------
+
+type OpenAIResponse struct {
+	Choices []OpenAIChoice `json:"choices"`
+	Usage   *OpenAIUsage   `json:"usage,omitempty"`
+}
+
+type OpenAIChoice struct {
+	Delta        *OpenAIMessage `json:"delta,omitempty"`
+	Message      *OpenAIMessage `json:"message,omitempty"`
+	FinishReason string         `json:"finish_reason,omitempty"`
+}
+
+type OpenAIUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+}

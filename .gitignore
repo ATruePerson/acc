@@ -1,0 +1,17 @@
+# Binaries
+acc
+*.exe
+
+# Environment files (contain real API keys)
+.env
+.env.local
+
+# Go
+go.work
+go.work.sum
+
+# Editor
+*.swp
+*.swo
+*~
+.DS_Store

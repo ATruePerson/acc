@@ -1,0 +1,52 @@
+name: Release
+
+# Builds prebuilt binaries for macOS and Linux when a version tag is pushed,
+# and attaches them to a GitHub Release so users can install without Go.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: linux
+            goarch: amd64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          out="acc-${GOOS}-${GOARCH}"
+          go build -trimpath -ldflags "-s -w" -o "$out" .
+          tar -czf "${out}.tar.gz" "$out"
+          sha256sum "${out}.tar.gz" > "${out}.tar.gz.sha256"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            acc-*.tar.gz
+            acc-*.tar.gz.sha256
+          generate_release_notes: true

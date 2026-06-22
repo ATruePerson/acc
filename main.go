@@ -22,6 +22,12 @@ import (
 )
 
 func main() {
+	// Subcommands (setup, doctor, models, claude, help) run and exit before the
+	// flag-based server path.
+	if dispatch(os.Args) {
+		return
+	}
+
 	cfgPath := flag.String("config", "", "path to config.json")
 	envPath := flag.String("env", os.Getenv("HOME")+"/.config/acc/.env", "dotenv file with provider keys")
 	tuiFlag := flag.Bool("tui", false, "launch interactive TUI dashboard")

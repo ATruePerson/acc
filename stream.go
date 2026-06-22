@@ -12,7 +12,7 @@ import (
 // streamTranslate reads an OpenAI SSE stream and rewrites it as an
 // Anthropic SSE stream onto w, flushing each event so Claude Code renders
 // token-by-token (the "native feel").
-func streamTranslate(w http.ResponseWriter, body io.Reader, model string) int {
+func streamTranslate(w http.ResponseWriter, body io.Reader, model string) (int, int) {
 	flusher, _ := w.(http.Flusher)
 	send := func(event string, data map[string]any) {
 		b, _ := json.Marshal(data)
@@ -39,6 +39,7 @@ func streamTranslate(w http.ResponseWriter, body io.Reader, model string) int {
 	// map openai tool_call index -> anthropic block index
 	toolBlocks := map[int]int{}
 	stopReason := "end_turn"
+	inputTokens := 0
 	outputTokens := 0
 
 	closeText := func() {
@@ -65,7 +66,12 @@ func streamTranslate(w http.ResponseWriter, body io.Reader, model string) int {
 			continue
 		}
 		if chunk.Usage != nil {
-			outputTokens = chunk.Usage.CompletionTokens
+			if chunk.Usage.PromptTokens > 0 {
+				inputTokens = chunk.Usage.PromptTokens
+			}
+			if chunk.Usage.CompletionTokens > 0 {
+				outputTokens = chunk.Usage.CompletionTokens
+			}
 		}
 		if len(chunk.Choices) == 0 {
 			continue
@@ -129,8 +135,8 @@ func streamTranslate(w http.ResponseWriter, body io.Reader, model string) int {
 	send("message_delta", map[string]any{
 		"type":  "message_delta",
 		"delta": map[string]any{"stop_reason": stopReason, "stop_sequence": nil},
-		"usage": map[string]any{"output_tokens": outputTokens},
+		"usage": map[string]any{"input_tokens": inputTokens, "output_tokens": outputTokens},
 	})
 	send("message_stop", map[string]any{"type": "message_stop"})
-	return outputTokens
+	return inputTokens, outputTokens
 }

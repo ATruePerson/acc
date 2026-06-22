@@ -119,7 +119,7 @@ func translateMessage(m AnthropicMessage) ([]OpenAIMessage, error) {
 			raw, _ := json.Marshal(parts)
 			msg.Content = raw
 		}
-		out = append([]OpenAIMessage{msg}, out...)
+		out = append(out, msg)
 	}
 	return out, nil
 }
@@ -245,6 +245,19 @@ func bucketForBudget(budget int, cfg *Config) string {
 		return "low"
 	}
 	return best
+}
+
+// costFor estimates the USD cost of a request from configured per-1M-token
+// pricing. Returns 0 for free or unpriced models.
+func costFor(model string, in, out int, cfg *Config) float64 {
+	if cfg == nil {
+		return 0
+	}
+	p, ok := cfg.Pricing[model]
+	if !ok {
+		return 0
+	}
+	return float64(in)/1e6*p.InputPer1M + float64(out)/1e6*p.OutputPer1M
 }
 
 func jsonString(s string) json.RawMessage {

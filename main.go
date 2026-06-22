@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"regexp"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -114,7 +115,13 @@ type server struct {
 	http *http.Client
 }
 
+// maxRequestBytes caps the request body the proxy will buffer, so a runaway
+// or malicious client can't drive the process out of memory. Generous enough
+// for base64 image blocks.
+const maxRequestBytes = 32 << 20 // 32 MiB
+
 func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		httpErr(w, 400, "read body: "+err.Error())
@@ -127,38 +134,43 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	route, err := s.routeFor(ar.Model)
-	if err != nil {
-		httpErr(w, 400, err.Error())
+	budget := 0
+	if ar.Thinking != nil {
+		budget = ar.Thinking.BudgetTokens
+	}
+	// logit records one request to the TUI + persistent metrics log. Centralized
+	// so every exit path logs consistently instead of repeating the struct.
+	logit := func(routeModel string, status, in, out int, effort string) {
 		AddTUILog(LogEntry{
 			Timestamp: time.Now(),
 			Model:     ar.Model,
-			Route:     "error",
-			Status:    400,
+			Route:     routeModel,
+			Status:    status,
+			TokensIn:  in,
+			TokensOut: out,
+			Budget:    budget,
+			Effort:    effort,
+			CostUSD:   costFor(routeModel, in, out, s.cfg),
 		})
+	}
+
+	route, err := s.routeFor(ar.Model)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		logit("error", 400, 0, 0, "")
 		return
 	}
 	prov, ok := s.cfg.Providers[route.Provider]
 	if !ok {
 		httpErr(w, 500, "unknown provider: "+route.Provider)
-		AddTUILog(LogEntry{
-			Timestamp: time.Now(),
-			Model:     ar.Model,
-			Route:     route.Model,
-			Status:    500,
-		})
+		logit(route.Model, 500, 0, 0, "")
 		return
 	}
 
 	or, err := translateRequest(&ar, route, s.cfg)
 	if err != nil {
 		httpErr(w, 400, "translate: "+err.Error())
-		AddTUILog(LogEntry{
-			Timestamp: time.Now(),
-			Model:     ar.Model,
-			Route:     route.Model,
-			Status:    400,
-		})
+		logit(route.Model, 400, 0, 0, "")
 		return
 	}
 
@@ -166,12 +178,7 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	upstream, err := http.NewRequestWithContext(r.Context(), "POST", prov.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		httpErr(w, 500, err.Error())
-		AddTUILog(LogEntry{
-			Timestamp: time.Now(),
-			Model:     ar.Model,
-			Route:     route.Model,
-			Status:    500,
-		})
+		logit(route.Model, 500, 0, 0, or.ReasoningEffort)
 		return
 	}
 	upstream.Header.Set("Content-Type", "application/json")
@@ -180,12 +187,7 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.http.Do(upstream)
 	if err != nil {
 		httpErr(w, 502, "upstream: "+err.Error())
-		AddTUILog(LogEntry{
-			Timestamp: time.Now(),
-			Model:     ar.Model,
-			Route:     route.Model,
-			Status:    502,
-		})
+		logit(route.Model, 502, 0, 0, or.ReasoningEffort)
 		return
 	}
 	defer resp.Body.Close()
@@ -194,12 +196,7 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(resp.Body)
 		log.Printf("upstream %d for model=%s->%s/%s: %s", resp.StatusCode, ar.Model, route.Provider, route.Model, truncate(string(b), 500))
 		httpErr(w, resp.StatusCode, fmt.Sprintf("upstream %s/%s: %s", route.Provider, route.Model, truncate(string(b), 300)))
-		AddTUILog(LogEntry{
-			Timestamp: time.Now(),
-			Model:     ar.Model,
-			Route:     route.Model,
-			Status:    resp.StatusCode,
-		})
+		logit(route.Model, resp.StatusCode, 0, 0, or.ReasoningEffort)
 		return
 	}
 
@@ -207,15 +204,8 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-		outTokens := streamTranslate(w, resp.Body, ar.Model)
-		AddTUILog(LogEntry{
-			Timestamp: time.Now(),
-			Model:     ar.Model,
-			Route:     route.Model,
-			Status:    resp.StatusCode,
-			TokensIn:  0,
-			TokensOut: outTokens,
-		})
+		inTokens, outTokens := streamTranslate(w, resp.Body, ar.Model)
+		logit(route.Model, resp.StatusCode, inTokens, outTokens, or.ReasoningEffort)
 		return
 	}
 
@@ -223,41 +213,42 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	b, _ := io.ReadAll(resp.Body)
 	if err := json.Unmarshal(b, &oresp); err != nil {
 		httpErr(w, 502, "parse upstream: "+err.Error())
-		AddTUILog(LogEntry{
-			Timestamp: time.Now(),
-			Model:     ar.Model,
-			Route:     route.Model,
-			Status:    502,
-		})
+		logit(route.Model, 502, 0, 0, or.ReasoningEffort)
 		return
 	}
 	out := translateResponse(&oresp, ar.Model)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(out)
 
-	tokensIn := 0
-	tokensOut := 0
+	tokensIn, tokensOut := 0, 0
 	if oresp.Usage != nil {
 		tokensIn = oresp.Usage.PromptTokens
 		tokensOut = oresp.Usage.CompletionTokens
 	}
-	AddTUILog(LogEntry{
-		Timestamp: time.Now(),
-		Model:     ar.Model,
-		Route:     route.Model,
-		Status:    resp.StatusCode,
-		TokensIn:  tokensIn,
-		TokensOut: tokensOut,
-	})
+	logit(route.Model, resp.StatusCode, tokensIn, tokensOut, or.ReasoningEffort)
 }
 
 func (s *server) handleModels(w http.ResponseWriter, r *http.Request) {
-	ids := []string{
-		"anthropic/opencode/big-pickle",
-		"anthropic/claude_step_3.7_flash",
-		"anthropic/claude_K_2",
-		"anthropic/claude_M_2.6",
+	// Advertise the canonical catalog IDs plus any config aliases, so the list
+	// Claude Code sees always matches what routeFor actually accepts.
+	seen := map[string]bool{}
+	var ids []string
+	add := func(id string) {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
 	}
+	for _, d := range modelCatalog() {
+		add("anthropic/" + d.Canonical)
+	}
+	if s.cfg != nil {
+		for k := range s.cfg.Aliases {
+			add("anthropic/" + normalizeModelID(k))
+		}
+	}
+	sort.Strings(ids)
+
 	var data []map[string]any
 	for _, id := range ids {
 		data = append(data, map[string]any{
@@ -269,23 +260,58 @@ func (s *server) handleModels(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"data": data, "has_more": false})
 }
 
-func (s *server) routeFor(model string) (Route, error) {
-	cleanModel := strings.TrimPrefix(model, "anthropic/")
-	normalizedModel := strings.ToLower(strings.ReplaceAll(cleanModel, "_", "-"))
+// normalizeModelID strips the "anthropic/" prefix and normalizes separators so
+// "anthropic/claude_K_2" and "claude-k-2" resolve to the same alias key.
+func normalizeModelID(model string) string {
+	clean := strings.TrimPrefix(model, "anthropic/")
+	return strings.ToLower(strings.ReplaceAll(clean, "_", "-"))
+}
 
-	switch normalizedModel {
-	case "claude-tencent-hy3-preview":
-		return Route{Provider: "openrouter", Model: "tencent/hy3-preview"}, nil
-	case "claude-big-pickle", "opencode/big-pickle":
-		return Route{Provider: "opencode", Model: "big-pickle", ReasoningEffort: "high"}, nil
-	case "claude-mimo-v2.5-free", "opencode/mimo-v2.5-free", "claude-m-2.6":
-		return Route{Provider: "opencode", Model: "mimo-v2.5-free", ReasoningEffort: "high"}, nil
-	case "claude-step-3.7-flash", "stepfun-ai/step-3.7-flash", "stepfun-ai-step-3.7-flash", "stepfun-ai-step-3-7-flash", "stepfun_ai_step_3.7_flash":
-		return Route{Provider: "nvidia", Model: "stepfun-ai/step-3.7-flash", ReasoningEffort: "max"}, nil
-	case "claude-kimi-k2", "claude-kim-2", "claude-k-2":
-		return Route{Provider: "nvidia", Model: "moonshotai/kimi-k2.6", ReasoningEffort: "high"}, nil
-	case "claude-nemotron-ultra":
-		return Route{Provider: "nvidia", Model: "nvidia/nemotron-3-ultra-550b-a55b"}, nil
+// modelDef is one catalog entry: a canonical ID, accepted aliases, and the
+// route they resolve to.
+type modelDef struct {
+	Canonical string
+	Aliases   []string
+	Route     Route
+}
+
+// modelCatalog is the built-in routing table. Keys must already be normalized
+// (lowercase, underscores as dashes). Config aliases overlay these at runtime.
+func modelCatalog() []modelDef {
+	return []modelDef{
+		{"claude-tencent-hy3-preview", nil, Route{Provider: "openrouter", Model: "tencent/hy3-preview"}},
+		{"claude-pickle", []string{"claude-big-pickle", "opencode/big-pickle", "claude-pick"}, Route{Provider: "opencode", Model: "big-pickle", ReasoningEffort: "high"}},
+		{"claude-mimo", []string{"claude-mimo-v2.5-free", "opencode/mimo-v2.5-free", "claude-m-2.6", "claude-mim"}, Route{Provider: "opencode", Model: "mimo-v2.5-free", ReasoningEffort: "high"}},
+		{"claude-step", []string{"claude-step-3.7-flash", "stepfun-ai/step-3.7-flash", "stepfun-ai-step-3.7-flash", "stepfun-ai-step-3-7-flash"}, Route{Provider: "nvidia", Model: "stepfun-ai/step-3.7-flash", ReasoningEffort: "max"}},
+		{"claude-kimi", []string{"claude-kimi-k2", "claude-kim-2", "claude-k-2", "claude-kim"}, Route{Provider: "nvidia", Model: "moonshotai/kimi-k2.6", ReasoningEffort: "high"}},
+		{"claude-nemotron-ultra", nil, Route{Provider: "nvidia", Model: "nvidia/nemotron-3-ultra-550b-a55b"}},
+		{"claude-glm", []string{"claude-opus", "claude-gl"}, Route{Provider: "nvidia", Model: "z-ai/glm-5.1", ReasoningEffort: "high"}},
+	}
+}
+
+// effectiveAliases merges the built-in catalog with config aliases. Config
+// entries win, so users can override a built-in route without recompiling.
+func (s *server) effectiveAliases() map[string]Route {
+	m := map[string]Route{}
+	for _, d := range modelCatalog() {
+		m[d.Canonical] = d.Route
+		for _, a := range d.Aliases {
+			m[a] = d.Route
+		}
+	}
+	if s.cfg != nil {
+		for k, r := range s.cfg.Aliases {
+			m[normalizeModelID(k)] = r
+		}
+	}
+	return m
+}
+
+func (s *server) routeFor(model string) (Route, error) {
+	normalizedModel := normalizeModelID(model)
+
+	if r, ok := s.effectiveAliases()[normalizedModel]; ok {
+		return r, nil
 	}
 
 	if parts := strings.SplitN(model, "/", 3); len(parts) == 3 {
@@ -294,9 +320,8 @@ func (s *server) routeFor(model string) (Route, error) {
 		}
 	}
 
-	m := strings.ToLower(normalizedModel)
 	for _, fam := range []string{"opus", "sonnet", "haiku"} {
-		if strings.Contains(m, fam) {
+		if strings.Contains(normalizedModel, fam) {
 			if r, ok := s.cfg.Routes[fam]; ok {
 				return r, nil
 			}
@@ -328,11 +353,6 @@ func validateConfig(cfg *Config) error {
 	for slot, route := range cfg.Routes {
 		if _, ok := cfg.Providers[route.Provider]; !ok {
 			return fmt.Errorf("route %q: provider %q not defined", slot, route.Provider)
-		}
-	}
-	if cfg.Vision != nil {
-		if _, ok := cfg.Providers[cfg.Vision.Provider]; !ok {
-			return fmt.Errorf("vision route: provider %q not defined", cfg.Vision.Provider)
 		}
 	}
 	for name, e := range cfg.Effort {

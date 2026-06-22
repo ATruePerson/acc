@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,6 +17,9 @@ type LogEntry struct {
 	Status    int
 	TokensIn  int
 	TokensOut int
+	Budget    int
+	Effort    string
+	CostUSD   float64
 }
 
 var (
@@ -31,6 +35,36 @@ func AddTUILog(entry LogEntry) {
 	tuiLogs = append(tuiLogs, entry)
 	if len(tuiLogs) > 15 {
 		tuiLogs = tuiLogs[1:]
+	}
+
+	f, err := os.OpenFile("/Users/kabir/acc/test_runs.jsonl", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err == nil {
+		defer f.Close()
+		type jLine struct {
+			Timestamp string  `json:"timestamp"`
+			Model     string  `json:"model"`
+			Route     string  `json:"route"`
+			Status    int     `json:"status"`
+			TokensIn  int     `json:"tokens_in"`
+			TokensOut int     `json:"tokens_out"`
+			Budget    int     `json:"budget"`
+			Effort    string  `json:"effort"`
+			CostUSD   float64 `json:"cost_usd"`
+		}
+		row := jLine{
+			Timestamp: entry.Timestamp.Format(time.RFC3339),
+			Model:     entry.Model,
+			Route:     entry.Route,
+			Status:    entry.Status,
+			TokensIn:  entry.TokensIn,
+			TokensOut: entry.TokensOut,
+			Budget:    entry.Budget,
+			Effort:    entry.Effort,
+			CostUSD:   entry.CostUSD,
+		}
+		if b, err := json.Marshal(row); err == nil {
+			f.Write(append(b, '\n'))
+		}
 	}
 }
 
@@ -108,14 +142,11 @@ func drawDashboard(cfg *Config) {
 	slots := orderedRoutes(cfg.Routes)
 	for i, slot := range slots {
 		branch := "├─"
-		if i == len(slots)-1 && cfg.Vision == nil {
+		if i == len(slots)-1 {
 			branch = "└─"
 		}
 		r := cfg.Routes[slot]
 		fmt.Printf(" %s %s%-8s%s →  %s%s%s (%s%s%s)\n", branch, cyan, slot, reset, bold, r.Model, reset, yellow, r.Provider, reset)
-	}
-	if cfg.Vision != nil {
-		fmt.Printf(" └─ %s%-8s%s →  %s%s%s (%s%s%s)\n", cyan, "vision", reset, bold, cfg.Vision.Model, reset, yellow, cfg.Vision.Provider, reset)
 	}
 	fmt.Println()
 
@@ -136,12 +167,17 @@ func drawDashboard(cfg *Config) {
 				statusStr = fmt.Sprintf("%s%d OK%s", green, log.Status, reset)
 			}
 			timeStr := log.Timestamp.Format("15:04:05")
-			fmt.Printf("  [%s%s%s] %s%-32s%s → %s%-20s%s │ %s │ In:%-4d Out:%-4d\n",
+			costStr := ""
+			if log.CostUSD > 0 {
+				costStr = fmt.Sprintf(" │ %s$%.4f%s", green, log.CostUSD, reset)
+			}
+			fmt.Printf("  [%s%s%s] %s%-32s%s → %s%-20s%s │ %s │ In:%-4d Out:%-4d%s\n",
 				gray, timeStr, reset,
 				bold, log.Model, reset,
 				yellow, log.Route, reset,
 				statusStr,
 				log.TokensIn, log.TokensOut,
+				costStr,
 			)
 		}
 	}

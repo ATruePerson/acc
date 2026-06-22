@@ -28,7 +28,13 @@
     "sonnet": { "provider": "opencode", "model": "big-pickle" },
     "haiku":  { "provider": "nvidia",   "model": "stepfun-ai/step-3.7-flash" }
   },
-  "vision": { "provider": "gemini", "model": "gemini-2.5-flash" },
+  "aliases": {
+    "claude-fast": { "provider": "nvidia", "model": "stepfun-ai/step-3.7-flash", "reasoning_effort": "low" }
+  },
+  "pricing": {
+    "z-ai/glm-5.1":         { "input_per_1m": 0.0, "output_per_1m": 0.0 },
+    "moonshotai/kimi-k2.6": { "input_per_1m": 0.0, "output_per_1m": 0.0 }
+  },
   "effort": {
     "low":       { "budget": 2000,  "reasoning": "low" },
     "medium":    { "budget": 6000,  "reasoning": "low" },

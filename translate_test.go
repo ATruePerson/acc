@@ -83,6 +83,75 @@ func TestToolResultBecomesToolMessage(t *testing.T) {
 	}
 }
 
+func TestToolResultAndTextOrder(t *testing.T) {
+	content := `[
+		{"type":"tool_result","tool_use_id":"call_1","content":"42"},
+		{"type":"text","text":"continue"}
+	]`
+	msgs, err := translateMessage(AnthropicMessage{Role: "user", Content: json.RawMessage(content)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+	if msgs[0].Role != "tool" || msgs[0].ToolCallID != "call_1" {
+		t.Errorf("first message should be the tool response, got %+v", msgs[0])
+	}
+	if msgs[1].Role != "user" || string(msgs[1].Content) != `"continue"` {
+		t.Errorf("second message should be the user text, got %+v", msgs[1])
+	}
+}
+
+func TestConfigAliasOverridesAndExtends(t *testing.T) {
+	s := &server{cfg: &Config{
+		Providers: map[string]Provider{
+			"nvidia":   {BaseURL: "x", APIKey: "k"},
+			"opencode": {BaseURL: "y", APIKey: "k"},
+		},
+		Aliases: map[string]Route{
+			// new alias not in the built-in catalog
+			"claude-fast": {Provider: "nvidia", Model: "stepfun-ai/step-3.7-flash", ReasoningEffort: "low"},
+			// override a built-in canonical
+			"claude_GLM": {Provider: "opencode", Model: "big-pickle", ReasoningEffort: "medium"},
+		},
+	}}
+
+	fast, err := s.routeFor("anthropic/claude-fast")
+	if err != nil || fast.Model != "stepfun-ai/step-3.7-flash" || fast.ReasoningEffort != "low" {
+		t.Fatalf("claude-fast routed to %+v, err %v", fast, err)
+	}
+
+	glm, err := s.routeFor("claude-glm")
+	if err != nil || glm.Provider != "opencode" || glm.Model != "big-pickle" {
+		t.Fatalf("config override failed, got %+v err %v", glm, err)
+	}
+}
+
+func TestCostFor(t *testing.T) {
+	cfg := &Config{Pricing: map[string]ModelPrice{
+		"paid/model": {InputPer1M: 2.0, OutputPer1M: 6.0},
+	}}
+	// 1M in @ $2 + 1M out @ $6 = $8
+	if got := costFor("paid/model", 1_000_000, 1_000_000, cfg); got != 8.0 {
+		t.Fatalf("cost = %v, want 8.0", got)
+	}
+	if got := costFor("free/model", 1_000_000, 1_000_000, cfg); got != 0 {
+		t.Fatalf("unpriced model cost = %v, want 0", got)
+	}
+}
+
+func TestCatalogModelsAllRoute(t *testing.T) {
+	s := &server{cfg: &Config{Providers: map[string]Provider{
+		"nvidia": {}, "opencode": {}, "openrouter": {},
+	}}}
+	for _, d := range modelCatalog() {
+		if _, err := s.routeFor("anthropic/" + d.Canonical); err != nil {
+			t.Errorf("catalog canonical %q does not route: %v", d.Canonical, err)
+		}
+	}
+}
+
 func TestRouteFor(t *testing.T) {
 	s := &server{
 		cfg: &Config{
@@ -107,11 +176,19 @@ func TestRouteFor(t *testing.T) {
 
 		// Manual overrides tests
 		{"anthropic/opencode/big-pickle", "big-pickle", "opencode", "high"},
+		{"anthropic/claude-pickle", "big-pickle", "opencode", "high"},
 		{"claude-mimo-v2.5-free", "mimo-v2.5-free", "opencode", "high"},
 		{"anthropic/opencode/mimo-v2.5-free", "mimo-v2.5-free", "opencode", "high"},
 		{"anthropic/claude_M_2.6", "mimo-v2.5-free", "opencode", "high"},
+		{"anthropic/claude-mimo", "mimo-v2.5-free", "opencode", "high"},
+		{"anthropic/claude-mim", "mimo-v2.5-free", "opencode", "high"},
 		{"anthropic/claude-kim-2", "moonshotai/kimi-k2.6", "nvidia", "high"},
 		{"anthropic/claude_K_2", "moonshotai/kimi-k2.6", "nvidia", "high"},
+		{"anthropic/claude-kimi", "moonshotai/kimi-k2.6", "nvidia", "high"},
+		{"anthropic/claude-kim", "moonshotai/kimi-k2.6", "nvidia", "high"},
+		{"anthropic/claude-step", "stepfun-ai/step-3.7-flash", "nvidia", "max"},
+		{"anthropic/claude-glm", "z-ai/glm-5.1", "nvidia", "high"},
+		{"anthropic/claude-gl", "z-ai/glm-5.1", "nvidia", "high"},
 	}
 
 	for _, tc := range testCases {

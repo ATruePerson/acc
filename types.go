@@ -5,16 +5,26 @@ import "encoding/json"
 // ---------- Config ----------
 
 type Config struct {
-	Port      int                 `json:"port"`
-	Providers map[string]Provider `json:"providers"`
-	Routes    map[string]Route    `json:"routes"`
-	// Vision route is used whenever a request contains an image, regardless
-	// of the requested model slot — so screenshots always hit a model with eyes.
-	Vision *Route               `json:"vision"`
-	Effort map[string]EffortMap `json:"effort"`
+	Port      int                  `json:"port"`
+	Providers map[string]Provider  `json:"providers"`
+	Routes    map[string]Route     `json:"routes"`
+	Effort    map[string]EffortMap `json:"effort"`
+	// Aliases maps a friendly model ID to a concrete route. These overlay the
+	// built-in catalog (see modelCatalog), so adding or overriding a route is a
+	// config edit + restart, not a recompile.
+	Aliases map[string]Route `json:"aliases,omitempty"`
+	// Pricing maps an upstream model name to its USD price per 1M tokens, used
+	// to estimate per-request cost in the metrics log. Omit or zero for free
+	// providers.
+	Pricing map[string]ModelPrice `json:"pricing,omitempty"`
 	// SystemPrepend is prepended to every system prompt — use it to force
 	// behavior the upstream model otherwise ignores (e.g. respond in English).
 	SystemPrepend string `json:"system_prepend"`
+}
+
+type ModelPrice struct {
+	InputPer1M  float64 `json:"input_per_1m"`
+	OutputPer1M float64 `json:"output_per_1m"`
 }
 
 type Provider struct {

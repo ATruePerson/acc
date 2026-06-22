@@ -15,7 +15,7 @@ func TestStreamTextTranslation(t *testing.T) {
 	}, "\n\n")
 
 	w := httptest.NewRecorder()
-	streamTranslate(w, strings.NewReader(openaiSSE), "claude-opus-4-8")
+	_, _ = streamTranslate(w, strings.NewReader(openaiSSE), "claude-opus-4-8")
 	out := w.Body.String()
 
 	for _, want := range []string{

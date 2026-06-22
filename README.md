@@ -19,18 +19,38 @@ per-request logs:
 
 ![acc dashboard](docs/dashboard.png)
 
-## Quick Start
+## Quick Start (no toolchain needed)
 
 ```bash
-# 1. Copy and configure
-cp .env.example .env
-# fill in API keys
+# 1. Install (downloads a prebuilt binary to ~/.local/bin)
+curl -fsSL https://raw.githubusercontent.com/ATruePerson/acc/main/install.sh | sh
 
-# 2. Run
-go run . -config config.json
+# 2. Set up — pick providers, paste keys, writes config for you
+acc setup
 
-# 3. Point Claude Code at it
-export ANTHROPIC_BASE_URL=http://localhost:9999
+# 3. Launch Claude Code through acc
+acc claude
+```
+
+That's it. `acc setup` asks which providers you have keys for and writes
+`~/.config/acc/.env` + `config.json`. `acc claude` starts the proxy and opens
+Claude Code already pointed at it — no environment variables to remember.
+
+### Commands
+
+| Command            | What it does                                          |
+| ------------------ | ----------------------------------------------------- |
+| `acc setup`        | First-time setup: pick providers, paste keys          |
+| `acc doctor`       | Test that your keys actually work (✅ / ❌ per provider) |
+| `acc models`       | List the model names you can use and where they route |
+| `acc claude [...]` | Start the proxy and launch Claude Code through it      |
+| `acc` / `acc -tui` | Run the proxy directly (`-tui` for the dashboard)      |
+
+### From source
+
+```bash
+go install github.com/ATruePerson/acc@latest   # or: go run . -config config.json
+export ANTHROPIC_BASE_URL=http://localhost:9999 # if not using `acc claude`
 ```
 
 The `-env` flag loads a dotenv file (default `~/.config/acc/.env`).

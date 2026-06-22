@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -43,10 +43,29 @@ jobs:
           tar -czf "${out}.tar.gz" "$out"
           sha256sum "${out}.tar.gz" > "${out}.tar.gz.sha256"
 
-      - name: Upload to release
-        uses: softprops/action-gh-release@v2
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
         with:
-          files: |
+          name: acc-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
             acc-*.tar.gz
             acc-*.tar.gz.sha256
+          retention-days: 1
+
+  # Single release job avoids the matrix all racing to create the same
+  # release at once (which dropped an asset on the first v0.1.0 run).
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
           generate_release_notes: true

@@ -72,6 +72,29 @@ func TestSystemPromptBecomesFirstMessage(t *testing.T) {
 	}
 }
 
+func TestRouteSystemPrependOverridesGlobal(t *testing.T) {
+	ar := &AnthropicRequest{
+		Model:    "x",
+		System:   json.RawMessage(`"base"`),
+		Messages: []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	}
+	cfg := testCfg()
+	cfg.SystemPrepend = "GLOBAL"
+	route := Route{Model: "x", SystemPrepend: "I am Claude Fable 5."}
+	or, _ := translateRequest(ar, route, cfg)
+
+	sys := string(or.Messages[0].Content)
+	if !strings.Contains(sys, "I am Claude Fable 5.") {
+		t.Fatalf("route prepend missing from system: %s", sys)
+	}
+	if strings.Contains(sys, "GLOBAL") {
+		t.Fatalf("global prepend should be overridden, got: %s", sys)
+	}
+	if !strings.Contains(sys, "base") {
+		t.Fatalf("original system text dropped: %s", sys)
+	}
+}
+
 func TestToolResultBecomesToolMessage(t *testing.T) {
 	content := `[{"type":"tool_result","tool_use_id":"call_1","content":"42"}]`
 	msgs, err := translateMessage(AnthropicMessage{Role: "user", Content: json.RawMessage(content)})
@@ -168,27 +191,31 @@ func TestRouteFor(t *testing.T) {
 		expectedProv   string
 		expectedEffort string
 	}{
-		{"anthropic/claude_step_3.7_flash", "stepfun-ai/step-3.7-flash", "nvidia", "max"},
-		{"anthropic/stepfun-ai/step-3.7-flash", "stepfun-ai/step-3.7-flash", "nvidia", "max"},
-		{"anthropic/stepfun_ai_step_3.7_flash", "stepfun-ai/step-3.7-flash", "nvidia", "max"},
-		{"stepfun-ai/step-3.7-flash", "stepfun-ai/step-3.7-flash", "nvidia", "max"},
-		{"stepfun_ai_step_3.7_flash", "stepfun-ai/step-3.7-flash", "nvidia", "max"},
+		{"anthropic/claude_step_3.7_flash", "deepseek-ai/deepseek-v4-flash", "nvidia", ""},
+		{"anthropic/stepfun-ai/step-3.7-flash", "deepseek-ai/deepseek-v4-flash", "nvidia", ""},
+		{"anthropic/stepfun_ai_step_3.7_flash", "deepseek-ai/deepseek-v4-flash", "nvidia", ""},
+		{"stepfun-ai/step-3.7-flash", "deepseek-ai/deepseek-v4-flash", "nvidia", ""},
+		{"stepfun_ai_step_3.7_flash", "deepseek-ai/deepseek-v4-flash", "nvidia", ""},
 
 		// Manual overrides tests
 		{"anthropic/opencode/big-pickle", "big-pickle", "opencode", "high"},
 		{"anthropic/claude-pickle", "big-pickle", "opencode", "high"},
-		{"claude-mimo-v2.5-free", "mimo-v2.5-free", "opencode", "high"},
-		{"anthropic/opencode/mimo-v2.5-free", "mimo-v2.5-free", "opencode", "high"},
-		{"anthropic/claude_M_2.6", "mimo-v2.5-free", "opencode", "high"},
-		{"anthropic/claude-mimo", "mimo-v2.5-free", "opencode", "high"},
-		{"anthropic/claude-mim", "mimo-v2.5-free", "opencode", "high"},
+		{"claude-nemotron-3-ultra-free", "nemotron-3-ultra-free", "opencode", "high"},
+		{"anthropic/opencode/nemotron-3-ultra-free", "nemotron-3-ultra-free", "opencode", "high"},
+		{"anthropic/claude-nemotron-3-ultra", "nemotron-3-ultra-free", "opencode", "high"},
+		{"anthropic/claude-ultra", "nemotron-3-ultra-free", "opencode", "high"},
+		{"anthropic/claude-ultra-free", "nemotron-3-ultra-free", "opencode", "high"},
 		{"anthropic/claude-kim-2", "moonshotai/kimi-k2.6", "nvidia", "high"},
 		{"anthropic/claude_K_2", "moonshotai/kimi-k2.6", "nvidia", "high"},
 		{"anthropic/claude-kimi", "moonshotai/kimi-k2.6", "nvidia", "high"},
 		{"anthropic/claude-kim", "moonshotai/kimi-k2.6", "nvidia", "high"},
-		{"anthropic/claude-step", "stepfun-ai/step-3.7-flash", "nvidia", "max"},
+		{"anthropic/claude-step", "deepseek-ai/deepseek-v4-flash", "nvidia", ""},
 		{"anthropic/claude-glm", "z-ai/glm-5.1", "nvidia", "high"},
 		{"anthropic/claude-gl", "z-ai/glm-5.1", "nvidia", "high"},
+		{"anthropic/claude-minimax", "minimaxai/minimax-m3", "nvidia", "high"},
+		{"anthropic/claude-deepseek-v4", "deepseek-ai/deepseek-v4-pro", "nvidia", "high"},
+		{"anthropic/claude-mini", "minimaxai/minimax-m3", "nvidia", "high"},
+		{"anthropic/claude-deep", "deepseek-ai/deepseek-v4-pro", "nvidia", "high"},
 	}
 
 	for _, tc := range testCases {
@@ -204,6 +231,30 @@ func TestRouteFor(t *testing.T) {
 		}
 		if route.ReasoningEffort != tc.expectedEffort {
 			t.Errorf("routeFor(%s) returned reasoning_effort %q, want %s", tc.inputModel, route.ReasoningEffort, tc.expectedEffort)
+		}
+	}
+}
+
+func TestSanitizeReasoningEffort(t *testing.T) {
+	testCases := []struct {
+		provider string
+		effort   string
+		expected string
+	}{
+		{"opencode", "ultracode", "max"},
+		{"opencode", "max", "max"},
+		{"opencode", "high", "high"},
+		{"nvidia", "ultracode", "high"},
+		{"nvidia", "max", "high"},
+		{"nvidia", "medium", "medium"},
+		{"gemini", "xhigh", "high"},
+		{"random", "ultracode", "ultracode"}, // unknown provider gets returned as is
+	}
+
+	for _, tc := range testCases {
+		got := sanitizeReasoningEffort(tc.provider, tc.effort)
+		if got != tc.expected {
+			t.Errorf("sanitizeReasoningEffort(%q, %q) = %q, want %q", tc.provider, tc.effort, got, tc.expected)
 		}
 	}
 }

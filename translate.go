@@ -18,8 +18,12 @@ func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRe
 
 	// system prompt -> leading system message (with optional prepend)
 	sys := decodeSystem(ar.System)
-	if cfg.SystemPrepend != "" {
-		sys = cfg.SystemPrepend + "\n\n" + sys
+	prepend := cfg.SystemPrepend
+	if route.SystemPrepend != "" {
+		prepend = route.SystemPrepend // per-route overrides the global prepend
+	}
+	if prepend != "" {
+		sys = prepend + "\n\n" + sys
 	}
 	if sys != "" {
 		or.Messages = append(or.Messages, OpenAIMessage{
@@ -53,6 +57,9 @@ func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRe
 		or.ReasoningEffort = bucketForBudget(ar.Thinking.BudgetTokens, cfg)
 	} else if route.ReasoningEffort != "" {
 		or.ReasoningEffort = route.ReasoningEffort
+	}
+	if or.ReasoningEffort != "" {
+		or.ReasoningEffort = sanitizeReasoningEffort(route.Provider, or.ReasoningEffort)
 	}
 
 	if ar.Stream {
@@ -263,4 +270,34 @@ func costFor(model string, in, out int, cfg *Config) float64 {
 func jsonString(s string) json.RawMessage {
 	b, _ := json.Marshal(s)
 	return b
+}
+
+func sanitizeReasoningEffort(provider string, effort string) string {
+	if effort == "" {
+		return ""
+	}
+	switch provider {
+	case "opencode":
+		// opencode expects one of high, low, medium, max, xhigh
+		switch effort {
+		case "low", "medium", "high", "max", "xhigh":
+			return effort
+		case "ultracode":
+			return "max" // fallback to max
+		default:
+			return "high"
+		}
+	case "nvidia", "gemini", "zai", "openrouter":
+		// standard OpenAI/Nvidia/etc usually expects low, medium, high
+		switch effort {
+		case "low", "medium", "high":
+			return effort
+		case "max", "xhigh", "ultracode":
+			return "high" // fallback to high
+		default:
+			return "high"
+		}
+	default:
+		return effort
+	}
 }

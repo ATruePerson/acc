@@ -181,22 +181,57 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body, _ := json.Marshal(or)
-	upstream, err := http.NewRequestWithContext(r.Context(), "POST", prov.BaseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		httpErr(w, 500, err.Error())
-		logit(route.Model, 500, 0, 0, or.ReasoningEffort)
-		return
-	}
-	upstream.Header.Set("Content-Type", "application/json")
-	upstream.Header.Set("Authorization", "Bearer "+prov.APIKey)
 
-	resp, err := s.http.Do(upstream)
-	if err != nil {
-		httpErr(w, 502, "upstream: "+err.Error())
-		logit(route.Model, 502, 0, 0, or.ReasoningEffort)
-		return
+	var resp *http.Response
+	for attempt := 1; attempt <= 10; attempt++ {
+		var err error
+		upstream, err := http.NewRequestWithContext(r.Context(), "POST", prov.BaseURL+"/chat/completions", bytes.NewReader(body))
+		if err != nil {
+			httpErr(w, 500, err.Error())
+			logit(route.Model, 500, 0, 0, or.ReasoningEffort)
+			return
+		}
+		upstream.Header.Set("Content-Type", "application/json")
+		upstream.Header.Set("Authorization", "Bearer "+prov.APIKey)
+
+		resp, err = s.http.Do(upstream)
+		if err != nil {
+			httpErr(w, 502, "upstream: "+err.Error())
+			logit(route.Model, 502, 0, 0, or.ReasoningEffort)
+			return
+		}
+
+		if (resp.StatusCode == 429 || resp.StatusCode == 503) && attempt < 10 {
+			// Exponential backoff with jitter
+			baseInt := 1 << attempt
+			base := float64(baseInt)
+			// Add 0-50% jitter
+			jitter := base * 0.5 * (float64(time.Now().UnixNano()%1000) / 1000.0)
+			sleepSecs := base + jitter
+			if sleepSecs > 30 {
+				sleepSecs = 30
+			}
+			sleepDuration := time.Duration(sleepSecs * float64(time.Second))
+
+			log.Printf("upstream %d for model=%s->%s/%s: retrying in %v (attempt %d/10)", resp.StatusCode, ar.Model, route.Provider, route.Model, sleepDuration.Round(100*time.Millisecond), attempt)
+			resp.Body.Close()
+
+			select {
+			case <-r.Context().Done():
+				log.Printf("client disconnected during retry backoff for model=%s", ar.Model)
+				return
+			case <-time.After(sleepDuration):
+			}
+			continue
+		}
+		break
 	}
-	defer resp.Body.Close()
+
+	defer func() {
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
+		}
+	}()
 
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
@@ -235,8 +270,8 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleModels(w http.ResponseWriter, r *http.Request) {
-	// Advertise the canonical catalog IDs plus any config aliases, so the list
-	// Claude Code sees always matches what routeFor actually accepts.
+	// Advertise only the specific premium models matching user's Claude UI configuration,
+	// plus any explicit config aliases.
 	seen := map[string]bool{}
 	var ids []string
 	add := func(id string) {
@@ -245,9 +280,11 @@ func (s *server) handleModels(w http.ResponseWriter, r *http.Request) {
 			ids = append(ids, id)
 		}
 	}
-	for _, d := range modelCatalog() {
-		add("anthropic/" + d.Canonical)
+
+	for _, name := range []string{"claude-step", "claude-kim", "claude-gemini-pro", "claude-gemini-flash", "claude-pickle", "claude-ultra"} {
+		add("anthropic/" + name)
 	}
+
 	if s.cfg != nil {
 		for k := range s.cfg.Aliases {
 			add("anthropic/" + normalizeModelID(k))
@@ -287,11 +324,15 @@ func modelCatalog() []modelDef {
 	return []modelDef{
 		{"claude-tencent-hy3-preview", nil, Route{Provider: "openrouter", Model: "tencent/hy3-preview"}},
 		{"claude-pickle", []string{"claude-big-pickle", "opencode/big-pickle", "claude-pick"}, Route{Provider: "opencode", Model: "big-pickle", ReasoningEffort: "high"}},
-		{"claude-mimo", []string{"claude-mimo-v2.5-free", "opencode/mimo-v2.5-free", "claude-m-2.6", "claude-mim"}, Route{Provider: "opencode", Model: "mimo-v2.5-free", ReasoningEffort: "high"}},
-		{"claude-step", []string{"claude-step-3.7-flash", "stepfun-ai/step-3.7-flash", "stepfun-ai-step-3.7-flash", "stepfun-ai-step-3-7-flash"}, Route{Provider: "nvidia", Model: "stepfun-ai/step-3.7-flash", ReasoningEffort: "max"}},
+		{"claude-ultra", []string{"claude-nemotron-3-ultra-free", "opencode/nemotron-3-ultra-free", "claude-nemotron-3-ultra", "claude-ultra-free"}, Route{Provider: "opencode", Model: "nemotron-3-ultra-free", ReasoningEffort: "high"}},
+		{"claude-step", []string{"claude-step-3.7-flash", "stepfun-ai/step-3.7-flash", "stepfun-ai-step-3.7-flash", "stepfun-ai-step-3-7-flash", "stepfun/step-3.7-flash", "stepfun-step-3.7-flash"}, Route{Provider: "nvidia", Model: "deepseek-ai/deepseek-v4-flash"}},
 		{"claude-kimi", []string{"claude-kimi-k2", "claude-kim-2", "claude-k-2", "claude-kim"}, Route{Provider: "nvidia", Model: "moonshotai/kimi-k2.6", ReasoningEffort: "high"}},
 		{"claude-nemotron-ultra", nil, Route{Provider: "nvidia", Model: "nvidia/nemotron-3-ultra-550b-a55b"}},
 		{"claude-glm", []string{"claude-opus", "claude-gl"}, Route{Provider: "nvidia", Model: "z-ai/glm-5.1", ReasoningEffort: "high"}},
+		{"claude-minimax", []string{"minimax-m3", "claude-m3", "minimaxai/minimax-m3", "claude-mini"}, Route{Provider: "nvidia", Model: "minimaxai/minimax-m3", ReasoningEffort: "high"}},
+		{"claude-deepseek-v4", []string{"deepseek-v4-pro", "claude-v4", "deepseek-ai/deepseek-v4-pro", "claude-deep"}, Route{Provider: "nvidia", Model: "deepseek-ai/deepseek-v4-pro", ReasoningEffort: "high"}},
+		{"claude-gemini-pro", []string{"gemini-pro", "gemini-2.5-pro"}, Route{Provider: "gemini", Model: "gemini-2.5-pro"}},
+		{"claude-gemini-flash", []string{"gemini-flash", "gemini-2.5-flash"}, Route{Provider: "gemini", Model: "gemini-2.5-flash"}},
 	}
 }
 

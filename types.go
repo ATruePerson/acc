@@ -36,6 +36,10 @@ type Route struct {
 	Provider        string `json:"provider"`
 	Model           string `json:"model"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// SystemPrepend, when set, overrides the global Config.SystemPrepend for
+	// this route/alias only — lets each model carry its own identity/behavior
+	// prompt (e.g. the real Claude system prompt per tier).
+	SystemPrepend string `json:"system_prepend,omitempty"`
 }
 
 type EffortMap struct {

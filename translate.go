@@ -16,6 +16,14 @@ func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRe
 		Temperature: ar.Temperature,
 	}
 
+	// Apply route-level overrides if specified in config.json
+	if route.Temperature != nil {
+		or.Temperature = route.Temperature
+	}
+	if route.MaxTokens > 0 {
+		or.MaxTokens = route.MaxTokens
+	}
+
 	// system prompt -> leading system message (with optional prepend)
 	sys := decodeSystem(ar.System)
 	prepend := cfg.SystemPrepend
@@ -33,7 +41,7 @@ func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRe
 	}
 
 	for _, m := range ar.Messages {
-		msgs, err := translateMessage(m)
+		msgs, err := translateMessage(m, route.Vision)
 		if err != nil {
 			return nil, err
 		}
@@ -70,7 +78,7 @@ func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRe
 
 // translateMessage turns one Anthropic message into one or more OpenAI
 // messages (tool_result blocks become separate role:"tool" messages).
-func translateMessage(m AnthropicMessage) ([]OpenAIMessage, error) {
+func translateMessage(m AnthropicMessage, vision bool) ([]OpenAIMessage, error) {
 	// content can be a plain string
 	var asString string
 	if err := json.Unmarshal(m.Content, &asString); err == nil {
@@ -91,6 +99,11 @@ func translateMessage(m AnthropicMessage) ([]OpenAIMessage, error) {
 		case "text":
 			parts = append(parts, OpenAIContentPart{Type: "text", Text: b.Text})
 		case "image":
+			if !vision {
+				// Fail loud rather than silently dropping the image and letting a
+				// text-only model answer blind. The caller must pick a vision model.
+				return nil, fmt.Errorf("this model is text-only and cannot see images — switch to a vision model (e.g. gemini-pro / gemini-flash)")
+			}
 			if b.Source != nil && b.Source.Type == "base64" {
 				url := fmt.Sprintf("data:%s;base64,%s", b.Source.MediaType, b.Source.Data)
 				parts = append(parts, OpenAIContentPart{

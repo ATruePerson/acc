@@ -20,6 +20,10 @@ type Config struct {
 	// SystemPrepend is prepended to every system prompt — use it to force
 	// behavior the upstream model otherwise ignores (e.g. respond in English).
 	SystemPrepend string `json:"system_prepend"`
+	// VisionRoute, when set, is the model that image-bearing requests are
+	// rerouted to when the chosen model is text-only. Defaults to
+	// gemini-2.5-flash when omitted.
+	VisionRoute *Route `json:"vision_route,omitempty"`
 }
 
 type ModelPrice struct {
@@ -33,13 +37,24 @@ type Provider struct {
 }
 
 type Route struct {
-	Provider        string `json:"provider"`
-	Model           string `json:"model"`
-	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	Provider        string   `json:"provider"`
+	Model           string   `json:"model"`
+	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
+	Temperature     *float64 `json:"temperature,omitempty"`
+	MaxTokens       int      `json:"max_tokens,omitempty"`
 	// SystemPrepend, when set, overrides the global Config.SystemPrepend for
 	// this route/alias only — lets each model carry its own identity/behavior
 	// prompt (e.g. the real Claude system prompt per tier).
 	SystemPrepend string `json:"system_prepend,omitempty"`
+	// Vision marks a route whose model accepts image_url content blocks. When
+	// false (the default), image blocks are dropped and replaced with a text
+	// placeholder so a text-only upstream (e.g. DeepSeek) doesn't 400 on a
+	// pasted screenshot.
+	Vision bool `json:"vision,omitempty"`
+	// Fallbacks is an ordered list of routes to try when this route returns 429
+	// (rate limited). The proxy tries each in sequence and stops after the first
+	// success or after the last fallback fails.
+	Fallbacks []Route `json:"fallbacks,omitempty"`
 }
 
 type EffortMap struct {
@@ -170,4 +185,50 @@ type OpenAIChoice struct {
 type OpenAIUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
+}
+
+// ---------- Responses API (front) ----------
+
+type ResponsesRequest struct {
+	Model       string              `json:"model"`
+	Input       json.RawMessage     `json:"input"` // string OR []ResponsesItem
+	Stream      bool                `json:"stream"`
+	Tools       []ResponsesTool     `json:"tools,omitempty"`
+	Reasoning   *ResponsesReasoning `json:"reasoning,omitempty"`
+	Temperature *float64            `json:"temperature,omitempty"`
+	MaxTokens   int                 `json:"max_tokens,omitempty"`
+}
+
+type ResponsesReasoning struct {
+	Effort string `json:"effort,omitempty"`
+}
+
+type ResponsesTool struct {
+	Type     string            `json:"type"`
+	Function ResponsesFunction `json:"function"`
+}
+
+type ResponsesFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
+type ResponsesItem struct {
+	ID        string          `json:"id,omitempty"`
+	Type      string          `json:"type"` // "message", "function_call", "function_call_output"
+	Role      string          `json:"role,omitempty"` // for message
+	Content   json.RawMessage `json:"content,omitempty"` // string OR []part
+	Name      string          `json:"name,omitempty"` // for function_call
+	Arguments string          `json:"arguments,omitempty"` // for function_call
+	CallID    string          `json:"call_id,omitempty"` // for function_call_output
+	Output    string          `json:"output,omitempty"` // for function_call_output
+}
+
+type ResponsesResponse struct {
+	ID        string          `json:"id"`
+	CreatedAt int64           `json:"created_at"`
+	Model     string          `json:"model"`
+	Output    []ResponsesItem `json:"output"`
+	Usage     *OpenAIUsage    `json:"usage,omitempty"`
 }

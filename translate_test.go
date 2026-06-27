@@ -27,7 +27,7 @@ func TestImageBlockTranslates(t *testing.T) {
 		Model:    "claude-opus-4-8",
 		Messages: []AnthropicMessage{{Role: "user", Content: json.RawMessage(content)}},
 	}
-	or, err := translateRequest(ar, Route{Model: "glm-4.6"}, testCfg())
+	or, err := translateRequest(ar, Route{Model: "glm-4.6", Vision: true}, testCfg())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,9 +95,33 @@ func TestRouteSystemPrependOverridesGlobal(t *testing.T) {
 	}
 }
 
+func TestRouteOverridesTemperatureAndMaxTokens(t *testing.T) {
+	tempVal := 0.2
+	tempOrig := 1.0
+	ar := &AnthropicRequest{
+		Model:       "x",
+		MaxTokens:   4000,
+		Temperature: &tempOrig,
+		Messages:    []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	}
+	route := Route{
+		Model:       "x",
+		Temperature: &tempVal,
+		MaxTokens:   500,
+	}
+	or, _ := translateRequest(ar, route, testCfg())
+
+	if or.MaxTokens != 500 {
+		t.Errorf("got MaxTokens %d, want 500", or.MaxTokens)
+	}
+	if or.Temperature == nil || *or.Temperature != 0.2 {
+		t.Errorf("got Temperature %v, want 0.2", or.Temperature)
+	}
+}
+
 func TestToolResultBecomesToolMessage(t *testing.T) {
 	content := `[{"type":"tool_result","tool_use_id":"call_1","content":"42"}]`
-	msgs, err := translateMessage(AnthropicMessage{Role: "user", Content: json.RawMessage(content)})
+	msgs, err := translateMessage(AnthropicMessage{Role: "user", Content: json.RawMessage(content)}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +135,7 @@ func TestToolResultAndTextOrder(t *testing.T) {
 		{"type":"tool_result","tool_use_id":"call_1","content":"42"},
 		{"type":"text","text":"continue"}
 	]`
-	msgs, err := translateMessage(AnthropicMessage{Role: "user", Content: json.RawMessage(content)})
+	msgs, err := translateMessage(AnthropicMessage{Role: "user", Content: json.RawMessage(content)}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,8 +150,30 @@ func TestToolResultAndTextOrder(t *testing.T) {
 	}
 }
 
+func TestImageFailsForTextOnlyRoute(t *testing.T) {
+	content := `[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]`
+	_, err := translateMessage(AnthropicMessage{Role: "user", Content: json.RawMessage(content)}, false)
+	if err == nil {
+		t.Fatal("expected error when an image is sent to a text-only route, got nil")
+	}
+	if !strings.Contains(err.Error(), "text-only") {
+		t.Fatalf("expected text-only error, got %v", err)
+	}
+}
+
+func TestImageKeptForVisionRoute(t *testing.T) {
+	content := `[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]`
+	msgs, err := translateMessage(AnthropicMessage{Role: "user", Content: json.RawMessage(content)}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(msgs[0].Content), "image_url") {
+		t.Fatalf("vision route should keep image_url, got %s", msgs[0].Content)
+	}
+}
+
 func TestConfigAliasOverridesAndExtends(t *testing.T) {
-	s := &server{cfg: &Config{
+	s := testServer(&Config{
 		Providers: map[string]Provider{
 			"nvidia":   {BaseURL: "x", APIKey: "k"},
 			"opencode": {BaseURL: "y", APIKey: "k"},
@@ -138,7 +184,7 @@ func TestConfigAliasOverridesAndExtends(t *testing.T) {
 			// override a built-in canonical
 			"claude_GLM": {Provider: "opencode", Model: "big-pickle", ReasoningEffort: "medium"},
 		},
-	}}
+	})
 
 	fast, err := s.routeFor("anthropic/claude-fast")
 	if err != nil || fast.Model != "stepfun-ai/step-3.7-flash" || fast.ReasoningEffort != "low" {
@@ -165,9 +211,9 @@ func TestCostFor(t *testing.T) {
 }
 
 func TestCatalogModelsAllRoute(t *testing.T) {
-	s := &server{cfg: &Config{Providers: map[string]Provider{
+	s := testServer(&Config{Providers: map[string]Provider{
 		"nvidia": {}, "opencode": {}, "openrouter": {},
-	}}}
+	}})
 	for _, d := range modelCatalog() {
 		if _, err := s.routeFor("anthropic/" + d.Canonical); err != nil {
 			t.Errorf("catalog canonical %q does not route: %v", d.Canonical, err)
@@ -176,14 +222,12 @@ func TestCatalogModelsAllRoute(t *testing.T) {
 }
 
 func TestRouteFor(t *testing.T) {
-	s := &server{
-		cfg: &Config{
-			Providers: map[string]Provider{
-				"nvidia":   {BaseURL: "https://integrate.api.nvidia.com/v1", APIKey: "fake"},
-				"opencode": {BaseURL: "https://opencode.ai/zen/v1", APIKey: "fake"},
-			},
+	s := testServer(&Config{
+		Providers: map[string]Provider{
+			"nvidia":   {BaseURL: "https://integrate.api.nvidia.com/v1", APIKey: "fake"},
+			"opencode": {BaseURL: "https://opencode.ai/zen/v1", APIKey: "fake"},
 		},
-	}
+	})
 
 	testCases := []struct {
 		inputModel     string

@@ -43,8 +43,8 @@ func TestVisionReroutePreservesIdentity(t *testing.T) {
 	orig := Route{Provider: "nvidia", Model: "z-ai/glm-5.1", ReasoningEffort: "high", SystemPrepend: "You are Opus 4.8"}
 	got := s.visionReroute(orig)
 
-	if got.Provider != "gemini" || got.Model != "gemini-2.5-flash" {
-		t.Errorf("reroute backend = %s/%s, want gemini/gemini-2.5-flash", got.Provider, got.Model)
+	if got.Provider != "gemini" || got.Model != "models/gemini-3.5-flash" {
+		t.Errorf("reroute backend = %s/%s, want gemini/models/gemini-3.5-flash", got.Provider, got.Model)
 	}
 	if !got.Vision {
 		t.Error("rerouted route should be vision-capable")

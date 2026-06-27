@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // translateRequest converts an Anthropic /v1/messages request into an
@@ -14,11 +15,15 @@ func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRe
 		MaxTokens:   ar.MaxTokens,
 		Stream:      ar.Stream,
 		Temperature: ar.Temperature,
+		TopP:        ar.TopP,
 	}
 
 	// Apply route-level overrides if specified in config.json
 	if route.Temperature != nil {
 		or.Temperature = route.Temperature
+	}
+	if route.TopP != nil {
+		or.TopP = route.TopP
 	}
 	if route.MaxTokens > 0 {
 		or.MaxTokens = route.MaxTokens
@@ -73,6 +78,25 @@ func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRe
 	if ar.Stream {
 		or.StreamOptions = &StreamOptions{IncludeUsage: true}
 	}
+
+	if route.Provider == "gemini" {
+		for i := range or.Messages {
+			for j := range or.Messages[i].ToolCalls {
+				tc := &or.Messages[i].ToolCalls[j]
+				thoughtSig := tc.Function.ThoughtSignature
+				tc.Function.ThoughtSignature = ""
+				if thoughtSig == "" {
+					thoughtSig = "skip_thought_signature_validator"
+				}
+				tc.ExtraContent = &OpenAIExtraContent{
+					Google: &OpenAIGoogleExtra{
+						ThoughtSignature: thoughtSig,
+					},
+				}
+			}
+		}
+	}
+
 	return or, nil
 }
 
@@ -112,19 +136,30 @@ func translateMessage(m AnthropicMessage, vision bool) ([]OpenAIMessage, error) 
 				})
 			}
 		case "tool_use":
+			id := b.ID
+			var thoughtSig string
+			if parts := strings.SplitN(b.ID, "__thought__", 2); len(parts) == 2 {
+				id = parts[0]
+				thoughtSig = parts[1]
+			}
 			toolCalls = append(toolCalls, OpenAIToolCall{
-				ID:   b.ID,
+				ID:   id,
 				Type: "function",
 				Function: OpenAIFuncCall{
-					Name:      b.Name,
-					Arguments: string(b.Input),
+					Name:             b.Name,
+					Arguments:        string(b.Input),
+					ThoughtSignature: thoughtSig,
 				},
 			})
 		case "tool_result":
+			id := b.ToolUseID
+			if parts := strings.SplitN(b.ToolUseID, "__thought__", 2); len(parts) == 2 {
+				id = parts[0]
+			}
 			// flush as its own tool message
 			out = append(out, OpenAIMessage{
 				Role:       "tool",
-				ToolCallID: b.ToolUseID,
+				ToolCallID: id,
 				Content:    jsonString(decodeToolResult(b.Content)),
 			})
 		}
@@ -161,9 +196,17 @@ func translateResponse(or *OpenAIResponse, model string) map[string]any {
 				if len(input) == 0 {
 					input = []byte("{}")
 				}
+				thoughtSig := tc.Function.ThoughtSignature
+				if tc.ExtraContent != nil && tc.ExtraContent.Google != nil && tc.ExtraContent.Google.ThoughtSignature != "" {
+					thoughtSig = tc.ExtraContent.Google.ThoughtSignature
+				}
+				id := tc.ID
+				if thoughtSig != "" {
+					id = fmt.Sprintf("%s__thought__%s", tc.ID, thoughtSig)
+				}
 				content = append(content, map[string]any{
 					"type":  "tool_use",
-					"id":    tc.ID,
+					"id":    id,
 					"name":  tc.Function.Name,
 					"input": input,
 				})

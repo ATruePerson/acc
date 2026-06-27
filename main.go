@@ -224,9 +224,10 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	routes := append([]Route{route}, route.Fallbacks...)
 
 	var (
-		or          *OpenAIRequest
-		resp        *http.Response
-		activeRoute Route
+		or              *OpenAIRequest
+		resp            *http.Response
+		activeRoute     Route
+		lastRequestJSON []byte
 	)
 
 	for ri, currentRoute := range routes {
@@ -254,6 +255,7 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		}
 
 		body, _ := json.Marshal(or)
+		lastRequestJSON = body
 
 		for attempt := 1; attempt <= 10; attempt++ {
 			var err error
@@ -323,6 +325,7 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
 		log.Printf("upstream %d for model=%s->%s/%s: %s", resp.StatusCode, ar.Model, activeRoute.Provider, activeRoute.Model, truncate(string(b), 500))
+		log.Printf("failed request body sent upstream: %s", string(lastRequestJSON))
 		// Plain-English message for the two failure modes a free-tier user actually
 		// hits, instead of leaking the raw upstream error blob.
 		msg := fmt.Sprintf("upstream %s/%s: %s", activeRoute.Provider, activeRoute.Model, truncate(string(b), 300))
@@ -411,8 +414,8 @@ func modelCatalog() []modelDef {
 		{"claude-glm", []string{"claude-opus", "claude-gl"}, Route{Provider: "nvidia", Model: "z-ai/glm-5.1", ReasoningEffort: "high", Vision: true}},
 		{"claude-minimax", []string{"minimax-m3", "claude-m3", "minimaxai/minimax-m3", "claude-mini"}, Route{Provider: "nvidia", Model: "minimaxai/minimax-m3", ReasoningEffort: "high", Vision: true}},
 		{"claude-deepseek-v4", []string{"deepseek-v4-pro", "claude-v4", "deepseek-ai/deepseek-v4-pro", "claude-deep"}, Route{Provider: "nvidia", Model: "deepseek-ai/deepseek-v4-pro", ReasoningEffort: "high"}},
-		{"claude-gemini-pro", []string{"gemini-pro", "gemini-2.5-pro"}, Route{Provider: "gemini", Model: "gemini-2.5-pro", Vision: true}},
-		{"claude-gemini-flash", []string{"gemini-flash", "gemini-2.5-flash"}, Route{Provider: "gemini", Model: "gemini-2.5-flash", Vision: true}},
+		{"claude-gemini-pro", []string{"gemini-pro", "gemini-3.1-pro-preview", "gemini-3-pro"}, Route{Provider: "gemini", Model: "models/gemini-3.1-pro-preview", Vision: true}},
+		{"claude-gemini-flash", []string{"gemini-flash", "gemini-3.5-flash", "gemini-3-flash"}, Route{Provider: "gemini", Model: "models/gemini-3.5-flash", Vision: true}},
 	}
 }
 
@@ -487,9 +490,9 @@ func requestHasImage(ar *AnthropicRequest) bool {
 
 // visionReroute swaps a text-only route's backend to a vision-capable model
 // while preserving the original route's identity prompt and reasoning effort.
-// Target is cfg.VisionRoute, defaulting to gemini-2.5-flash.
+// Target is cfg.VisionRoute, defaulting to models/gemini-3.5-flash.
 func (s *server) visionReroute(orig Route) Route {
-	target := Route{Provider: "gemini", Model: "gemini-2.5-flash"}
+	target := Route{Provider: "gemini", Model: "models/gemini-3.5-flash"}
 	if cfg := s.cfg.Load(); cfg != nil && cfg.VisionRoute != nil {
 		target = *cfg.VisionRoute
 	}

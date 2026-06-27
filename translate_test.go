@@ -302,3 +302,80 @@ func TestSanitizeReasoningEffort(t *testing.T) {
 		}
 	}
 }
+
+func TestGeminiThoughtSignature(t *testing.T) {
+	// Setup an assistant message containing a tool call
+	content := `[
+		{"type":"tool_use","id":"call_123","name":"run_test","input":{}}
+	]`
+	ar := &AnthropicRequest{
+		Model: "gemini-model",
+		Messages: []AnthropicMessage{
+			{Role: "assistant", Content: json.RawMessage(content)},
+		},
+	}
+	
+	// If provider is gemini, thought_signature must be injected as "skip_thought_signature_validator"
+	or, err := translateRequest(ar, Route{Provider: "gemini", Model: "gemini-model"}, testCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	
+	found := false
+	for _, m := range or.Messages {
+		if m.Role == "assistant" {
+			for _, tc := range m.ToolCalls {
+				if tc.Function.Name == "run_test" {
+					found = true
+					if tc.ExtraContent == nil || tc.ExtraContent.Google == nil || tc.ExtraContent.Google.ThoughtSignature != "skip_thought_signature_validator" {
+						t.Errorf("expected thought_signature skip_thought_signature_validator in ExtraContent")
+					}
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("tool call not found in translated messages")
+	}
+
+	// Test that an incoming tool call with __thought__ is successfully split into real ID and thought signature
+	contentWithThought := `[
+		{"type":"tool_use","id":"call_abc__thought__SIG_999","name":"run_test","input":{}}
+	]`
+	arWithThought := &AnthropicRequest{
+		Model: "gemini-model",
+		Messages: []AnthropicMessage{
+			{Role: "assistant", Content: json.RawMessage(contentWithThought)},
+			{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"call_abc__thought__SIG_999","content":"success"}]`)},
+		},
+	}
+	or3, err := translateRequest(arWithThought, Route{Provider: "gemini", Model: "gemini-model"}, testCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	foundThought := false
+	for _, m := range or3.Messages {
+		if m.Role == "assistant" {
+			for _, tc := range m.ToolCalls {
+				if tc.Function.Name == "run_test" {
+					foundThought = true
+					if tc.ID != "call_abc" {
+						t.Errorf("expected split ID 'call_abc', got %q", tc.ID)
+					}
+					if tc.ExtraContent == nil || tc.ExtraContent.Google == nil || tc.ExtraContent.Google.ThoughtSignature != "SIG_999" {
+						t.Errorf("expected split ThoughtSignature 'SIG_999' in ExtraContent")
+					}
+				}
+			}
+		} else if m.Role == "tool" {
+			if m.ToolCallID != "call_abc" {
+				t.Errorf("expected stripped ToolCallID 'call_abc', got %q", m.ToolCallID)
+			}
+		}
+	}
+	if !foundThought {
+		t.Fatal("tool call with thought not found")
+	}
+}
+

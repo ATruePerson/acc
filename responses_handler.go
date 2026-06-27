@@ -20,6 +20,15 @@ func translateFromResponses(req *ResponsesRequest, route Route, cfg *Config) (*O
 		MaxTokens:   req.MaxTokens,
 		Stream:      req.Stream,
 		Temperature: req.Temperature,
+		TopP:        req.TopP,
+	}
+
+	// Apply route-level overrides if specified in config.json
+	if route.Temperature != nil {
+		or.Temperature = route.Temperature
+	}
+	if route.TopP != nil {
+		or.TopP = route.TopP
 	}
 
 	// Determine reasoning effort
@@ -71,13 +80,20 @@ func translateFromResponses(req *ResponsesRequest, route Route, cfg *Config) (*O
 						Content: item.Content,
 					})
 				case "function_call":
+					id := item.ID
+					var thoughtSig string
+					if parts := strings.SplitN(item.ID, "__thought__", 2); len(parts) == 2 {
+						id = parts[0]
+						thoughtSig = parts[1]
+					}
 					// Add this function call to the last assistant message, if any
 					toolCall := OpenAIToolCall{
-						ID:   item.ID,
+						ID:   id,
 						Type: "function",
 						Function: OpenAIFuncCall{
-							Name:      item.Name,
-							Arguments: item.Arguments,
+							Name:             item.Name,
+							Arguments:        item.Arguments,
+							ThoughtSignature: thoughtSig,
 						},
 					}
 					// Look for the last assistant message
@@ -98,12 +114,34 @@ func translateFromResponses(req *ResponsesRequest, route Route, cfg *Config) (*O
 						})
 					}
 				case "function_call_output":
+					id := item.CallID
+					if parts := strings.SplitN(item.CallID, "__thought__", 2); len(parts) == 2 {
+						id = parts[0]
+					}
 					// Translate to a message with role="tool"
 					or.Messages = append(or.Messages, OpenAIMessage{
 						Role:       "tool",
-						ToolCallID: item.CallID,
+						ToolCallID: id,
 						Content:    jsonString(item.Output),
 					})
+				}
+			}
+		}
+	}
+
+	if route.Provider == "gemini" {
+		for i := range or.Messages {
+			for j := range or.Messages[i].ToolCalls {
+				tc := &or.Messages[i].ToolCalls[j]
+				thoughtSig := tc.Function.ThoughtSignature
+				tc.Function.ThoughtSignature = ""
+				if thoughtSig == "" {
+					thoughtSig = "skip_thought_signature_validator"
+				}
+				tc.ExtraContent = &OpenAIExtraContent{
+					Google: &OpenAIGoogleExtra{
+						ThoughtSignature: thoughtSig,
+					},
 				}
 			}
 		}

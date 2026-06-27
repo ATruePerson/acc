@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -65,6 +66,9 @@ func streamTranslate(w http.ResponseWriter, body io.Reader, model string) (int, 
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
 			continue
 		}
+		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta != nil && len(chunk.Choices[0].Delta.ToolCalls) > 0 {
+			log.Printf("stream chunk tool_calls: %s", payload)
+		}
 		if chunk.Usage != nil {
 			if chunk.Usage.PromptTokens > 0 {
 				inputTokens = chunk.Usage.PromptTokens
@@ -111,10 +115,18 @@ func streamTranslate(w http.ResponseWriter, body io.Reader, model string) (int, 
 				bi = nextIndex
 				nextIndex++
 				toolBlocks[tc.Index] = bi
+				thoughtSig := tc.Function.ThoughtSignature
+				if tc.ExtraContent != nil && tc.ExtraContent.Google != nil && tc.ExtraContent.Google.ThoughtSignature != "" {
+					thoughtSig = tc.ExtraContent.Google.ThoughtSignature
+				}
+				id := tc.ID
+				if thoughtSig != "" {
+					id = fmt.Sprintf("%s__thought__%s", tc.ID, thoughtSig)
+				}
 				send("content_block_start", map[string]any{
 					"type": "content_block_start", "index": bi,
 					"content_block": map[string]any{
-						"type": "tool_use", "id": tc.ID, "name": tc.Function.Name,
+						"type": "tool_use", "id": id, "name": tc.Function.Name,
 						"input": map[string]any{},
 					},
 				})

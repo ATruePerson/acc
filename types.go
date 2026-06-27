@@ -22,7 +22,7 @@ type Config struct {
 	SystemPrepend string `json:"system_prepend"`
 	// VisionRoute, when set, is the model that image-bearing requests are
 	// rerouted to when the chosen model is text-only. Defaults to
-	// gemini-2.5-flash when omitted.
+	// models/gemini-3.5-flash when omitted.
 	VisionRoute *Route `json:"vision_route,omitempty"`
 }
 
@@ -41,6 +41,7 @@ type Route struct {
 	Model           string   `json:"model"`
 	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
 	Temperature     *float64 `json:"temperature,omitempty"`
+	TopP            *float64 `json:"top_p,omitempty"`
 	MaxTokens       int      `json:"max_tokens,omitempty"`
 	// SystemPrepend, when set, overrides the global Config.SystemPrepend for
 	// this route/alias only — lets each model carry its own identity/behavior
@@ -73,6 +74,7 @@ type AnthropicRequest struct {
 	Tools       []AnthropicTool    `json:"tools,omitempty"`
 	Thinking    *Thinking          `json:"thinking,omitempty"`
 	Temperature *float64           `json:"temperature,omitempty"`
+	TopP        *float64           `json:"top_p,omitempty"`
 }
 
 type Thinking struct {
@@ -122,6 +124,7 @@ type OpenAIRequest struct {
 	Tools           []OpenAITool    `json:"tools,omitempty"`
 	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
 	Temperature     *float64        `json:"temperature,omitempty"`
+	TopP            *float64        `json:"top_p,omitempty"`
 	StreamOptions   *StreamOptions  `json:"stream_options,omitempty"`
 }
 
@@ -158,15 +161,25 @@ type OpenAIFunction struct {
 }
 
 type OpenAIToolCall struct {
-	Index    int            `json:"index,omitempty"`
-	ID       string         `json:"id,omitempty"`
-	Type     string         `json:"type,omitempty"`
-	Function OpenAIFuncCall `json:"function"`
+	Index        int                 `json:"index,omitempty"`
+	ID           string              `json:"id,omitempty"`
+	Type         string              `json:"type,omitempty"`
+	Function     OpenAIFuncCall      `json:"function"`
+	ExtraContent *OpenAIExtraContent `json:"extra_content,omitempty"`
+}
+
+type OpenAIExtraContent struct {
+	Google *OpenAIGoogleExtra `json:"google,omitempty"`
+}
+
+type OpenAIGoogleExtra struct {
+	ThoughtSignature string `json:"thought_signature,omitempty"`
 }
 
 type OpenAIFuncCall struct {
-	Name      string `json:"name,omitempty"`
-	Arguments string `json:"arguments,omitempty"`
+	Name             string `json:"name,omitempty"`
+	Arguments        string `json:"arguments,omitempty"`
+	ThoughtSignature string `json:"thought_signature,omitempty"`
 }
 
 // ---------- OpenAI response (back) ----------
@@ -196,6 +209,7 @@ type ResponsesRequest struct {
 	Tools       []ResponsesTool     `json:"tools,omitempty"`
 	Reasoning   *ResponsesReasoning `json:"reasoning,omitempty"`
 	Temperature *float64            `json:"temperature,omitempty"`
+	TopP        *float64            `json:"top_p,omitempty"`
 	MaxTokens   int                 `json:"max_tokens,omitempty"`
 }
 

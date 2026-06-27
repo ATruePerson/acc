@@ -48,7 +48,7 @@
       "provider": "opencode",
       "reasoning_effort": "ultracode",
       "temperature": 0.0,
-      "top_p": 0.0,
+      "top_p": 1.0,
       "max_tokens": 80000
     },
     "anthropic/claude-fable": {
@@ -57,7 +57,7 @@
       "provider": "opencode",
       "reasoning_effort": "high",
       "temperature": 0.0,
-      "top_p": 0.0,
+      "top_p": 1.0,
       "max_tokens": 80000
     },
     "anthropic/claude-opus": {
@@ -65,7 +65,7 @@
       "model": "minimaxai/minimax-m3",
       "provider": "nvidia",
       "temperature": 0.0,
-      "top_p": 0.0,
+      "top_p": 1.0,
       "max_tokens": 80000,
       "vision": true,
       "fallbacks": [
@@ -74,7 +74,7 @@
           "model": "nvidia/nemotron-3-ultra-550b-a55b",
           "provider": "nvidia",
           "temperature": 0.0,
-          "top_p": 0.0,
+          "top_p": 1.0,
           "max_tokens": 80000
         },
         {
@@ -82,7 +82,7 @@
           "model": "deepseek-ai/deepseek-v4-pro",
           "provider": "nvidia",
           "temperature": 0.0,
-          "top_p": 0.0,
+          "top_p": 1.0,
           "max_tokens": 80000
         }
       ]
@@ -92,7 +92,7 @@
       "model": "nvidia/nemotron-3-super-120b-a12b",
       "provider": "nvidia",
       "temperature": 0.0,
-      "top_p": 0.0,
+      "top_p": 1.0,
       "max_tokens": 80000,
       "fallbacks": [
         {
@@ -100,7 +100,7 @@
           "model": "deepseek-ai/deepseek-v4-flash",
           "provider": "nvidia",
           "temperature": 0.0,
-          "top_p": 0.0,
+          "top_p": 1.0,
           "max_tokens": 80000
         }
       ]
@@ -110,7 +110,7 @@
       "model": "models/gemini-3.1-flash-lite",
       "provider": "gemini",
       "temperature": 0.0,
-      "top_p": 0.0,
+      "top_p": 1.0,
       "max_tokens": 80000
     }
   },

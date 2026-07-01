@@ -201,6 +201,13 @@ func callModel(ctx context.Context, httpClient *http.Client, cfg *Config, route 
 // it, and leaving it off avoids any provider param-compat risk.
 var judgeRoute = Route{Provider: "gemini", Model: "models/gemini-3.1-pro-preview"}
 
+// judgeMaxTokens must be generous: gemini-3.1-pro is a thinking model that
+// spends most of a small budget on hidden reasoning before emitting any
+// visible text. At 200 it burned ~192 on thinking and returned a truncated
+// `{"score":5` with no closing brace, failing every parse. 2000 leaves
+// ample room for the reasoning plus the full one-line-rationale JSON.
+const judgeMaxTokens = 2000
+
 // categoryRubric is the per-category grading instruction appended to every
 // judge prompt. The 1-10 scale stays constant across categories so scores
 // compare cleanly in the summary table.
@@ -257,7 +264,7 @@ func judgeResponse(ctx context.Context, httpClient *http.Client, cfg *Config, ca
 		return judgeResult{}, err
 	}
 
-	text, _, _, _, callErr := callModel(ctx, httpClient, cfg, judgeRoute, judgePrompt, 200)
+	text, _, _, _, callErr := callModel(ctx, httpClient, cfg, judgeRoute, judgePrompt, judgeMaxTokens)
 	if callErr != nil {
 		return judgeResult{}, fmt.Errorf("judge call failed: %w", callErr)
 	}
@@ -265,7 +272,7 @@ func judgeResponse(ctx context.Context, httpClient *http.Client, cfg *Config, ca
 		return res, nil
 	}
 
-	text2, _, _, _, callErr2 := callModel(ctx, httpClient, cfg, judgeRoute, judgePrompt, 200)
+	text2, _, _, _, callErr2 := callModel(ctx, httpClient, cfg, judgeRoute, judgePrompt, judgeMaxTokens)
 	if callErr2 != nil {
 		return judgeResult{}, fmt.Errorf("judge retry call failed: %w", callErr2)
 	}

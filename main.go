@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -71,6 +72,7 @@ func main() {
 	mux.HandleFunc("/dashboard/api/logs", s.handleDashboardLogs)
 	mux.HandleFunc("/dashboard/api/clear", s.handleDashboardClear)
 	mux.HandleFunc("/dashboard/api/restart", s.handleDashboardRestart)
+	mux.HandleFunc("/dashboard/api/info", s.handleDashboardInfo)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
@@ -189,24 +191,25 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	// logit records one request to the TUI + persistent metrics log. Centralized
 	// so every exit path logs consistently instead of repeating the struct.
-	logit := func(routeModel string, status, in, out int, effort string) {
+	logit := func(routeModel string, status, in, out, reasoning int, effort string) {
 		AddTUILog(LogEntry{
-			Timestamp: time.Now(),
-			Model:     ar.Model,
-			Route:     routeModel,
-			Status:    status,
-			TokensIn:  in,
-			TokensOut: out,
-			Budget:    budget,
-			Effort:    effort,
-			CostUSD:   costFor(routeModel, in, out, cfg),
+			Timestamp:    time.Now(),
+			Model:        ar.Model,
+			Route:        routeModel,
+			Status:       status,
+			TokensIn:     in,
+			TokensOut:    out,
+			ReasoningOut: reasoning,
+			Budget:       budget,
+			Effort:       effort,
+			CostUSD:      costFor(routeModel, in, out, cfg),
 		})
 	}
 
 	route, err := s.routeFor(ar.Model)
 	if err != nil {
 		httpErr(w, 400, err.Error())
-		logit("error", 400, 0, 0, "")
+		logit("error", 400, 0, 0, 0, "")
 		return
 	}
 
@@ -228,6 +231,7 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		resp            *http.Response
 		activeRoute     Route
 		lastRequestJSON []byte
+		streamReader    io.Reader
 	)
 
 	for ri, currentRoute := range routes {
@@ -236,7 +240,7 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			if ri == len(routes)-1 {
 				httpErr(w, 500, "unknown provider: "+currentRoute.Provider)
-				logit(currentRoute.Model, 500, 0, 0, "")
+				logit(currentRoute.Model, 500, 0, 0, 0, "")
 				return
 			}
 			log.Printf("unknown provider %q for route %d, trying fallback", currentRoute.Provider, ri)
@@ -247,7 +251,7 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			if ri == len(routes)-1 {
 				httpErr(w, 400, "translate: "+err.Error())
-				logit(currentRoute.Model, 400, 0, 0, "")
+				logit(currentRoute.Model, 400, 0, 0, 0, "")
 				return
 			}
 			log.Printf("translate failed for %s/%s, trying fallback: %v", currentRoute.Provider, currentRoute.Model, err)
@@ -255,14 +259,34 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		}
 
 		body, _ := json.Marshal(or)
+		if len(currentRoute.ExtraBody) > 0 {
+			var merged map[string]any
+			if err := json.Unmarshal(body, &merged); err == nil {
+				for k, v := range currentRoute.ExtraBody {
+					merged[k] = v
+				}
+				if newBody, err := json.Marshal(merged); err == nil {
+					body = newBody
+				}
+			}
+		}
 		lastRequestJSON = body
 
-		for attempt := 1; attempt <= 10; attempt++ {
+		// When a fallback route exists, don't hammer a 503ing model for minutes —
+		// bail after a couple quick tries so latency-sensitive callers (e.g. the
+		// Agent safety classifier) fall through to a healthy route instead of
+		// timing out. Only the last route gets the full retry budget.
+		maxAttempts := 10
+		if ri < len(routes)-1 {
+			maxAttempts = 2
+		}
+
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
 			var err error
 			upstream, err := http.NewRequestWithContext(r.Context(), "POST", prov.BaseURL+"/chat/completions", bytes.NewReader(body))
 			if err != nil {
 				httpErr(w, 500, err.Error())
-				logit(currentRoute.Model, 500, 0, 0, or.ReasoningEffort)
+				logit(currentRoute.Model, 500, 0, 0, 0, or.ReasoningEffort)
 				return
 			}
 			upstream.Header.Set("Content-Type", "application/json")
@@ -271,11 +295,11 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			resp, err = s.http.Do(upstream)
 			if err != nil {
 				httpErr(w, 502, "upstream: "+err.Error())
-				logit(currentRoute.Model, 502, 0, 0, or.ReasoningEffort)
+				logit(currentRoute.Model, 502, 0, 0, 0, or.ReasoningEffort)
 				return
 			}
 
-			if resp.StatusCode == 503 && attempt < 10 {
+			if resp.StatusCode == 503 && attempt < maxAttempts {
 				// Exponential backoff with jitter
 				baseInt := 1 << attempt
 				base := float64(baseInt)
@@ -303,14 +327,49 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 		// On 429 (rate limited) OR 5xx (provider crashed), try the next fallback
 		// route if one is configured. Same backup list — more failure types trip it.
-		if (resp.StatusCode == 429 || resp.StatusCode >= 500) && ri < len(routes)-1 {
+		// Also treat a NVIDIA NIM "DEGRADED" 400 as failover-worthy: the model node
+		// is disabled upstream ("DEGRADED function cannot be invoked"), not a bad
+		// request, so the next fallback can actually succeed.
+		shouldFallback := resp.StatusCode == 429 || resp.StatusCode >= 500
+		var degradedBody []byte
+		if !shouldFallback && resp.StatusCode == 400 {
+			degradedBody, _ = io.ReadAll(resp.Body)
+			resp.Body.Close()
+			resp.Body = io.NopCloser(bytes.NewReader(degradedBody))
+			if bytes.Contains(degradedBody, []byte("DEGRADED")) || bytes.Contains(degradedBody, []byte("cannot be invoked")) {
+				shouldFallback = true
+			}
+		}
+		if shouldFallback && ri < len(routes)-1 {
 			status := resp.StatusCode
-			b, _ := io.ReadAll(resp.Body)
+			b := degradedBody
+			if b == nil {
+				b, _ = io.ReadAll(resp.Body)
+			}
 			resp.Body.Close()
 			resp = nil
 			log.Printf("upstream %d on %s/%s, falling back: %s", status, currentRoute.Provider, currentRoute.Model, truncate(string(b), 200))
-			logit(currentRoute.Model, status, 0, 0, or.ReasoningEffort)
+			logit(currentRoute.Model, status, 0, 0, 0, or.ReasoningEffort)
 			continue
+		}
+
+		// Time-to-first-token guard (streaming only): a route that returns 200
+		// but emits no token within firstTokenTimeout is treated as stalled.
+		// Fall back if a route remains, otherwise fail — never hang.
+		if ar.Stream && resp.StatusCode < 400 {
+			reader, timedOut := awaitFirstByte(resp.Body, firstTokenTimeout)
+			if timedOut {
+				resp.Body.Close()
+				resp = nil
+				log.Printf("no token from %s/%s within %s", currentRoute.Provider, currentRoute.Model, firstTokenTimeout)
+				logit(currentRoute.Model, 504, 0, 0, 0, or.ReasoningEffort)
+				if ri < len(routes)-1 {
+					continue
+				}
+				httpErr(w, 504, fmt.Sprintf("⌛ %s and its fallback gave no response in time. Try again or switch models.", ar.Model))
+				return
+			}
+			streamReader = reader
 		}
 
 		break // got a definitive response (success or final route exhausted)
@@ -336,7 +395,7 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			msg = fmt.Sprintf("⚠️ %s (provider %s) is down right now — server error %d. Try again in a moment or switch models.", activeRoute.Model, activeRoute.Provider, resp.StatusCode)
 		}
 		httpErr(w, resp.StatusCode, msg)
-		logit(activeRoute.Model, resp.StatusCode, 0, 0, or.ReasoningEffort)
+		logit(activeRoute.Model, resp.StatusCode, 0, 0, 0, or.ReasoningEffort)
 		return
 	}
 
@@ -344,8 +403,11 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-		inTokens, outTokens := streamTranslate(w, resp.Body, ar.Model)
-		logit(activeRoute.Model, resp.StatusCode, inTokens, outTokens, or.ReasoningEffort)
+		if streamReader == nil {
+			streamReader = resp.Body
+		}
+		inTokens, outTokens, reasoningOut := streamTranslate(w, streamReader, ar.Model)
+		logit(activeRoute.Model, resp.StatusCode, inTokens, outTokens, reasoningOut, or.ReasoningEffort)
 		return
 	}
 
@@ -353,19 +415,20 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	b, _ := io.ReadAll(resp.Body)
 	if err := json.Unmarshal(b, &oresp); err != nil {
 		httpErr(w, 502, "parse upstream: "+err.Error())
-		logit(activeRoute.Model, 502, 0, 0, or.ReasoningEffort)
+		logit(activeRoute.Model, 502, 0, 0, 0, or.ReasoningEffort)
 		return
 	}
 	out := translateResponse(&oresp, ar.Model)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(out)
 
-	tokensIn, tokensOut := 0, 0
+	tokensIn, tokensOut, reasoningOut := 0, 0, 0
 	if oresp.Usage != nil {
 		tokensIn = oresp.Usage.PromptTokens
 		tokensOut = oresp.Usage.CompletionTokens
+		reasoningOut = oresp.Usage.reasoningTokens()
 	}
-	logit(activeRoute.Model, resp.StatusCode, tokensIn, tokensOut, or.ReasoningEffort)
+	logit(activeRoute.Model, resp.StatusCode, tokensIn, tokensOut, reasoningOut, or.ReasoningEffort)
 }
 
 func (s *server) handleModels(w http.ResponseWriter, r *http.Request) {
@@ -511,6 +574,7 @@ func inferVision(provider, model string) bool {
 		return true
 	}
 	// Native-multimodal models reachable through any OpenAI-compatible provider.
+	// big-pickle (opencode) is TEXT-ONLY — kept out so image requests reroute via visionReroute.
 	if strings.Contains(m, "kimi-k2.6") || strings.Contains(m, "minimax-m3") || strings.Contains(m, "glm-5.1") {
 		return true
 	}
@@ -518,6 +582,42 @@ func inferVision(provider, model string) bool {
 }
 
 // ---------- Config ----------
+
+func loadPrependFile(baseDir, path string) (string, error) {
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			path = filepath.Join(home, path[2:])
+		}
+	} else if !filepath.IsAbs(path) {
+		// Try resolving relative to config file directory first, then Cwd
+		absPath := filepath.Join(baseDir, path)
+		if _, err := os.Stat(absPath); err == nil {
+			path = absPath
+		}
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to read system_prepend file %q: %w", path, err)
+	}
+	return string(content), nil
+}
+
+func resolveRoutePrepend(r *Route, baseDir string) error {
+	if strings.HasPrefix(r.SystemPrepend, "@") {
+		resolved, err := loadPrependFile(baseDir, r.SystemPrepend[1:])
+		if err != nil {
+			return err
+		}
+		r.SystemPrepend = resolved
+	}
+	for i := range r.Fallbacks {
+		if err := resolveRoutePrepend(&r.Fallbacks[i], baseDir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func loadConfig(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
@@ -532,6 +632,30 @@ func loadConfig(path string) (*Config, error) {
 	if c.Port == 0 {
 		c.Port = 8787
 	}
+
+	baseDir := filepath.Dir(path)
+	if strings.HasPrefix(c.SystemPrepend, "@") {
+		resolved, err := loadPrependFile(baseDir, c.SystemPrepend[1:])
+		if err != nil {
+			return nil, err
+		}
+		c.SystemPrepend = resolved
+	}
+
+	for k, r := range c.Routes {
+		if err := resolveRoutePrepend(&r, baseDir); err != nil {
+			return nil, err
+		}
+		c.Routes[k] = r
+	}
+
+	for k, r := range c.Aliases {
+		if err := resolveRoutePrepend(&r, baseDir); err != nil {
+			return nil, err
+		}
+		c.Aliases[k] = r
+	}
+
 	return &c, nil
 }
 

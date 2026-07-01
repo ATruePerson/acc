@@ -18,11 +18,10 @@ import (
 // ---------- bench targets ----------
 
 // benchTarget is one model configuration under test: a persona identity,
-// the task category it's compared on, which variant (primary or fallback)
-// of that persona's alias, and how to resolve it from the live config.
+// which variant (primary or fallback) of that persona's alias, and how to
+// resolve it from the live config.
 type benchTarget struct {
 	Identity      string
-	Category      string
 	Variant       string // "primary" or "fallback"
 	AliasKey      string
 	FallbackIndex int // -1 selects the primary route, >=0 selects Fallbacks[i]
@@ -35,13 +34,13 @@ type benchTarget struct {
 // mythos are byte-identical in config.json today, so only "fable" is
 // tested, labeled "fable/mythos" — see the design doc for why.
 var benchTargets = []benchTarget{
-	{Identity: "opus", Category: "coding", Variant: "primary", AliasKey: "anthropic/claude-opus", FallbackIndex: -1},
-	{Identity: "opus", Category: "coding", Variant: "fallback", AliasKey: "anthropic/claude-opus", FallbackIndex: 0},
-	{Identity: "sonnet", Category: "creative", Variant: "primary", AliasKey: "anthropic/claude-sonnet", FallbackIndex: -1},
-	{Identity: "sonnet", Category: "creative", Variant: "fallback", AliasKey: "anthropic/claude-sonnet", FallbackIndex: 0},
-	{Identity: "haiku", Category: "quick", Variant: "primary", AliasKey: "anthropic/claude-haiku", FallbackIndex: -1},
-	{Identity: "fable/mythos", Category: "fiction", Variant: "primary", AliasKey: "anthropic/claude-fable", FallbackIndex: -1},
-	{Identity: "fable/mythos", Category: "fiction", Variant: "fallback", AliasKey: "anthropic/claude-fable", FallbackIndex: 0},
+	{Identity: "opus", Variant: "primary", AliasKey: "anthropic/claude-opus", FallbackIndex: -1},
+	{Identity: "opus", Variant: "fallback", AliasKey: "anthropic/claude-opus", FallbackIndex: 1},
+	{Identity: "sonnet", Variant: "primary", AliasKey: "anthropic/claude-sonnet", FallbackIndex: -1},
+	{Identity: "sonnet", Variant: "fallback", AliasKey: "anthropic/claude-sonnet", FallbackIndex: 0},
+	{Identity: "haiku", Variant: "primary", AliasKey: "anthropic/claude-haiku", FallbackIndex: -1},
+	{Identity: "fable/mythos", Variant: "primary", AliasKey: "anthropic/claude-fable", FallbackIndex: -1},
+	{Identity: "fable/mythos", Variant: "fallback", AliasKey: "anthropic/claude-fable", FallbackIndex: 0},
 }
 
 // routeForTarget resolves a benchTarget to a standalone Route with
@@ -74,16 +73,16 @@ type benchPrompt struct {
 
 // benchPrompts is the full fixed prompt set: 2 prompts per category x 4
 // categories = 8. Every benchTarget is tested against all 8 (full
-// cross-matrix), not just its own category's prompts.
+// cross-matrix).
 var benchPrompts = []benchPrompt{
-	{ID: "coding-1", Category: "coding", Text: "Write a Go function `parseDuration(s string) (int, error)` that parses strings like '1h30m', '45m', '2h' into total seconds. Handle invalid input with a clear error. No external libraries."},
-	{ID: "coding-2", Category: "coding", Text: "Find and fix the bug in this Go function, explaining the mistake in one sentence:\n\n```go\nfunc lastN(items []int, n int) []int {\n    if n > len(items) {\n        n = len(items)\n    }\n    return items[len(items)-n : len(items)-1]\n}\n```"},
-	{ID: "creative-1", Category: "creative", Text: "Write the opening paragraph of a story: a soldier returns to a village that no longer remembers the war he fought in."},
-	{ID: "creative-2", Category: "creative", Text: "Write a tense dialogue exchange between two characters who both want the same thing but can't say so directly."},
-	{ID: "quick-1", Category: "quick", Text: "Summarize this in 2 sentences: 'The city council voted 6-3 Tuesday night to approve a new transit line connecting the eastern suburbs to downtown, with construction expected to begin in early 2027 and finish by 2030. The $340 million project will add four new stations and is funded through a mix of state grants and a local sales tax increase approved by voters last year. Supporters say it will cut commute times by up to 25 minutes for an estimated 40,000 daily riders, while opponents have raised concerns about construction disruption to small businesses along the route. The council also approved a separate measure to expand bus service in the interim.'"},
-	{ID: "quick-2", Category: "quick", Text: "If a train leaves at 3:15pm going 60mph and another leaves the same station at 3:45pm going 90mph in the same direction, when does the second train catch the first?"},
-	{ID: "fiction-1", Category: "fiction", Text: "Continue this scene in the same voice: 'The Ranger paused at the treeline, where the bark had gone the color of old bruises. No birds called here, and the silence had a texture, like held breath.'"},
-	{ID: "fiction-2", Category: "fiction", Text: "Describe, in-world, what wakes in the dark places between the roots of the world tree when it has not fed in a hundred years."},
+	{ID: "reasoning-1", Category: "reasoning", Text: "Three boxes sit on a table. One contains only apples, one contains only oranges, and one contains both apples and oranges. All three boxes are mislabeled. You can reach into one box and pull out one piece of fruit without looking inside. How do you determine the correct labels for all three boxes? Explain your reasoning step by step."},
+	{ID: "reasoning-2", Category: "reasoning", Text: "A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the ball. How much does the ball cost? Think carefully, then explain the correct answer and why the intuitive answer is wrong."},
+	{ID: "logic-1", Category: "logic", Text: "All cats are mammals. All mammals are warm-blooded. Some warm-blooded animals are not cats. Which of the following conclusions are valid? (a) All cats are warm-blooded. (b) Some warm-blooded animals are not mammals. (c) If something is not warm-blooded, it cannot be a cat. For each, say valid or invalid and why."},
+	{ID: "logic-2", Category: "logic", Text: "If it rains, the ground gets wet. The ground is wet. Does that mean it rained? Explain why or why not, and name the logical fallacy if there is one."},
+	{ID: "math-1", Category: "math", Text: "A train leaves Station A traveling toward Station B at 80 km/h. Another train leaves Station B traveling toward Station A at 100 km/h. The stations are 360 km apart. At the same time, a bird flies from Station A toward Station B at 150 km/h. When it meets the second train, it turns around instantly and flies back toward the first, repeating this pattern until the trains meet. How far does the bird travel in total? Solve it."},
+	{ID: "math-2", Category: "math", Text: "What is the value of the infinite sum 1 + 1/2 + 1/4 + 1/8 + 1/16 + ...? Explain why this sum converges and what it converges to, using reasoning a high school student could follow."},
+	{ID: "science-1", Category: "science", Text: "Explain why the sky appears blue during the day but appears red or orange at sunrise and sunset. Use physics concepts — Rayleigh scattering, light wavelength, and atmospheric path length — in your explanation."},
+	{ID: "science-2", Category: "science", Text: "If you have a sealed balloon filled with air at room temperature and you place it in a freezer, what happens to its volume? Use the ideal gas law to explain the change in volume, pressure, and what would happen if the balloon were instead made of a rigid material."},
 }
 
 // ---------- model calling ----------
@@ -212,10 +211,10 @@ const judgeMaxTokens = 2000
 // judge prompt. The 1-10 scale stays constant across categories so scores
 // compare cleanly in the summary table.
 var categoryRubric = map[string]string{
-	"coding":   "Score on correctness (does the logic work), idiomatic Go style, edge-case handling. Code that wouldn't compile or is wrong scores 1-3.",
-	"creative": "Score on voice/tone, prose craft, originality. Grammatically fine but flat or generic prose scores 4-6.",
-	"quick":    "Score on factual/logical accuracy and conciseness. A wordy but correct answer scores lower than a tight correct one.",
-	"fiction":  "Score on consistency with a dark-fantasy register, immersion, and avoiding flat/translated-sounding phrasing.",
+	"reasoning": "Score on correctness of the final answer, logical soundness of the step-by-step reasoning, and whether it identifies common pitfalls. A wrong final answer scores 1-3 even if the reasoning path is interesting.",
+	"logic":     "Score on correctness of the logical analysis, proper identification of valid/invalid conclusions, and clear explanation of why. Missing the fallacy or incorrectly classifying valid vs invalid scores 1-3.",
+	"math":      "Score on mathematical accuracy, clarity of derivation, and ability to explain concepts accessibly. A numerically wrong answer scores 1-4 regardless of how good the explanation sounds.",
+	"science":   "Score on factual accuracy, correct use of scientific concepts, and clarity of explanation. False or misleading physics scores 1-3.",
 }
 
 type judgeResult struct {
@@ -473,7 +472,7 @@ func buildDiffLines(history []benchJobResult, current []benchJobResult, currentR
 // ---------- table & markdown report ----------
 
 // benchCategories is the fixed column order for the summary table.
-var benchCategories = []string{"coding", "creative", "quick", "fiction"}
+var benchCategories = []string{"reasoning", "logic", "math", "science"}
 
 // buildSummaryTable renders an identity/variant x category average-score
 // table as plain text, in first-seen order of identity/variant.
@@ -631,7 +630,7 @@ func cmdBench() {
 
 	diffLines := buildDiffLines(history, results, runID)
 	if len(diffLines) == 0 {
-		fmt.Print("\n  (first run — no history to diff against)\n")
+		fmt.Print("\n  (first run with new categories — no history to diff against)\n")
 	} else {
 		fmt.Print("\n  vs previous run:\n\n")
 		for _, line := range diffLines {

@@ -29,6 +29,7 @@ func TestRouteForTarget(t *testing.T) {
 				Provider: "nvidia", Model: "nemotron-3-ultra-550b-a55b",
 				Fallbacks: []Route{
 					{Provider: "nvidia", Model: "deepseek-v4-pro"},
+					{Provider: "nvidia", Model: "nemotron-3-ultra-550b-a55b"},
 				},
 			},
 			"anthropic/claude-haiku": {
@@ -44,7 +45,8 @@ func TestRouteForTarget(t *testing.T) {
 		wantErr   bool
 	}{
 		{"primary", benchTarget{AliasKey: "anthropic/claude-opus", FallbackIndex: -1}, "nemotron-3-ultra-550b-a55b", false},
-		{"fallback", benchTarget{AliasKey: "anthropic/claude-opus", FallbackIndex: 0}, "deepseek-v4-pro", false},
+		{"fallback index 0", benchTarget{AliasKey: "anthropic/claude-opus", FallbackIndex: 0}, "deepseek-v4-pro", false},
+		{"fallback index 1", benchTarget{AliasKey: "anthropic/claude-opus", FallbackIndex: 1}, "nemotron-3-ultra-550b-a55b", false},
 		{"no fallback configured", benchTarget{AliasKey: "anthropic/claude-haiku", FallbackIndex: 0}, "", true},
 		{"unknown alias", benchTarget{AliasKey: "anthropic/claude-ghost", FallbackIndex: -1}, "", true},
 	}
@@ -81,7 +83,7 @@ func TestBenchTargetsAndPromptsShape(t *testing.T) {
 	for _, p := range benchPrompts {
 		categories[p.Category]++
 	}
-	for _, cat := range []string{"coding", "creative", "quick", "fiction"} {
+	for _, cat := range []string{"reasoning", "logic", "math", "science"} {
 		if categories[cat] != 2 {
 			t.Errorf("category %q has %d prompts, want 2", cat, categories[cat])
 		}
@@ -247,7 +249,7 @@ func TestJudgeResponseRetriesOnceOnParseFailure(t *testing.T) {
 
 	cfg := &Config{Providers: map[string]Provider{"gemini": {BaseURL: srv.URL, APIKey: "k"}}}
 
-	res, err := judgeResponse(context.Background(), srv.Client(), cfg, "coding", "prompt", "response")
+	res, err := judgeResponse(context.Background(), srv.Client(), cfg, "reasoning", "prompt", "response")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -275,7 +277,7 @@ func TestJudgeResponseGivesUpAfterTwoBadReplies(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &Config{Providers: map[string]Provider{"gemini": {BaseURL: srv.URL, APIKey: "k"}}}
-	_, err := judgeResponse(context.Background(), srv.Client(), cfg, "coding", "prompt", "response")
+	_, err := judgeResponse(context.Background(), srv.Client(), cfg, "reasoning", "prompt", "response")
 	if err == nil {
 		t.Fatal("expected error after two unparseable judge replies")
 	}
@@ -308,8 +310,8 @@ func TestRunBenchJobSuccess(t *testing.T) {
 		},
 	}
 	job := benchJob{
-		Target: benchTarget{Identity: "haiku", Category: "quick", Variant: "primary", AliasKey: "anthropic/claude-haiku", FallbackIndex: -1},
-		Prompt: benchPrompt{ID: "quick-1", Category: "quick", Text: "summarize this"},
+		Target: benchTarget{Identity: "haiku", Variant: "primary", AliasKey: "anthropic/claude-haiku", FallbackIndex: -1},
+		Prompt: benchPrompt{ID: "reasoning-1", Category: "reasoning", Text: "Three boxes problem..."},
 	}
 
 	result := runBenchJob(context.Background(), srv.Client(), cfg, "20260701-120000", job)
@@ -331,7 +333,7 @@ func TestRunBenchJobBadTargetNeverPanics(t *testing.T) {
 	cfg := &Config{Aliases: map[string]Route{}}
 	job := benchJob{
 		Target: benchTarget{Identity: "ghost", AliasKey: "anthropic/claude-ghost", FallbackIndex: -1},
-		Prompt: benchPrompt{ID: "coding-1", Category: "coding", Text: "x"},
+		Prompt: benchPrompt{ID: "reasoning-1", Category: "reasoning", Text: "x"},
 	}
 	result := runBenchJob(context.Background(), http.DefaultClient, cfg, "20260701-120000", job)
 	if result.Error == "" {
@@ -346,7 +348,7 @@ func TestBenchJobResultJSONShape(t *testing.T) {
 	r := benchJobResult{
 		RunID: "20260701-100000", Timestamp: "2026-07-01T10:00:00Z",
 		Identity: "opus", Variant: "primary", Model: "nemotron-3-ultra-550b-a55b", Provider: "nvidia",
-		Category: "coding", PromptID: "coding-1", Score: intPtr(8), Rationale: "solid",
+		Category: "math", PromptID: "math-1", Score: intPtr(8), Rationale: "solid",
 		LatencyMs: 1500, TokensIn: 50, TokensOut: 100,
 		ResponseText: "this should never appear in JSONL",
 	}
@@ -372,19 +374,19 @@ func TestBenchJobResultJSONShape(t *testing.T) {
 
 func TestAvgScoreFor(t *testing.T) {
 	results := []benchJobResult{
-		{Identity: "opus", Variant: "primary", Category: "coding", Score: intPtr(8)},
-		{Identity: "opus", Variant: "primary", Category: "coding", Score: intPtr(6)},
-		{Identity: "opus", Variant: "primary", Category: "creative", Score: intPtr(4)},
-		{Identity: "opus", Variant: "primary", Category: "coding", Score: nil, Error: "timeout"},
+		{Identity: "opus", Variant: "primary", Category: "math", Score: intPtr(8)},
+		{Identity: "opus", Variant: "primary", Category: "math", Score: intPtr(6)},
+		{Identity: "opus", Variant: "primary", Category: "logic", Score: intPtr(4)},
+		{Identity: "opus", Variant: "primary", Category: "math", Score: nil, Error: "timeout"},
 	}
-	avg, ok := avgScoreFor(results, "opus", "primary", "coding")
+	avg, ok := avgScoreFor(results, "opus", "primary", "math")
 	if !ok {
 		t.Fatal("expected ok=true")
 	}
 	if avg != 7.0 {
 		t.Errorf("avg = %v, want 7.0", avg)
 	}
-	if _, ok := avgScoreFor(results, "opus", "primary", "fiction"); ok {
+	if _, ok := avgScoreFor(results, "opus", "primary", "science"); ok {
 		t.Error("expected ok=false for category with no results")
 	}
 }
@@ -405,10 +407,10 @@ func TestMostRecentRunID(t *testing.T) {
 
 func TestBuildDiffLines(t *testing.T) {
 	history := []benchJobResult{
-		{RunID: "20260615-100000", Identity: "sonnet", Variant: "primary", Category: "creative", Score: intPtr(7)},
+		{RunID: "20260615-100000", Identity: "sonnet", Variant: "primary", Category: "science", Score: intPtr(7)},
 	}
 	current := []benchJobResult{
-		{RunID: "20260701-100000", Identity: "sonnet", Variant: "primary", Category: "creative", Score: intPtr(8)},
+		{RunID: "20260701-100000", Identity: "sonnet", Variant: "primary", Category: "science", Score: intPtr(8)},
 	}
 	lines := buildDiffLines(history, current, "20260701-100000")
 	if len(lines) != 1 {
@@ -426,9 +428,9 @@ func TestBuildDiffLines(t *testing.T) {
 func TestLoadBenchHistorySkipsCorruptLines(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bench_runs.jsonl")
-	content := "{\"run_id\":\"a\",\"identity\":\"opus\",\"variant\":\"primary\",\"category\":\"coding\",\"score\":8}\n" +
+	content := "{\"run_id\":\"a\",\"identity\":\"opus\",\"variant\":\"primary\",\"category\":\"math\",\"score\":8}\n" +
 		"not valid json\n" +
-		"{\"run_id\":\"a\",\"identity\":\"sonnet\",\"variant\":\"primary\",\"category\":\"creative\",\"score\":7}\n"
+		"{\"run_id\":\"a\",\"identity\":\"sonnet\",\"variant\":\"primary\",\"category\":\"science\",\"score\":7}\n"
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -453,34 +455,34 @@ func TestLoadBenchHistoryMissingFile(t *testing.T) {
 
 func TestBuildSummaryTable(t *testing.T) {
 	results := []benchJobResult{
-		{Identity: "opus", Variant: "primary", Category: "coding", Score: intPtr(8)},
-		{Identity: "opus", Variant: "primary", Category: "coding", Score: intPtr(6)},
-		{Identity: "haiku", Variant: "primary", Category: "quick", Score: intPtr(9)},
+		{Identity: "opus", Variant: "primary", Category: "math", Score: intPtr(8)},
+		{Identity: "opus", Variant: "primary", Category: "math", Score: intPtr(6)},
+		{Identity: "haiku", Variant: "primary", Category: "science", Score: intPtr(9)},
 	}
 	out := buildSummaryTable(results)
 	if !strings.Contains(out, "opus/primary") {
 		t.Error("missing opus/primary row")
 	}
 	if !strings.Contains(out, "7.0") {
-		t.Error("missing expected average 7.0 for opus/primary coding")
+		t.Error("missing expected average 7.0 for opus/primary math")
 	}
 	if !strings.Contains(out, "9.0") {
-		t.Error("missing expected average 9.0 for haiku/primary quick")
+		t.Error("missing expected average 9.0 for haiku/primary science")
 	}
 }
 
 func TestBuildMarkdownReport(t *testing.T) {
 	jobs := []benchJob{
-		{Target: benchTarget{Identity: "opus", Variant: "primary"}, Prompt: benchPrompt{ID: "coding-1", Text: "write a thing"}},
+		{Target: benchTarget{Identity: "opus", Variant: "primary"}, Prompt: benchPrompt{ID: "math-1", Text: "solve this"}},
 	}
 	results := []benchJobResult{
-		{Identity: "opus", Variant: "primary", PromptID: "coding-1", Model: "nemotron-3-ultra-550b-a55b", Provider: "nvidia", Score: intPtr(8), Rationale: "good", ResponseText: "func foo() {}"},
+		{Identity: "opus", Variant: "primary", PromptID: "math-1", Model: "nemotron-3-ultra-550b-a55b", Provider: "nvidia", Score: intPtr(8), Rationale: "good", ResponseText: "42"},
 	}
 	out := buildMarkdownReport("20260701-100000", jobs, results)
-	if !strings.Contains(out, "write a thing") {
+	if !strings.Contains(out, "solve this") {
 		t.Error("missing prompt text")
 	}
-	if !strings.Contains(out, "func foo() {}") {
+	if !strings.Contains(out, "42") {
 		t.Error("missing response text")
 	}
 	if !strings.Contains(out, "8/10") {
@@ -490,10 +492,10 @@ func TestBuildMarkdownReport(t *testing.T) {
 
 func TestBuildMarkdownReportError(t *testing.T) {
 	jobs := []benchJob{
-		{Target: benchTarget{Identity: "opus", Variant: "primary"}, Prompt: benchPrompt{ID: "coding-1", Text: "write a thing"}},
+		{Target: benchTarget{Identity: "opus", Variant: "primary"}, Prompt: benchPrompt{ID: "math-1", Text: "solve this"}},
 	}
 	results := []benchJobResult{
-		{Identity: "opus", Variant: "primary", PromptID: "coding-1", Error: "upstream 503: degraded"},
+		{Identity: "opus", Variant: "primary", PromptID: "math-1", Error: "upstream 503: degraded"},
 	}
 	out := buildMarkdownReport("20260701-100000", jobs, results)
 	if !strings.Contains(out, "upstream 503: degraded") {

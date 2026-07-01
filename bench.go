@@ -238,3 +238,87 @@ func judgeResponse(ctx context.Context, httpClient *http.Client, cfg *Config, ca
 	}
 	return res2, nil
 }
+
+// ---------- results ----------
+
+// benchJobResult is one completed (config, prompt) job. ResponseText is
+// excluded from JSON (json:"-") so it never lands in bench_runs.jsonl —
+// full text only goes in the per-run markdown report.
+type benchJobResult struct {
+	RunID        string `json:"run_id"`
+	Timestamp    string `json:"timestamp"`
+	Identity     string `json:"identity"`
+	Variant      string `json:"variant"`
+	Model        string `json:"model"`
+	Provider     string `json:"provider"`
+	Category     string `json:"category"`
+	PromptID     string `json:"prompt_id"`
+	Score        *int   `json:"score"`
+	Rationale    string `json:"rationale,omitempty"`
+	LatencyMs    int64  `json:"latency_ms"`
+	TokensIn     int    `json:"tokens_in"`
+	TokensOut    int    `json:"tokens_out"`
+	Error        string `json:"error,omitempty"`
+	ResponseText string `json:"-"`
+}
+
+type benchJob struct {
+	Target benchTarget
+	Prompt benchPrompt
+}
+
+// allBenchJobs is the full cross-matrix: every target against every
+// prompt, regardless of the prompt's category — 7 targets x 8 prompts.
+func allBenchJobs() []benchJob {
+	var jobs []benchJob
+	for _, t := range benchTargets {
+		for _, p := range benchPrompts {
+			jobs = append(jobs, benchJob{Target: t, Prompt: p})
+		}
+	}
+	return jobs
+}
+
+// runBenchJob runs one (target, prompt) pair end to end: resolve the
+// route, generate, then judge. Any failure at any step is captured in
+// result.Error and returned (never panics, never aborts the caller's loop)
+// so one bad job can't take down the rest of the run.
+func runBenchJob(ctx context.Context, httpClient *http.Client, cfg *Config, runID string, job benchJob) benchJobResult {
+	result := benchJobResult{
+		RunID:    runID,
+		Identity: job.Target.Identity,
+		Variant:  job.Target.Variant,
+		Category: job.Prompt.Category,
+		PromptID: job.Prompt.ID,
+	}
+
+	route, err := routeForTarget(cfg, job.Target)
+	if err != nil {
+		result.Timestamp = time.Now().Format(time.RFC3339)
+		result.Error = err.Error()
+		return result
+	}
+	result.Model = route.Model
+	result.Provider = route.Provider
+
+	responseText, tokensIn, tokensOut, latencyMs, err := callModel(ctx, httpClient, cfg, route, job.Prompt.Text, 4096)
+	result.Timestamp = time.Now().Format(time.RFC3339)
+	result.LatencyMs = latencyMs
+	result.TokensIn = tokensIn
+	result.TokensOut = tokensOut
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	result.ResponseText = responseText
+
+	jr, err := judgeResponse(ctx, httpClient, cfg, job.Prompt.Category, job.Prompt.Text, responseText)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	score := jr.Score
+	result.Score = &score
+	result.Rationale = jr.Rationale
+	return result
+}

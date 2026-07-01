@@ -212,3 +212,61 @@ func TestJudgeResponseGivesUpAfterTwoBadReplies(t *testing.T) {
 		t.Fatal("expected error after two unparseable judge replies")
 	}
 }
+
+func intPtr(n int) *int { return &n }
+
+func TestAllBenchJobsCount(t *testing.T) {
+	jobs := allBenchJobs()
+	want := len(benchTargets) * len(benchPrompts)
+	if len(jobs) != want {
+		t.Errorf("len(allBenchJobs()) = %d, want %d (%d targets x %d prompts)", len(jobs), want, len(benchTargets), len(benchPrompts))
+	}
+}
+
+func TestRunBenchJobSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"score\":8,\"rationale\":\"good\"}"}}],"usage":{"prompt_tokens":10,"completion_tokens":20}}`))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{
+		Providers: map[string]Provider{"nvidia": {BaseURL: srv.URL, APIKey: "k"}},
+		Aliases: map[string]Route{
+			"anthropic/claude-haiku": {Provider: "nvidia", Model: "test-model"},
+		},
+	}
+	job := benchJob{
+		Target: benchTarget{Identity: "haiku", Category: "quick", Variant: "primary", AliasKey: "anthropic/claude-haiku", FallbackIndex: -1},
+		Prompt: benchPrompt{ID: "quick-1", Category: "quick", Text: "summarize this"},
+	}
+
+	result := runBenchJob(context.Background(), srv.Client(), cfg, "20260701-120000", job)
+	if result.Error != "" {
+		t.Fatalf("unexpected error: %s", result.Error)
+	}
+	if result.Score == nil || *result.Score != 8 {
+		t.Errorf("score = %v, want 8", result.Score)
+	}
+	if result.ResponseText == "" {
+		t.Error("expected ResponseText to be populated")
+	}
+	if result.Model != "test-model" || result.Provider != "nvidia" {
+		t.Errorf("model/provider = %s/%s, want test-model/nvidia", result.Model, result.Provider)
+	}
+}
+
+func TestRunBenchJobBadTargetNeverPanics(t *testing.T) {
+	cfg := &Config{Aliases: map[string]Route{}}
+	job := benchJob{
+		Target: benchTarget{Identity: "ghost", AliasKey: "anthropic/claude-ghost", FallbackIndex: -1},
+		Prompt: benchPrompt{ID: "coding-1", Category: "coding", Text: "x"},
+	}
+	result := runBenchJob(context.Background(), http.DefaultClient, cfg, "20260701-120000", job)
+	if result.Error == "" {
+		t.Error("expected error for unresolvable target")
+	}
+	if result.Score != nil {
+		t.Error("expected nil score for a job that never reached generation")
+	}
+}

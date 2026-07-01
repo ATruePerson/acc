@@ -129,3 +129,86 @@ func TestCallModelUnknownProvider(t *testing.T) {
 		t.Fatal("expected error for unknown provider")
 	}
 }
+
+func TestParseJudgeJSON(t *testing.T) {
+	cases := []struct {
+		name      string
+		text      string
+		wantScore int
+		wantErr   bool
+	}{
+		{"clean json", `{"score": 8, "rationale": "solid"}`, 8, false},
+		{"fenced", "```json\n{\"score\": 7, \"rationale\": \"ok\"}\n```", 7, false},
+		{"prose wrapper", `Here you go: {"score": 9, "rationale": "great"} hope that helps`, 9, false},
+		{"malformed", `{"score": 8, "rationale"`, 0, true},
+		{"score too high", `{"score": 11, "rationale": "x"}`, 0, true},
+		{"score too low", `{"score": 0, "rationale": "x"}`, 0, true},
+		{"no json", `sorry, I cannot grade this`, 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r, err := parseJudgeJSON(c.text)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got %+v", r)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if r.Score != c.wantScore {
+				t.Errorf("score = %d, want %d", r.Score, c.wantScore)
+			}
+		})
+	}
+}
+
+func TestJudgeResponseRetriesOnceOnParseFailure(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if calls == 1 {
+			w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"not json"}}]}`))
+			return
+		}
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"score\":6,\"rationale\":\"fine\"}"}}]}`))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{Providers: map[string]Provider{"nvidia": {BaseURL: srv.URL, APIKey: "k"}}}
+
+	res, err := judgeResponse(context.Background(), srv.Client(), cfg, "coding", "prompt", "response")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Score != 6 {
+		t.Errorf("score = %d, want 6", res.Score)
+	}
+	if calls != 2 {
+		t.Errorf("calls = %d, want 2 (one retry)", calls)
+	}
+}
+
+func TestJudgeResponseUnknownCategory(t *testing.T) {
+	cfg := &Config{}
+	_, err := judgeResponse(context.Background(), http.DefaultClient, cfg, "unknown-category", "p", "r")
+	if err == nil {
+		t.Fatal("expected error for unknown category")
+	}
+}
+
+func TestJudgeResponseGivesUpAfterTwoBadReplies(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"still not json"}}]}`))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{Providers: map[string]Provider{"nvidia": {BaseURL: srv.URL, APIKey: "k"}}}
+	_, err := judgeResponse(context.Background(), srv.Client(), cfg, "coding", "prompt", "response")
+	if err == nil {
+		t.Fatal("expected error after two unparseable judge replies")
+	}
+}

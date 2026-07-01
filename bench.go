@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -154,4 +155,86 @@ func callModel(ctx context.Context, httpClient *http.Client, cfg *Config, route 
 		tokensOut = oresp.Usage.CompletionTokens
 	}
 	return responseText, tokensIn, tokensOut, latencyMs, nil
+}
+
+// ---------- judging ----------
+
+// judgeRoute is the fixed judge model: free, and deliberately not a
+// contestant in any tested category, to avoid a model grading itself or a
+// sibling favorably.
+var judgeRoute = Route{Provider: "nvidia", Model: "z-ai/glm-5.1", ReasoningEffort: "high"}
+
+// categoryRubric is the per-category grading instruction appended to every
+// judge prompt. The 1-10 scale stays constant across categories so scores
+// compare cleanly in the summary table.
+var categoryRubric = map[string]string{
+	"coding":   "Score on correctness (does the logic work), idiomatic Go style, edge-case handling. Code that wouldn't compile or is wrong scores 1-3.",
+	"creative": "Score on voice/tone, prose craft, originality. Grammatically fine but flat or generic prose scores 4-6.",
+	"quick":    "Score on factual/logical accuracy and conciseness. A wordy but correct answer scores lower than a tight correct one.",
+	"fiction":  "Score on consistency with a dark-fantasy register, immersion, and avoiding flat/translated-sounding phrasing.",
+}
+
+type judgeResult struct {
+	Score     int
+	Rationale string
+}
+
+func buildJudgePrompt(category, prompt, response string) (string, error) {
+	rubric, ok := categoryRubric[category]
+	if !ok {
+		return "", fmt.Errorf("no rubric for category %q", category)
+	}
+	return fmt.Sprintf(
+		"You are grading an AI model's response for quality.\nTask category: %s\nOriginal prompt: %s\nResponse to grade: %s\n%s\nRespond with ONLY a JSON object: {\"score\": <integer 1-10>, \"rationale\": \"<1-2 sentence explanation>\"}",
+		category, prompt, response, rubric,
+	), nil
+}
+
+// parseJudgeJSON extracts {"score":N,"rationale":"..."} from a judge reply,
+// tolerating surrounding prose or markdown code fences around the object.
+func parseJudgeJSON(text string) (judgeResult, error) {
+	start := strings.Index(text, "{")
+	end := strings.LastIndex(text, "}")
+	if start == -1 || end == -1 || end < start {
+		return judgeResult{}, fmt.Errorf("no JSON object found in judge reply")
+	}
+	var raw struct {
+		Score     int    `json:"score"`
+		Rationale string `json:"rationale"`
+	}
+	if err := json.Unmarshal([]byte(text[start:end+1]), &raw); err != nil {
+		return judgeResult{}, fmt.Errorf("invalid judge JSON: %w", err)
+	}
+	if raw.Score < 1 || raw.Score > 10 {
+		return judgeResult{}, fmt.Errorf("judge score %d out of range 1-10", raw.Score)
+	}
+	return judgeResult{Score: raw.Score, Rationale: raw.Rationale}, nil
+}
+
+// judgeResponse grades one generation response. A malformed judge reply is
+// retried once before giving up — one bad judge call must not lose the
+// whole job's result, just this one job's score.
+func judgeResponse(ctx context.Context, httpClient *http.Client, cfg *Config, category, prompt, response string) (judgeResult, error) {
+	judgePrompt, err := buildJudgePrompt(category, prompt, response)
+	if err != nil {
+		return judgeResult{}, err
+	}
+
+	text, _, _, _, callErr := callModel(ctx, httpClient, cfg, judgeRoute, judgePrompt, 200)
+	if callErr != nil {
+		return judgeResult{}, fmt.Errorf("judge call failed: %w", callErr)
+	}
+	if res, parseErr := parseJudgeJSON(text); parseErr == nil {
+		return res, nil
+	}
+
+	text2, _, _, _, callErr2 := callModel(ctx, httpClient, cfg, judgeRoute, judgePrompt, 200)
+	if callErr2 != nil {
+		return judgeResult{}, fmt.Errorf("judge retry call failed: %w", callErr2)
+	}
+	res2, parseErr2 := parseJudgeJSON(text2)
+	if parseErr2 != nil {
+		return judgeResult{}, fmt.Errorf("judge_parse_failed: %w", parseErr2)
+	}
+	return res2, nil
 }

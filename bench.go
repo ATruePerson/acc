@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -513,4 +515,94 @@ func writeMarkdownReport(runID string, jobs []benchJob, results []benchJobResult
 		return "", err
 	}
 	return path, nil
+}
+
+// ---------- orchestration ----------
+
+const benchConcurrency = 5
+
+// cmdBench runs the full cross-matrix benchmark: every benchTarget against
+// every benchPrompt, capped at benchConcurrency jobs in flight at once.
+// Results stream to bench_runs.jsonl as each job finishes (not batched at
+// the end, so a mid-run crash doesn't lose already-finished work), then a
+// summary table, a diff against the previous run, and a full markdown
+// report are printed/written.
+func cmdBench() {
+	loadDotenv(defaultEnvPath())
+	cfg, err := loadConfig(defaultConfigPath())
+	if err != nil {
+		fmt.Printf("  No config found. Run `acc setup` first. (%v)\n", err)
+		return
+	}
+
+	runID := time.Now().Format("20060102-150405")
+	jobs := allBenchJobs()
+
+	history, err := loadBenchHistory("bench_runs.jsonl")
+	if err != nil {
+		fmt.Printf("  Could not read bench_runs.jsonl history: %v\n", err)
+		history = nil
+	}
+
+	jsonlFile, err := os.OpenFile("bench_runs.jsonl", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Printf("  Could not open bench_runs.jsonl: %v\n", err)
+		return
+	}
+	defer jsonlFile.Close()
+
+	httpClient := &http.Client{Timeout: 5 * time.Minute}
+	results := make([]benchJobResult, len(jobs))
+
+	fmt.Printf("\n  acc bench — run %s, %d jobs (%d concurrent)\n\n", runID, len(jobs), benchConcurrency)
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, benchConcurrency)
+	var completed atomic.Int32
+	var mu sync.Mutex
+
+	for i, job := range jobs {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, job benchJob) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			result := runBenchJob(context.Background(), httpClient, cfg, runID, job)
+			results[i] = result
+
+			mu.Lock()
+			defer mu.Unlock()
+			n := completed.Add(1)
+			line, _ := json.Marshal(result)
+			jsonlFile.Write(append(line, '\n'))
+
+			status := "ERROR: " + result.Error
+			if result.Error == "" {
+				status = fmt.Sprintf("score %d/10", *result.Score)
+			}
+			fmt.Printf("  [%d/%d] %s/%s · %s ... %dms, %s\n",
+				n, len(jobs), result.Identity, result.Variant, result.PromptID, result.LatencyMs, status)
+		}(i, job)
+	}
+	wg.Wait()
+
+	fmt.Print(buildSummaryTable(results))
+
+	diffLines := buildDiffLines(history, results, runID)
+	if len(diffLines) == 0 {
+		fmt.Print("\n  (first run — no history to diff against)\n")
+	} else {
+		fmt.Print("\n  vs previous run:\n\n")
+		for _, line := range diffLines {
+			fmt.Printf("  %s\n", line)
+		}
+	}
+
+	reportPath, err := writeMarkdownReport(runID, jobs, results)
+	if err != nil {
+		fmt.Printf("\n  Could not write markdown report: %v\n", err)
+		return
+	}
+	fmt.Printf("\n  Full report: %s\n\n", reportPath)
 }

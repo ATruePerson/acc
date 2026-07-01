@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
 
 func TestRouteForTarget(t *testing.T) {
 	cfg := &Config{
@@ -65,5 +70,62 @@ func TestBenchTargetsAndPromptsShape(t *testing.T) {
 		if categories[cat] != 2 {
 			t.Errorf("category %q has %d prompts, want 2", cat, categories[cat])
 		}
+	}
+}
+
+func TestCallModel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"hello world"}}],"usage":{"prompt_tokens":12,"completion_tokens":34}}`))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"fake": {BaseURL: srv.URL, APIKey: "test-key"},
+		},
+	}
+	route := Route{Provider: "fake", Model: "fake-model"}
+
+	text, tokensIn, tokensOut, latencyMs, err := callModel(context.Background(), srv.Client(), cfg, route, "hi", 100)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if text != "hello world" {
+		t.Errorf("text = %q, want %q", text, "hello world")
+	}
+	if tokensIn != 12 || tokensOut != 34 {
+		t.Errorf("tokens = %d/%d, want 12/34", tokensIn, tokensOut)
+	}
+	if latencyMs < 0 {
+		t.Errorf("latencyMs = %d, want >= 0", latencyMs)
+	}
+}
+
+func TestCallModelUpstreamError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error":"degraded"}`))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{Providers: map[string]Provider{"fake": {BaseURL: srv.URL, APIKey: "k"}}}
+	route := Route{Provider: "fake", Model: "fake-model"}
+
+	_, _, _, _, err := callModel(context.Background(), srv.Client(), cfg, route, "hi", 100)
+	if err == nil {
+		t.Fatal("expected error for 503 upstream response")
+	}
+}
+
+func TestCallModelUnknownProvider(t *testing.T) {
+	cfg := &Config{Providers: map[string]Provider{}}
+	route := Route{Provider: "ghost", Model: "m"}
+	_, _, _, _, err := callModel(context.Background(), http.DefaultClient, cfg, route, "hi", 100)
+	if err == nil {
+		t.Fatal("expected error for unknown provider")
 	}
 }

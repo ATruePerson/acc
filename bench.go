@@ -1,7 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"time"
 )
 
 // ---------- bench targets ----------
@@ -73,4 +79,79 @@ var benchPrompts = []benchPrompt{
 	{ID: "quick-2", Category: "quick", Text: "If a train leaves at 3:15pm going 60mph and another leaves the same station at 3:45pm going 90mph in the same direction, when does the second train catch the first?"},
 	{ID: "fiction-1", Category: "fiction", Text: "Continue this scene in the same voice: 'The Ranger paused at the treeline, where the bark had gone the color of old bruises. No birds called here, and the silence had a texture, like held breath.'"},
 	{ID: "fiction-2", Category: "fiction", Text: "Describe, in-world, what wakes in the dark places between the roots of the world tree when it has not fed in a hundred years."},
+}
+
+// ---------- model calling ----------
+
+// callModel sends one prompt through route exactly as the live proxy
+// would (same translateRequest + ExtraBody merge), but calls the upstream
+// provider directly — no running proxy daemon required. Always
+// non-streaming, so the response is a plain JSON OpenAIResponse.
+func callModel(ctx context.Context, httpClient *http.Client, cfg *Config, route Route, promptText string, maxTokens int) (responseText string, tokensIn, tokensOut int, latencyMs int64, err error) {
+	ar := &AnthropicRequest{
+		Model:     route.Model,
+		MaxTokens: maxTokens,
+		Messages:  []AnthropicMessage{{Role: "user", Content: jsonString(promptText)}},
+		Stream:    false,
+	}
+
+	or, err := translateRequest(ar, route, cfg)
+	if err != nil {
+		return "", 0, 0, 0, fmt.Errorf("translate: %w", err)
+	}
+
+	body, err := json.Marshal(or)
+	if err != nil {
+		return "", 0, 0, 0, fmt.Errorf("marshal request: %w", err)
+	}
+	if len(route.ExtraBody) > 0 {
+		var merged map[string]any
+		if err := json.Unmarshal(body, &merged); err == nil {
+			for k, v := range route.ExtraBody {
+				merged[k] = v
+			}
+			if newBody, err := json.Marshal(merged); err == nil {
+				body = newBody
+			}
+		}
+	}
+
+	prov, ok := cfg.Providers[route.Provider]
+	if !ok {
+		return "", 0, 0, 0, fmt.Errorf("unknown provider: %s", route.Provider)
+	}
+
+	start := time.Now()
+	req, err := http.NewRequestWithContext(ctx, "POST", prov.BaseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return "", 0, 0, 0, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+prov.APIKey)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", 0, 0, 0, fmt.Errorf("upstream: %w", err)
+	}
+	defer resp.Body.Close()
+	latencyMs = time.Since(start).Milliseconds()
+
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return "", 0, 0, latencyMs, fmt.Errorf("upstream %d: %s", resp.StatusCode, truncate(string(b), 300))
+	}
+
+	var oresp OpenAIResponse
+	if err := json.Unmarshal(b, &oresp); err != nil {
+		return "", 0, 0, latencyMs, fmt.Errorf("parse upstream: %w", err)
+	}
+
+	if len(oresp.Choices) > 0 && oresp.Choices[0].Message != nil {
+		responseText = decodeStringContent(oresp.Choices[0].Message.Content)
+	}
+	if oresp.Usage != nil {
+		tokensIn = oresp.Usage.PromptTokens
+		tokensOut = oresp.Usage.CompletionTokens
+	}
+	return responseText, tokensIn, tokensOut, latencyMs, nil
 }

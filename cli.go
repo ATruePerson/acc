@@ -47,6 +47,8 @@ func dispatch(args []string) bool {
 		cmdDoctor()
 	case "models", "list":
 		cmdModels()
+	case "bench":
+		cmdBench()
 	case "claude", "run":
 		cmdClaude(args[2:])
 	case "help", "--help", "-h":
@@ -65,6 +67,7 @@ Usage:
   acc setup           Interactive first-time setup (keys + config)
   acc doctor          Test that your provider keys work
   acc models          List the model names you can use
+  acc bench           Benchmark every persona + fallback, judged for quality
   acc claude [args]   Start the proxy and launch Claude Code through it
   acc help            Show this help
 

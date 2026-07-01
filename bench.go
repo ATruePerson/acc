@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -321,4 +323,194 @@ func runBenchJob(ctx context.Context, httpClient *http.Client, cfg *Config, runI
 	result.Score = &score
 	result.Rationale = jr.Rationale
 	return result
+}
+
+// ---------- history & diff ----------
+
+// loadBenchHistory reads bench_runs.jsonl, skipping any corrupt line
+// rather than failing the whole load. A missing file is not an error — it
+// just means there's no history yet (first run).
+func loadBenchHistory(path string) ([]benchJobResult, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var results []benchJobResult
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var r benchJobResult
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			continue
+		}
+		results = append(results, r)
+	}
+	return results, nil
+}
+
+// mostRecentRunID returns the lexicographically greatest run_id in results
+// that isn't excludeRunID. Run IDs are YYYYMMDD-HHMMSS, so string order is
+// chronological order. Returns "" if no other run exists.
+func mostRecentRunID(results []benchJobResult, excludeRunID string) string {
+	best := ""
+	for _, r := range results {
+		if r.RunID == excludeRunID {
+			continue
+		}
+		if r.RunID > best {
+			best = r.RunID
+		}
+	}
+	return best
+}
+
+// avgScoreFor averages the score of every scored (non-error) result
+// matching identity+variant+category. ok is false when nothing matches.
+func avgScoreFor(results []benchJobResult, identity, variant, category string) (avg float64, ok bool) {
+	sum, count := 0, 0
+	for _, r := range results {
+		if r.Identity == identity && r.Variant == variant && r.Category == category && r.Score != nil {
+			sum += *r.Score
+			count++
+		}
+	}
+	if count == 0 {
+		return 0, false
+	}
+	return float64(sum) / float64(count), true
+}
+
+func filterByRunID(results []benchJobResult, runID string) []benchJobResult {
+	var out []benchJobResult
+	for _, r := range results {
+		if r.RunID == runID {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// buildDiffLines compares current results against the most recent prior
+// run in history and returns one formatted line per (identity, variant,
+// category) cell present with a scored average in both runs. Returns nil
+// when there's no prior run to compare against.
+func buildDiffLines(history []benchJobResult, current []benchJobResult, currentRunID string) []string {
+	previousRunID := mostRecentRunID(history, currentRunID)
+	if previousRunID == "" {
+		return nil
+	}
+	previous := filterByRunID(history, previousRunID)
+
+	var lines []string
+	seen := map[string]bool{}
+	for _, r := range current {
+		key := r.Identity + "/" + r.Variant + " " + r.Category
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		curAvg, curOK := avgScoreFor(current, r.Identity, r.Variant, r.Category)
+		prevAvg, prevOK := avgScoreFor(previous, r.Identity, r.Variant, r.Category)
+		if !curOK || !prevOK {
+			continue
+		}
+		delta := curAvg - prevAvg
+		sign := "+"
+		if delta < 0 {
+			sign = ""
+		}
+		lines = append(lines, fmt.Sprintf("%-30s %.1f -> %.1f (%s%.1f)", key, prevAvg, curAvg, sign, delta))
+	}
+	return lines
+}
+
+// ---------- table & markdown report ----------
+
+// benchCategories is the fixed column order for the summary table.
+var benchCategories = []string{"coding", "creative", "quick", "fiction"}
+
+// buildSummaryTable renders an identity/variant x category average-score
+// table as plain text, in first-seen order of identity/variant.
+func buildSummaryTable(results []benchJobResult) string {
+	type cell struct {
+		sum   int
+		count int
+	}
+	table := map[string]map[string]*cell{}
+	var order []string
+	seen := map[string]bool{}
+
+	for _, r := range results {
+		key := r.Identity + "/" + r.Variant
+		if !seen[key] {
+			seen[key] = true
+			order = append(order, key)
+		}
+		if table[key] == nil {
+			table[key] = map[string]*cell{}
+		}
+		if table[key][r.Category] == nil {
+			table[key][r.Category] = &cell{}
+		}
+		if r.Score != nil {
+			c := table[key][r.Category]
+			c.sum += *r.Score
+			c.count++
+		}
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n  %-22s", "")
+	for _, cat := range benchCategories {
+		fmt.Fprintf(&b, "%-12s", cat)
+	}
+	fmt.Fprintln(&b)
+	for _, key := range order {
+		fmt.Fprintf(&b, "  %-22s", key)
+		for _, cat := range benchCategories {
+			c := table[key][cat]
+			if c == nil || c.count == 0 {
+				fmt.Fprintf(&b, "%-12s", "-")
+				continue
+			}
+			fmt.Fprintf(&b, "%-12s", fmt.Sprintf("%.1f", float64(c.sum)/float64(c.count)))
+		}
+		fmt.Fprintln(&b)
+	}
+	return b.String()
+}
+
+// buildMarkdownReport renders the full per-job detail (prompt, response,
+// score, rationale) for one run as a markdown string. jobs and results
+// must be the same length and index-aligned (as produced by cmdBench).
+func buildMarkdownReport(runID string, jobs []benchJob, results []benchJobResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Bench run %s\n\n", runID)
+	for i, r := range results {
+		fmt.Fprintf(&b, "## %s/%s · %s\n\n", r.Identity, r.Variant, r.PromptID)
+		fmt.Fprintf(&b, "**Model:** %s (%s)\n\n", r.Model, r.Provider)
+		fmt.Fprintf(&b, "**Prompt:**\n\n%s\n\n", jobs[i].Prompt.Text)
+		if r.Error != "" {
+			fmt.Fprintf(&b, "**Error:** %s\n\n---\n\n", r.Error)
+			continue
+		}
+		fmt.Fprintf(&b, "**Response:**\n\n%s\n\n", r.ResponseText)
+		fmt.Fprintf(&b, "**Score:** %d/10 — %s\n\n---\n\n", *r.Score, r.Rationale)
+	}
+	return b.String()
+}
+
+func writeMarkdownReport(runID string, jobs []benchJob, results []benchJobResult) (string, error) {
+	if err := os.MkdirAll("bench_runs", 0755); err != nil {
+		return "", err
+	}
+	path := filepath.Join("bench_runs", runID+".md")
+	if err := os.WriteFile(path, []byte(buildMarkdownReport(runID, jobs, results)), 0644); err != nil {
+		return "", err
+	}
+	return path, nil
 }

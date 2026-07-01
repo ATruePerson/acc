@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -268,5 +272,164 @@ func TestRunBenchJobBadTargetNeverPanics(t *testing.T) {
 	}
 	if result.Score != nil {
 		t.Error("expected nil score for a job that never reached generation")
+	}
+}
+
+func TestBenchJobResultJSONShape(t *testing.T) {
+	r := benchJobResult{
+		RunID: "20260701-100000", Timestamp: "2026-07-01T10:00:00Z",
+		Identity: "opus", Variant: "primary", Model: "nemotron-3-ultra-550b-a55b", Provider: "nvidia",
+		Category: "coding", PromptID: "coding-1", Score: intPtr(8), Rationale: "solid",
+		LatencyMs: 1500, TokensIn: 50, TokensOut: 100,
+		ResponseText: "this should never appear in JSONL",
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	s := string(b)
+	if strings.Contains(s, "this should never appear in JSONL") {
+		t.Error("ResponseText leaked into JSON output, expected json:\"-\" to exclude it")
+	}
+	if strings.Contains(s, `"error"`) {
+		t.Error("empty error field should be omitted, not present")
+	}
+	var roundTrip benchJobResult
+	if err := json.Unmarshal(b, &roundTrip); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if roundTrip.Score == nil || *roundTrip.Score != 8 {
+		t.Errorf("score round-trip failed: %+v", roundTrip.Score)
+	}
+}
+
+func TestAvgScoreFor(t *testing.T) {
+	results := []benchJobResult{
+		{Identity: "opus", Variant: "primary", Category: "coding", Score: intPtr(8)},
+		{Identity: "opus", Variant: "primary", Category: "coding", Score: intPtr(6)},
+		{Identity: "opus", Variant: "primary", Category: "creative", Score: intPtr(4)},
+		{Identity: "opus", Variant: "primary", Category: "coding", Score: nil, Error: "timeout"},
+	}
+	avg, ok := avgScoreFor(results, "opus", "primary", "coding")
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if avg != 7.0 {
+		t.Errorf("avg = %v, want 7.0", avg)
+	}
+	if _, ok := avgScoreFor(results, "opus", "primary", "fiction"); ok {
+		t.Error("expected ok=false for category with no results")
+	}
+}
+
+func TestMostRecentRunID(t *testing.T) {
+	results := []benchJobResult{
+		{RunID: "20260601-100000"},
+		{RunID: "20260615-100000"},
+		{RunID: "20260701-100000"},
+	}
+	if got := mostRecentRunID(results, "20260701-100000"); got != "20260615-100000" {
+		t.Errorf("got %q, want %q", got, "20260615-100000")
+	}
+	if got := mostRecentRunID(nil, "20260701-100000"); got != "" {
+		t.Errorf("got %q, want empty for no history", got)
+	}
+}
+
+func TestBuildDiffLines(t *testing.T) {
+	history := []benchJobResult{
+		{RunID: "20260615-100000", Identity: "sonnet", Variant: "primary", Category: "creative", Score: intPtr(7)},
+	}
+	current := []benchJobResult{
+		{RunID: "20260701-100000", Identity: "sonnet", Variant: "primary", Category: "creative", Score: intPtr(8)},
+	}
+	lines := buildDiffLines(history, current, "20260701-100000")
+	if len(lines) != 1 {
+		t.Fatalf("got %d lines, want 1: %v", len(lines), lines)
+	}
+	if !strings.Contains(lines[0], "7.0 -> 8.0 (+1.0)") {
+		t.Errorf("line = %q, missing expected delta", lines[0])
+	}
+
+	if lines := buildDiffLines(nil, current, "20260701-100000"); lines != nil {
+		t.Errorf("expected nil lines for no history, got %v", lines)
+	}
+}
+
+func TestLoadBenchHistorySkipsCorruptLines(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bench_runs.jsonl")
+	content := "{\"run_id\":\"a\",\"identity\":\"opus\",\"variant\":\"primary\",\"category\":\"coding\",\"score\":8}\n" +
+		"not valid json\n" +
+		"{\"run_id\":\"a\",\"identity\":\"sonnet\",\"variant\":\"primary\",\"category\":\"creative\",\"score\":7}\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	results, err := loadBenchHistory(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("got %d results, want 2", len(results))
+	}
+}
+
+func TestLoadBenchHistoryMissingFile(t *testing.T) {
+	results, err := loadBenchHistory("/nonexistent/path/bench_runs.jsonl")
+	if err != nil {
+		t.Fatalf("expected no error for missing file, got %v", err)
+	}
+	if results != nil {
+		t.Errorf("expected nil results, got %v", results)
+	}
+}
+
+func TestBuildSummaryTable(t *testing.T) {
+	results := []benchJobResult{
+		{Identity: "opus", Variant: "primary", Category: "coding", Score: intPtr(8)},
+		{Identity: "opus", Variant: "primary", Category: "coding", Score: intPtr(6)},
+		{Identity: "haiku", Variant: "primary", Category: "quick", Score: intPtr(9)},
+	}
+	out := buildSummaryTable(results)
+	if !strings.Contains(out, "opus/primary") {
+		t.Error("missing opus/primary row")
+	}
+	if !strings.Contains(out, "7.0") {
+		t.Error("missing expected average 7.0 for opus/primary coding")
+	}
+	if !strings.Contains(out, "9.0") {
+		t.Error("missing expected average 9.0 for haiku/primary quick")
+	}
+}
+
+func TestBuildMarkdownReport(t *testing.T) {
+	jobs := []benchJob{
+		{Target: benchTarget{Identity: "opus", Variant: "primary"}, Prompt: benchPrompt{ID: "coding-1", Text: "write a thing"}},
+	}
+	results := []benchJobResult{
+		{Identity: "opus", Variant: "primary", PromptID: "coding-1", Model: "nemotron-3-ultra-550b-a55b", Provider: "nvidia", Score: intPtr(8), Rationale: "good", ResponseText: "func foo() {}"},
+	}
+	out := buildMarkdownReport("20260701-100000", jobs, results)
+	if !strings.Contains(out, "write a thing") {
+		t.Error("missing prompt text")
+	}
+	if !strings.Contains(out, "func foo() {}") {
+		t.Error("missing response text")
+	}
+	if !strings.Contains(out, "8/10") {
+		t.Error("missing score")
+	}
+}
+
+func TestBuildMarkdownReportError(t *testing.T) {
+	jobs := []benchJob{
+		{Target: benchTarget{Identity: "opus", Variant: "primary"}, Prompt: benchPrompt{ID: "coding-1", Text: "write a thing"}},
+	}
+	results := []benchJobResult{
+		{Identity: "opus", Variant: "primary", PromptID: "coding-1", Error: "upstream 503: degraded"},
+	}
+	out := buildMarkdownReport("20260701-100000", jobs, results)
+	if !strings.Contains(out, "upstream 503: degraded") {
+		t.Error("missing error text in report")
 	}
 }

@@ -88,6 +88,16 @@ var benchPrompts = []benchPrompt{
 
 // ---------- model calling ----------
 
+// benchMaxAttempts is how many times a single bench call will try before
+// giving up, and benchBackoff is the wait before each retry. benchBackoff
+// is a var so tests can swap in a zero-wait version instead of sleeping
+// real seconds.
+const benchMaxAttempts = 4
+
+var benchBackoff = func(attempt int) time.Duration {
+	return time.Duration(1<<attempt) * time.Second // 2s, 4s, 8s
+}
+
 // callModel sends one prompt through route exactly as the live proxy
 // would (same translateRequest + ExtraBody merge), but calls the upstream
 // provider directly — no running proxy daemon required. Always
@@ -127,23 +137,42 @@ func callModel(ctx context.Context, httpClient *http.Client, cfg *Config, route 
 	}
 
 	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, "POST", prov.BaseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return "", 0, 0, 0, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+prov.APIKey)
+	var b []byte
+	var status int
+	for attempt := 1; attempt <= benchMaxAttempts; attempt++ {
+		req, reqErr := http.NewRequestWithContext(ctx, "POST", prov.BaseURL+"/chat/completions", bytes.NewReader(body))
+		if reqErr != nil {
+			return "", 0, 0, 0, fmt.Errorf("build request: %w", reqErr)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+prov.APIKey)
 
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return "", 0, 0, 0, fmt.Errorf("upstream: %w", err)
+		resp, doErr := httpClient.Do(req)
+		if doErr != nil {
+			return "", 0, 0, time.Since(start).Milliseconds(), fmt.Errorf("upstream: %w", doErr)
+		}
+		b, _ = io.ReadAll(resp.Body)
+		status = resp.StatusCode
+		resp.Body.Close()
+
+		// A rate-limit (429) or transient provider error (503) is worth waiting
+		// out — under a wide concurrent run the shared provider (esp. NVIDIA)
+		// bursts past its limit, but recovers in seconds. Retry with exponential
+		// backoff; any other status (success or a real 4xx) returns immediately.
+		if (status == 429 || status == 503) && attempt < benchMaxAttempts {
+			select {
+			case <-ctx.Done():
+				return "", 0, 0, time.Since(start).Milliseconds(), ctx.Err()
+			case <-time.After(benchBackoff(attempt)):
+			}
+			continue
+		}
+		break
 	}
-	defer resp.Body.Close()
 	latencyMs = time.Since(start).Milliseconds()
 
-	b, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 400 {
-		return "", 0, 0, latencyMs, fmt.Errorf("upstream %d: %s", resp.StatusCode, truncate(string(b), 300))
+	if status >= 400 {
+		return "", 0, 0, latencyMs, fmt.Errorf("upstream %d: %s", status, truncate(string(b), 300))
 	}
 
 	var oresp OpenAIResponse
@@ -165,8 +194,12 @@ func callModel(ctx context.Context, httpClient *http.Client, cfg *Config, route 
 
 // judgeRoute is the fixed judge model: free, and deliberately not a
 // contestant in any tested category, to avoid a model grading itself or a
-// sibling favorably.
-var judgeRoute = Route{Provider: "nvidia", Model: "z-ai/glm-5.1", ReasoningEffort: "high"}
+// sibling favorably. It runs on Gemini, NOT NVIDIA — most contestants use
+// NVIDIA, so keeping the judge (one call per job) off that provider stops
+// the judge and the models from starving the same rate limit. No
+// reasoning_effort: a 1-10 score with a one-line rationale doesn't need
+// it, and leaving it off avoids any provider param-compat risk.
+var judgeRoute = Route{Provider: "gemini", Model: "models/gemini-3.1-pro-preview"}
 
 // categoryRubric is the per-category grading instruction appended to every
 // judge prompt. The 1-10 scale stays constant across categories so scores

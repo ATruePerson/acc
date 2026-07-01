@@ -8,8 +8,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
+
+// fastBackoff swaps the retry wait to zero for the duration of a test, so
+// retry paths don't sleep real seconds, then restores it.
+func fastBackoff(t *testing.T) {
+	t.Helper()
+	orig := benchBackoff
+	benchBackoff = func(int) time.Duration { return 0 }
+	t.Cleanup(func() { benchBackoff = orig })
+}
 
 func TestRouteForTarget(t *testing.T) {
 	cfg := &Config{
@@ -110,6 +121,7 @@ func TestCallModel(t *testing.T) {
 }
 
 func TestCallModelUpstreamError(t *testing.T) {
+	fastBackoff(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		w.Write([]byte(`{"error":"degraded"}`))
@@ -121,7 +133,59 @@ func TestCallModelUpstreamError(t *testing.T) {
 
 	_, _, _, _, err := callModel(context.Background(), srv.Client(), cfg, route, "hi", 100)
 	if err == nil {
-		t.Fatal("expected error for 503 upstream response")
+		t.Fatal("expected error for sustained 503 upstream response")
+	}
+}
+
+func TestCallModelRetriesOn429ThenSucceeds(t *testing.T) {
+	fastBackoff(t)
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if n < 3 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"status":429,"title":"Too Many Requests"}`))
+			return
+		}
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"recovered"}}],"usage":{"prompt_tokens":1,"completion_tokens":2}}`))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{Providers: map[string]Provider{"fake": {BaseURL: srv.URL, APIKey: "k"}}}
+	route := Route{Provider: "fake", Model: "fake-model"}
+
+	text, _, _, _, err := callModel(context.Background(), srv.Client(), cfg, route, "hi", 100)
+	if err != nil {
+		t.Fatalf("expected success after retries, got %v", err)
+	}
+	if text != "recovered" {
+		t.Errorf("text = %q, want %q", text, "recovered")
+	}
+	if got := calls.Load(); got != 3 {
+		t.Errorf("calls = %d, want 3 (two 429s then success)", got)
+	}
+}
+
+func TestCallModelGivesUpAfterMaxAttempts(t *testing.T) {
+	fastBackoff(t)
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"status":429}`))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{Providers: map[string]Provider{"fake": {BaseURL: srv.URL, APIKey: "k"}}}
+	route := Route{Provider: "fake", Model: "fake-model"}
+
+	_, _, _, _, err := callModel(context.Background(), srv.Client(), cfg, route, "hi", 100)
+	if err == nil {
+		t.Fatal("expected error after exhausting retries on sustained 429")
+	}
+	if got := calls.Load(); got != benchMaxAttempts {
+		t.Errorf("calls = %d, want %d (benchMaxAttempts)", got, benchMaxAttempts)
 	}
 }
 
@@ -181,7 +245,7 @@ func TestJudgeResponseRetriesOnceOnParseFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &Config{Providers: map[string]Provider{"nvidia": {BaseURL: srv.URL, APIKey: "k"}}}
+	cfg := &Config{Providers: map[string]Provider{"gemini": {BaseURL: srv.URL, APIKey: "k"}}}
 
 	res, err := judgeResponse(context.Background(), srv.Client(), cfg, "coding", "prompt", "response")
 	if err != nil {
@@ -210,7 +274,7 @@ func TestJudgeResponseGivesUpAfterTwoBadReplies(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := &Config{Providers: map[string]Provider{"nvidia": {BaseURL: srv.URL, APIKey: "k"}}}
+	cfg := &Config{Providers: map[string]Provider{"gemini": {BaseURL: srv.URL, APIKey: "k"}}}
 	_, err := judgeResponse(context.Background(), srv.Client(), cfg, "coding", "prompt", "response")
 	if err == nil {
 		t.Fatal("expected error after two unparseable judge replies")
@@ -235,7 +299,10 @@ func TestRunBenchJobSuccess(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &Config{
-		Providers: map[string]Provider{"nvidia": {BaseURL: srv.URL, APIKey: "k"}},
+		Providers: map[string]Provider{
+			"nvidia": {BaseURL: srv.URL, APIKey: "k"}, // generation target
+			"gemini": {BaseURL: srv.URL, APIKey: "k"}, // judge target
+		},
 		Aliases: map[string]Route{
 			"anthropic/claude-haiku": {Provider: "nvidia", Model: "test-model"},
 		},

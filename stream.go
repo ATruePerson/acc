@@ -2,18 +2,55 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 )
+
+// firstTokenTimeout is how long a route has to emit its first response byte
+// before the proxy abandons it and tries the next fallback. A reasoning model
+// that goes silent (stalled / overloaded) trips this; a model that streams
+// promptly does not. Package var so tests can shorten it.
+var firstTokenTimeout = 15 * time.Second
+
+// awaitFirstByte blocks until the first byte is readable from src or d passes.
+// On success it returns a reader that re-emits that first byte followed by the
+// rest of src, so no streamed data is lost. On timeout it returns (nil, true);
+// the caller must Close the underlying body to unblock the pending read.
+func awaitFirstByte(src io.Reader, d time.Duration) (io.Reader, bool) {
+	type res struct {
+		n   int
+		err error
+	}
+	buf := make([]byte, 1)
+	ch := make(chan res, 1) // buffered so the goroutine never leaks on timeout
+	go func() {
+		n, err := io.ReadFull(src, buf)
+		ch <- res{n, err}
+	}()
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case got := <-ch:
+		if got.n == 0 {
+			return src, false // EOF before any byte; let the caller drain it
+		}
+		return io.MultiReader(bytes.NewReader(buf[:got.n]), src), false
+	case <-timer.C:
+		return nil, true
+	}
+}
 
 // streamTranslate reads an OpenAI SSE stream and rewrites it as an
 // Anthropic SSE stream onto w, flushing each event so Claude Code renders
 // token-by-token (the "native feel").
-func streamTranslate(w http.ResponseWriter, body io.Reader, model string) (int, int) {
+func streamTranslate(w http.ResponseWriter, body io.Reader, model string) (int, int, int) {
 	flusher, _ := w.(http.Flusher)
 	send := func(event string, data map[string]any) {
 		b, _ := json.Marshal(data)
@@ -42,6 +79,7 @@ func streamTranslate(w http.ResponseWriter, body io.Reader, model string) (int, 
 	stopReason := "end_turn"
 	inputTokens := 0
 	outputTokens := 0
+	reasoningTokens := 0
 
 	closeText := func() {
 		if textOpen {
@@ -76,14 +114,18 @@ func streamTranslate(w http.ResponseWriter, body io.Reader, model string) (int, 
 			if chunk.Usage.CompletionTokens > 0 {
 				outputTokens = chunk.Usage.CompletionTokens
 			}
+			if r := chunk.Usage.reasoningTokens(); r > 0 {
+				reasoningTokens = r
+			}
 		}
 		if len(chunk.Choices) == 0 {
 			continue
 		}
 		ch := chunk.Choices[0]
-		if ch.FinishReason == "tool_calls" {
+		switch ch.FinishReason {
+		case "tool_calls":
 			stopReason = "tool_use"
-		} else if ch.FinishReason == "length" {
+		case "length":
 			stopReason = "max_tokens"
 		}
 		if ch.Delta == nil {
@@ -140,6 +182,10 @@ func streamTranslate(w http.ResponseWriter, body io.Reader, model string) (int, 
 		}
 	}
 
+	if err := scanner.Err(); err != nil {
+		log.Printf("stream scan error: %v", err)
+	}
+
 	closeText()
 	for _, bi := range toolBlocks {
 		send("content_block_stop", map[string]any{"type": "content_block_stop", "index": bi})
@@ -150,5 +196,5 @@ func streamTranslate(w http.ResponseWriter, body io.Reader, model string) (int, 
 		"usage": map[string]any{"input_tokens": inputTokens, "output_tokens": outputTokens},
 	})
 	send("message_stop", map[string]any{"type": "message_stop"})
-	return inputTokens, outputTokens
+	return inputTokens, outputTokens, reasoningTokens
 }

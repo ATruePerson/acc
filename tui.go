@@ -14,12 +14,13 @@ type LogEntry struct {
 	Timestamp time.Time
 	Model     string
 	Route     string
-	Status    int
-	TokensIn  int
-	TokensOut int
-	Budget    int
-	Effort    string
-	CostUSD   float64
+	Status       int
+	TokensIn     int
+	TokensOut    int
+	ReasoningOut int
+	Budget       int
+	Effort       string
+	CostUSD      float64
 }
 
 var (
@@ -44,23 +45,25 @@ func AddTUILog(entry LogEntry) {
 			Timestamp string  `json:"timestamp"`
 			Model     string  `json:"model"`
 			Route     string  `json:"route"`
-			Status    int     `json:"status"`
-			TokensIn  int     `json:"tokens_in"`
-			TokensOut int     `json:"tokens_out"`
-			Budget    int     `json:"budget"`
-			Effort    string  `json:"effort"`
-			CostUSD   float64 `json:"cost_usd"`
+			Status       int     `json:"status"`
+			TokensIn     int     `json:"tokens_in"`
+			TokensOut    int     `json:"tokens_out"`
+			ReasoningOut int     `json:"reasoning_out"`
+			Budget       int     `json:"budget"`
+			Effort       string  `json:"effort"`
+			CostUSD      float64 `json:"cost_usd"`
 		}
 		row := jLine{
-			Timestamp: entry.Timestamp.Format(time.RFC3339),
-			Model:     entry.Model,
-			Route:     entry.Route,
-			Status:    entry.Status,
-			TokensIn:  entry.TokensIn,
-			TokensOut: entry.TokensOut,
-			Budget:    entry.Budget,
-			Effort:    entry.Effort,
-			CostUSD:   entry.CostUSD,
+			Timestamp:    entry.Timestamp.Format(time.RFC3339),
+			Model:        entry.Model,
+			Route:        entry.Route,
+			Status:       entry.Status,
+			TokensIn:     entry.TokensIn,
+			TokensOut:    entry.TokensOut,
+			ReasoningOut: entry.ReasoningOut,
+			Budget:       entry.Budget,
+			Effort:       entry.Effort,
+			CostUSD:      entry.CostUSD,
 		}
 		if b, err := json.Marshal(row); err == nil {
 			f.Write(append(b, '\n'))

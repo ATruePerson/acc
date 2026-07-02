@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,9 +36,15 @@ type benchTarget struct {
 // tested, labeled "fable/mythos" — see the design doc for why.
 var benchTargets = []benchTarget{
 	{Identity: "opus", Variant: "primary", AliasKey: "anthropic/claude-opus", FallbackIndex: -1},
-	{Identity: "opus", Variant: "fallback", AliasKey: "anthropic/claude-opus", FallbackIndex: 1},
+	{Identity: "opus", Variant: "fallback", AliasKey: "anthropic/claude-opus", FallbackIndex: 0},
 	{Identity: "sonnet", Variant: "primary", AliasKey: "anthropic/claude-sonnet", FallbackIndex: -1},
 	{Identity: "sonnet", Variant: "fallback", AliasKey: "anthropic/claude-sonnet", FallbackIndex: 0},
+	// glm-5.1 is a sonnet-class candidate: 256k context (too small for the
+	// opus tier, ample for the middle slot) and reasons natively, so it needs
+	// no reasoning_budget (adding one 400s on NVIDIA). Bench output gives it
+	// its own row so its scores sit directly next to sonnet/primary and
+	// sonnet/fallback for comparison.
+	{Identity: "glm", Variant: "primary", AliasKey: "anthropic/claude-glm", FallbackIndex: -1},
 	{Identity: "haiku", Variant: "primary", AliasKey: "anthropic/claude-haiku", FallbackIndex: -1},
 	{Identity: "fable/mythos", Variant: "primary", AliasKey: "anthropic/claude-fable", FallbackIndex: -1},
 	{Identity: "fable/mythos", Variant: "fallback", AliasKey: "anthropic/claude-fable", FallbackIndex: 0},
@@ -88,13 +95,48 @@ var benchPrompts = []benchPrompt{
 // ---------- model calling ----------
 
 // benchMaxAttempts is how many times a single bench call will try before
-// giving up, and benchBackoff is the wait before each retry. benchBackoff
-// is a var so tests can swap in a zero-wait version instead of sleeping
-// real seconds.
-const benchMaxAttempts = 4
+// giving up. Raised from 4 to 6: NVIDIA NIM's 40 RPM rate limit is
+// account-wide (not per-model), and under benchConcurrency parallel jobs the
+// budget is exhausted in seconds. The old 4 attempts only covered ~14s of
+// exponential backoff — shorter than the 60s rate-limit reset window, so a
+// sustained 429 stormed through all retries and failed. 6 attempts with the
+// cap below outlasts the window without hanging forever on a truly broken
+// upstream.
+const benchMaxAttempts = 6
 
+// benchBackoffCap bounds the exponential backoff so a single retry wait
+// can't grow unbounded. Set above 60s so the later attempts cover the full
+// NVIDIA rate-limit reset window when no Retry-After header is supplied.
+const benchBackoffCap = 90 * time.Second
+
+// benchBackoff returns the wait before each retry, capped at benchBackoffCap.
+// It is a var so tests can swap in a zero-wait version instead of sleeping
+// real seconds.
 var benchBackoff = func(attempt int) time.Duration {
-	return time.Duration(1<<attempt) * time.Second // 2s, 4s, 8s
+	d := time.Duration(1<<attempt) * time.Second // 2s, 4s, 8s, 16s, 32s...
+	if d > benchBackoffCap {
+		d = benchBackoffCap
+	}
+	return d
+}
+
+// retryAfter parses a 429/503 response's Retry-After header (seconds form)
+// and returns the wait duration, or 0 if absent/unparseable. Respecting it
+// stops the bench from hammering a rate-limited upstream that has told us
+// exactly when it will recover.
+func retryAfter(resp *http.Response) time.Duration {
+	if resp == nil {
+		return 0
+	}
+	v := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if v == "" {
+		return 0
+	}
+	secs, err := strconv.Atoi(v)
+	if err != nil || secs <= 0 {
+		return 0
+	}
+	return time.Duration(secs) * time.Second
 }
 
 // callModel sends one prompt through route exactly as the live proxy
@@ -156,13 +198,20 @@ func callModel(ctx context.Context, httpClient *http.Client, cfg *Config, route 
 
 		// A rate-limit (429) or transient provider error (503) is worth waiting
 		// out — under a wide concurrent run the shared provider (esp. NVIDIA)
-		// bursts past its limit, but recovers in seconds. Retry with exponential
-		// backoff; any other status (success or a real 4xx) returns immediately.
+		// bursts past its limit, but recovers in seconds. If the upstream sends
+		// a Retry-After header (NVIDIA does on 429s), honor it exactly instead
+		// of guessing with exponential backoff. Otherwise fall back to capped
+		// exponential backoff. Any other status (success or a real 4xx) returns
+		// immediately.
 		if (status == 429 || status == 503) && attempt < benchMaxAttempts {
+			wait := retryAfter(resp)
+			if wait == 0 {
+				wait = benchBackoff(attempt)
+			}
 			select {
 			case <-ctx.Done():
 				return "", 0, 0, time.Since(start).Milliseconds(), ctx.Err()
-			case <-time.After(benchBackoff(attempt)):
+			case <-time.After(wait):
 			}
 			continue
 		}
@@ -558,7 +607,14 @@ func writeMarkdownReport(runID string, jobs []benchJob, results []benchJobResult
 
 // ---------- orchestration ----------
 
-const benchConcurrency = 5
+// benchConcurrency caps how many bench jobs run in flight at once. Lowered
+// from 5 to 3: most bench targets route to NVIDIA NIM, whose 40 RPM limit is
+// shared across the whole account (not per model). At 5 concurrent, all-NVIDIA
+// runs exhaust the budget in seconds and spend the rest of the run retrying
+// 429s. 3 concurrent is a better fit for 40 RPM while still finishing in a
+// reasonable time, and the judge (Gemini, a different provider) doesn't share
+// the limit so it adds no pressure.
+const benchConcurrency = 3
 
 // cmdBench runs the full cross-matrix benchmark: every benchTarget against
 // every benchPrompt, capped at benchConcurrency jobs in flight at once.

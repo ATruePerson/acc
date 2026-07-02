@@ -28,6 +28,13 @@ func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRe
 	if route.MaxTokens > 0 {
 		or.MaxTokens = route.MaxTokens
 	}
+	// NOTE: do NOT let a route force the upstream stream flag to diverge from
+	// the client's. The response handler decides stream vs unary parsing from
+	// the client request (ar.Stream); if the alias forced upstream streaming on
+	// a unary client, the SSE body hits the unary JSON parser and 502s
+	// ("invalid character 'd'" from a `data:` line). Real streaming clients
+	// (Claude Code) already send stream:true, so forcing it here buys nothing.
+	_ = route.Stream
 
 	// system prompt -> leading system message (with optional prepend)
 	sys := decodeSystem(ar.System)
@@ -46,7 +53,7 @@ func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRe
 	}
 
 	for _, m := range ar.Messages {
-		msgs, err := translateMessage(m, route.Vision)
+		msgs, err := translateMessage(m)
 		if err != nil {
 			return nil, err
 		}
@@ -65,17 +72,21 @@ func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRe
 		})
 	}
 
-	// effort: map thinking budget -> reasoning_effort bucket
+	// effort: map thinking budget -> reasoning_effort bucket, falling back to
+	// the route's own effort when no bucket matches (or no effort block is
+	// configured). Without this fallback an empty effort map would silently
+	// downgrade every thinking request to "low".
 	if ar.Thinking != nil && ar.Thinking.BudgetTokens > 0 {
 		or.ReasoningEffort = bucketForBudget(ar.Thinking.BudgetTokens, cfg)
-	} else if route.ReasoningEffort != "" {
+	}
+	if or.ReasoningEffort == "" && route.ReasoningEffort != "" {
 		or.ReasoningEffort = route.ReasoningEffort
 	}
 	if or.ReasoningEffort != "" {
 		or.ReasoningEffort = sanitizeReasoningEffort(route.Provider, or.ReasoningEffort)
 	}
 
-	if ar.Stream {
+	if or.Stream {
 		or.StreamOptions = &StreamOptions{IncludeUsage: true}
 	}
 
@@ -102,7 +113,7 @@ func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRe
 
 // translateMessage turns one Anthropic message into one or more OpenAI
 // messages (tool_result blocks become separate role:"tool" messages).
-func translateMessage(m AnthropicMessage, vision bool) ([]OpenAIMessage, error) {
+func translateMessage(m AnthropicMessage) ([]OpenAIMessage, error) {
 	// content can be a plain string
 	var asString string
 	if err := json.Unmarshal(m.Content, &asString); err == nil {
@@ -123,12 +134,7 @@ func translateMessage(m AnthropicMessage, vision bool) ([]OpenAIMessage, error) 
 		case "text":
 			parts = append(parts, OpenAIContentPart{Type: "text", Text: b.Text})
 		case "image":
-			if !vision {
-				// Fail loud rather than silently dropping the image and letting a
-				// text-only model answer blind. The caller must pick a vision model.
-				return nil, fmt.Errorf("this model is text-only and cannot see images — switch to a vision model (e.g. gemini-pro / gemini-flash)")
-			}
-			if b.Source != nil && b.Source.Type == "base64" {
+				if b.Source != nil && b.Source.Type == "base64" {
 				url := fmt.Sprintf("data:%s;base64,%s", b.Source.MediaType, b.Source.Data)
 				parts = append(parts, OpenAIContentPart{
 					Type:     "image_url",
@@ -212,9 +218,10 @@ func translateResponse(or *OpenAIResponse, model string) map[string]any {
 				})
 			}
 		}
-		if ch.FinishReason == "tool_calls" {
+		switch ch.FinishReason {
+		case "tool_calls":
 			stopReason = "tool_use"
-		} else if ch.FinishReason == "length" {
+		case "length":
 			stopReason = "max_tokens"
 		}
 	}
@@ -305,7 +312,9 @@ func bucketForBudget(budget int, cfg *Config) string {
 		}
 	}
 	if bestBudget == -1 {
-		return "low"
+		// no bucket matched (or no effort block configured); let the caller
+		// fall back to the route's own effort instead of forcing "low".
+		return ""
 	}
 	return best
 }

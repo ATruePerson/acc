@@ -14,7 +14,7 @@ import (
 )
 
 // translateFromResponses converts a Responses API request into an OpenAI request.
-func translateFromResponses(req *ResponsesRequest, route Route, cfg *Config) (*OpenAIRequest, error) {
+func translateFromResponses(req *ResponsesRequest, route Route) (*OpenAIRequest, error) {
 	or := &OpenAIRequest{
 		Model:       route.Model,
 		MaxTokens:   req.MaxTokens,
@@ -282,15 +282,48 @@ func (s *server) executeUpstream(
 			continue
 		}
 
-		// On 429 or 5xx, try next fallback
-		if (resp.StatusCode == 429 || resp.StatusCode >= 500) && ri < len(routes)-1 {
+		// On 429 or 5xx, try next fallback. Also treat a NVIDIA NIM "DEGRADED" 400
+		// (model node disabled upstream, not a bad request) as failover-worthy.
+		shouldFallback := resp.StatusCode == 429 || resp.StatusCode >= 500
+		var degradedBody []byte
+		if !shouldFallback && resp.StatusCode == 400 {
+			degradedBody, _ = io.ReadAll(resp.Body)
+			resp.Body.Close()
+			resp.Body = io.NopCloser(bytes.NewReader(degradedBody))
+			if bytes.Contains(degradedBody, []byte("DEGRADED")) || bytes.Contains(degradedBody, []byte("cannot be invoked")) {
+				shouldFallback = true
+			}
+		}
+		if shouldFallback && ri < len(routes)-1 {
 			status := resp.StatusCode
-			b, _ := io.ReadAll(resp.Body)
+			b := degradedBody
+			if b == nil {
+				b, _ = io.ReadAll(resp.Body)
+			}
 			resp.Body.Close()
 			resp = nil
 			log.Printf("upstream %d on %s/%s, falling back: %s", status, currentRoute.Provider, currentRoute.Model, truncate(string(b), 200))
 			logit(currentRoute.Model, status, 0, 0, or.ReasoningEffort)
 			continue
+		}
+
+		// Time-to-first-token guard (streaming only): a route that returns 200
+		// but emits no token within firstTokenTimeout is treated as stalled.
+		// Fall back if a route remains, otherwise fail — never hang.
+		if or.Stream && resp != nil && resp.StatusCode < 400 {
+			reader, timedOut := awaitFirstByte(resp.Body, firstTokenTimeout)
+			if timedOut {
+				resp.Body.Close()
+				resp = nil
+				log.Printf("no token from %s/%s within %s", currentRoute.Provider, currentRoute.Model, firstTokenTimeout)
+				logit(currentRoute.Model, 504, 0, 0, or.ReasoningEffort)
+				if ri < len(routes)-1 {
+					continue
+				}
+				httpErr(w, 504, fmt.Sprintf("⌛ %s and its fallback gave no response in time. Try again or switch models.", or.Model))
+				return nil, Route{}, fmt.Errorf("timeout on all routes")
+			}
+			resp.Body = io.NopCloser(reader)
 		}
 
 		break
@@ -471,6 +504,9 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("responses streaming scan: %v", err)
+	}
 
 	closeMessage()
 
@@ -553,7 +589,7 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	routes := append([]Route{route}, route.Fallbacks...)
 
-	or, err := translateFromResponses(&req, route, cfg)
+	or, err := translateFromResponses(&req, route)
 	if err != nil {
 		httpErr(w, 400, "translate: "+err.Error())
 		logit(route.Model, 400, 0, 0, "")

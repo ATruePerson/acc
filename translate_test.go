@@ -150,28 +150,6 @@ func TestToolResultAndTextOrder(t *testing.T) {
 	}
 }
 
-func TestImageFailsForTextOnlyRoute(t *testing.T) {
-	content := `[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]`
-	_, err := translateMessage(AnthropicMessage{Role: "user", Content: json.RawMessage(content)}, false)
-	if err == nil {
-		t.Fatal("expected error when an image is sent to a text-only route, got nil")
-	}
-	if !strings.Contains(err.Error(), "text-only") {
-		t.Fatalf("expected text-only error, got %v", err)
-	}
-}
-
-func TestImageKeptForVisionRoute(t *testing.T) {
-	content := `[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]`
-	msgs, err := translateMessage(AnthropicMessage{Role: "user", Content: json.RawMessage(content)}, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(msgs[0].Content), "image_url") {
-		t.Fatalf("vision route should keep image_url, got %s", msgs[0].Content)
-	}
-}
-
 func TestConfigAliasOverridesAndExtends(t *testing.T) {
 	s := testServer(&Config{
 		Providers: map[string]Provider{
@@ -356,7 +334,8 @@ func TestGeminiThoughtSignature(t *testing.T) {
 
 	foundThought := false
 	for _, m := range or3.Messages {
-		if m.Role == "assistant" {
+		switch m.Role {
+		case "assistant":
 			for _, tc := range m.ToolCalls {
 				if tc.Function.Name == "run_test" {
 					foundThought = true
@@ -368,7 +347,7 @@ func TestGeminiThoughtSignature(t *testing.T) {
 					}
 				}
 			}
-		} else if m.Role == "tool" {
+		case "tool":
 			if m.ToolCallID != "call_abc" {
 				t.Errorf("expected stripped ToolCallID 'call_abc', got %q", m.ToolCallID)
 			}

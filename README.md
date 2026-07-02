@@ -23,7 +23,7 @@ per-request logs:
 
 ```bash
 # 1. Install (downloads a prebuilt binary to ~/.local/bin)
-curl -fsSL https://raw.githubusercontent.com/ATruePerson/acc/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ATruePerson/acc/main/scripts/install.sh | sh
 
 # 2. Set up — pick providers, paste keys, writes config for you
 acc setup
@@ -62,12 +62,12 @@ Variables are set only if not already in the environment.
 
 Routes map Claude model families to upstream providers:
 
-| Slot    | Default route                     |
-| ------- | --------------------------------- |
-| opus    | GLM-5.1 via NVIDIA NIM            |
-| sonnet  | big-pickle via OpenCode           |
-| haiku   | Step 3.7 Flash via NVIDIA NIM     |
-| vision  | Gemini 2.5 Flash (image requests) |
+| Slot    | Default route                          |
+| ------- | -------------------------------------- |
+| opus    | GLM-5.1 via NVIDIA NIM                 |
+| sonnet  | big-pickle via OpenCode                |
+| haiku   | DeepSeek V4 Flash via NVIDIA NIM       |
+| vision  | Gemini 3.5 Flash (image requests)      |
 
 Override per-request by using the direct path form as the model name:
 

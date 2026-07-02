@@ -1468,7 +1468,74 @@ const appHTML = `<!DOCTYPE html>
     // ----------------------------------------------------
     // 2. Chat history management (localStorage)
     // ----------------------------------------------------
+    async function fetchAndPopulateProxyInfo() {
+      try {
+        const response = await fetch('/dashboard/api/info');
+        if (response.ok) {
+          const info = await response.json();
+          
+          // 1. Populate providers
+          if (info.providers && info.providers.length > 0) {
+            const selectProvider = document.getElementById('select-provider');
+            const savedValue = selectProvider.value;
+            selectProvider.innerHTML = '';
+            info.providers.forEach(p => {
+              const opt = document.createElement('option');
+              opt.value = p;
+              // Format nicely (e.g. opencode -> OpenCode, nvidia -> NVIDIA NIM)
+              let label = p;
+              if (p === 'nvidia') label = 'NVIDIA NIM';
+              else if (p === 'opencode') label = 'OpenCode';
+              else if (p === 'gemini') label = 'Gemini';
+              else if (p === 'openrouter') label = 'OpenRouter';
+              else if (p === 'zai') label = 'ZAI';
+              else if (p === 'groq') label = 'Groq';
+              else if (p === 'ollama') label = 'Ollama';
+              else label = p.charAt(0).toUpperCase() + p.slice(1);
+              
+              opt.innerText = label;
+              selectProvider.appendChild(opt);
+            });
+            // Try to restore saved value or default to gemini or the first item
+            if (info.providers.includes(savedValue)) {
+              selectProvider.value = savedValue;
+            } else if (info.providers.includes('gemini')) {
+              selectProvider.value = 'gemini';
+            } else {
+              selectProvider.value = info.providers[0];
+            }
+          }
+          
+          // 2. Populate models from aliases + routes (or from /v1/models directly)
+          const modelsRes = await fetch('/v1/models');
+          if (modelsRes.ok) {
+            const modelsData = await modelsRes.json();
+            if (modelsData && modelsData.data) {
+              const selectModel = document.getElementById('select-model');
+              const savedModelValue = selectModel.value;
+              selectModel.innerHTML = '<option value="default" selected>Default Model</option>';
+              modelsData.data.forEach(m => {
+                const opt = document.createElement('option');
+                opt.value = m.id;
+                opt.innerText = m.id.replace('anthropic/', '');
+                selectModel.appendChild(opt);
+              });
+              // Try to restore saved model value
+              const hasSaved = Array.from(selectModel.options).some(o => o.value === savedModelValue);
+              if (hasSaved) {
+                selectModel.value = savedModelValue;
+              }
+            }
+          }
+          updateBadge();
+        }
+      } catch (err) {
+        console.error('Failed to populate proxy routing systems:', err);
+      }
+    }
+
     function initConversations() {
+      fetchAndPopulateProxyInfo();
       const stored = localStorage.getItem('trueox_conversations');
       if (stored) {
         try {

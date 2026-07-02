@@ -213,16 +213,8 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If the request carries an image but the chosen model is text-only, bounce
-	// it to a vision-capable model. This keeps the original model's identity
-	// prompt + effort, so e.g. an Opus request with a screenshot still answers
-	// as Opus but is actually served by a model that can see the image.
-	if requestHasImage(&ar) && !route.Vision {
-		rerouted := s.visionReroute(route)
-		log.Printf("image in request to text-only %s/%s — rerouting to vision model %s/%s",
-			route.Provider, route.Model, rerouted.Provider, rerouted.Model)
-		route = rerouted
-	}
+
+
 
 	routes := append([]Route{route}, route.Fallbacks...)
 
@@ -472,13 +464,13 @@ func modelCatalog() []modelDef {
 		{"claude-pickle", []string{"claude-big-pickle", "opencode/big-pickle", "claude-pick"}, Route{Provider: "opencode", Model: "big-pickle", ReasoningEffort: "high"}},
 		{"claude-ultra", []string{"claude-nemotron-3-ultra-free", "opencode/nemotron-3-ultra-free", "claude-nemotron-3-ultra", "claude-ultra-free"}, Route{Provider: "opencode", Model: "nemotron-3-ultra-free", ReasoningEffort: "high"}},
 		{"claude-step", []string{"claude-step-3.7-flash", "stepfun-ai/step-3.7-flash", "stepfun-ai-step-3.7-flash", "stepfun-ai-step-3-7-flash", "stepfun/step-3.7-flash", "stepfun-step-3.7-flash"}, Route{Provider: "nvidia", Model: "deepseek-ai/deepseek-v4-flash"}},
-		{"claude-kimi", []string{"claude-kimi-k2", "claude-kim-2", "claude-k-2", "claude-kim"}, Route{Provider: "nvidia", Model: "moonshotai/kimi-k2.6", ReasoningEffort: "high", Vision: true}},
+		{"claude-kimi", []string{"claude-kimi-k2", "claude-kim-2", "claude-k-2", "claude-kim"}, Route{Provider: "cloudflare", Model: "qwen/qwen-1m", ReasoningEffort: "high"}},
 		{"claude-nemotron-ultra", nil, Route{Provider: "nvidia", Model: "nvidia/nemotron-3-ultra-550b-a55b"}},
-		{"claude-glm", []string{"claude-opus", "claude-gl"}, Route{Provider: "nvidia", Model: "z-ai/glm-5.1", ReasoningEffort: "high", Vision: true}},
-		{"claude-minimax", []string{"minimax-m3", "claude-m3", "minimaxai/minimax-m3", "claude-mini"}, Route{Provider: "nvidia", Model: "minimaxai/minimax-m3", ReasoningEffort: "high", Vision: true}},
+		{"claude-glm", []string{"claude-opus", "claude-gl"}, Route{Provider: "nvidia", Model: "z-ai/glm-5.1", ReasoningEffort: "high"}},
+		{"claude-minimax", []string{"minimax-m3", "claude-m3", "minimaxai/minimax-m3", "claude-mini"}, Route{Provider: "nvidia", Model: "minimaxai/minimax-m3", ReasoningEffort: "high"}},
 		{"claude-deepseek-v4", []string{"deepseek-v4-pro", "claude-v4", "deepseek-ai/deepseek-v4-pro", "claude-deep"}, Route{Provider: "nvidia", Model: "deepseek-ai/deepseek-v4-pro", ReasoningEffort: "high"}},
-		{"claude-gemini-pro", []string{"gemini-pro", "gemini-3.1-pro-preview", "gemini-3-pro"}, Route{Provider: "gemini", Model: "models/gemini-3.1-pro-preview", Vision: true}},
-		{"claude-gemini-flash", []string{"gemini-flash", "gemini-3.5-flash", "gemini-3-flash"}, Route{Provider: "gemini", Model: "models/gemini-3.5-flash", Vision: true}},
+{"claude-gemini-pro", []string{"gemini-pro", "gemini-3.1-pro-preview", "gemini-3-pro"}, Route{Provider: "gemini", Model: "models/gemini-3.1-pro-preview"}},
+			{"claude-gemini-flash", []string{"gemini-flash", "gemini-3.5-flash", "gemini-3-flash"}, Route{Provider: "gemini", Model: "models/gemini-3.5-flash"}},
 	}
 }
 
@@ -505,19 +497,30 @@ func (s *server) routeFor(model string) (Route, error) {
 	normalizedModel := normalizeModelID(model)
 
 	if r, ok := s.effectiveAliases()[normalizedModel]; ok {
-		return withVision(r), nil
+		// Enforce NVIDIA-only for fable/mythos aliases to avoid Gemini fallbacks
+		if strings.Contains(normalizedModel, "fable") || strings.Contains(normalizedModel, "mythos") {
+			if r.Provider != "nvidia" {
+				log.Printf("forcing NVIDIA provider for alias %s (was %s/%s)", normalizedModel, r.Provider, r.Model)
+				r.Provider = "nvidia"
+				// If the model previously pointed at Gemini, prefer minimax-m3
+				if strings.Contains(strings.ToLower(r.Model), "gemini") {
+					r.Model = "minimaxai/minimax-m3"
+				}
+			}
+		}
+		return r, nil
 	}
 
 	if parts := strings.SplitN(model, "/", 3); len(parts) == 3 {
 		if _, ok := cfg.Providers[parts[1]]; ok {
-			return withVision(Route{Provider: parts[1], Model: parts[2]}), nil
+				return Route{Provider: parts[1], Model: parts[2]}, nil
 		}
 	}
 
 	for _, fam := range []string{"opus", "sonnet", "haiku"} {
 		if strings.Contains(normalizedModel, fam) {
 			if r, ok := cfg.Routes[fam]; ok {
-				return withVision(r), nil
+				return r, nil
 			}
 		}
 	}
@@ -525,61 +528,6 @@ func (s *server) routeFor(model string) (Route, error) {
 	return Route{}, fmt.Errorf("unrecognized model ID %q — did you mean anthropic/claude-kimi-k2 or a direct provider path like anthropic/nvidia/moonshotai/kimi-k2.6?", model)
 }
 
-// withVision turns on a route's vision flag when its model is known to accept
-// image input via API. An explicit "vision": true in config still wins; this
-// only adds capability, never removes it, so pointing any slot at a vision
-// model (gemini / kimi-k2.6 / minimax-m3) just works without a manual flag.
-func withVision(r Route) Route {
-	r.Vision = r.Vision || inferVision(r.Provider, r.Model)
-	return r
-}
-
-// requestHasImage reports whether any message carries an image block, meaning
-// the request can only be served by a vision-capable model.
-func requestHasImage(ar *AnthropicRequest) bool {
-	for _, m := range ar.Messages {
-		var blocks []AnthropicBlock
-		if err := json.Unmarshal(m.Content, &blocks); err != nil {
-			continue // plain string content has no image blocks
-		}
-		for _, b := range blocks {
-			if b.Type == "image" {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// visionReroute swaps a text-only route's backend to a vision-capable model
-// while preserving the original route's identity prompt and reasoning effort.
-// Target is cfg.VisionRoute, defaulting to models/gemini-3.5-flash.
-func (s *server) visionReroute(orig Route) Route {
-	target := Route{Provider: "gemini", Model: "models/gemini-3.5-flash"}
-	if cfg := s.cfg.Load(); cfg != nil && cfg.VisionRoute != nil {
-		target = *cfg.VisionRoute
-	}
-	orig.Provider = target.Provider
-	orig.Model = target.Model
-	orig.Vision = true
-	orig.Fallbacks = target.Fallbacks
-	return orig
-}
-
-func inferVision(provider, model string) bool {
-	m := strings.ToLower(model)
-	switch provider {
-	case "gemini":
-		// All current Gemini 2.5 tiers (pro / flash / flash-lite) accept images.
-		return true
-	}
-	// Native-multimodal models reachable through any OpenAI-compatible provider.
-	// big-pickle (opencode) is TEXT-ONLY — kept out so image requests reroute via visionReroute.
-	if strings.Contains(m, "kimi-k2.6") || strings.Contains(m, "minimax-m3") || strings.Contains(m, "glm-5.1") {
-		return true
-	}
-	return false
-}
 
 // ---------- Config ----------
 

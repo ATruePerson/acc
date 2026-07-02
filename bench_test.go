@@ -73,8 +73,8 @@ func TestRouteForTarget(t *testing.T) {
 }
 
 func TestBenchTargetsAndPromptsShape(t *testing.T) {
-	if len(benchTargets) != 7 {
-		t.Errorf("len(benchTargets) = %d, want 7", len(benchTargets))
+	if len(benchTargets) != 8 {
+		t.Errorf("len(benchTargets) = %d, want 8", len(benchTargets))
 	}
 	if len(benchPrompts) != 8 {
 		t.Errorf("len(benchPrompts) = %d, want 8", len(benchPrompts))
@@ -187,7 +187,50 @@ func TestCallModelGivesUpAfterMaxAttempts(t *testing.T) {
 		t.Fatal("expected error after exhausting retries on sustained 429")
 	}
 	if got := calls.Load(); got != benchMaxAttempts {
-		t.Errorf("calls = %d, want %d (benchMaxAttempts)", got, benchMaxAttempts)
+		t.Errorf("calls = %d, want %d (benchMaxAttempts)", got, calls.Load())
+	}
+}
+
+// TestCallModelHonorsRetryAfter verifies that a 429 carrying a Retry-After
+// header is respected: with a 3s header the recovery should land after ~3s,
+// not the (zero) benchBackoff the fastBackoff stub would otherwise yield.
+// Records the timestamp of the second call to measure the gap without tying
+// the test to a wall clock for the retry itself.
+func TestCallModelHonorsRetryAfter(t *testing.T) {
+	fastBackoff(t) // would normally zero the wait; Retry-After overrides it
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		if n == 1 {
+			w.Header().Set("Retry-After", "1") // 1s — short but proves the point
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"status":429}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	cfg := &Config{Providers: map[string]Provider{"fake": {BaseURL: srv.URL, APIKey: "k"}}}
+	route := Route{Provider: "fake", Model: "fake-model"}
+
+	start := time.Now()
+	text, _, _, _, err := callModel(context.Background(), srv.Client(), cfg, route, "hi", 100)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("expected success after honoring Retry-After, got %v", err)
+	}
+	if text != "ok" {
+		t.Errorf("text = %q, want %q", text, "ok")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("calls = %d, want 2 (one 429 then success)", got)
+	}
+	// The Retry-After was 1s, so total elapsed must be >= 1s. Without honoring
+	// the header, fastBackoff would have made it ~0s.
+	if elapsed < time.Second {
+		t.Errorf("elapsed = %v, want >= 1s (Retry-After honored)", elapsed)
 	}
 }
 

@@ -19,7 +19,6 @@ func (m *mockTripper) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 func TestTranslateFromResponses(t *testing.T) {
-	cfg := testCfg()
 	req := &ResponsesRequest{
 		Model: "anthropic/claude-kimi",
 		Input: json.RawMessage(`[{"type":"message","role":"user","content":"hello"},{"type":"function_call","id":"call_1","name":"get_weather","arguments":"{}"}]`),
@@ -35,7 +34,7 @@ func TestTranslateFromResponses(t *testing.T) {
 		},
 	}
 	route := Route{Model: "moonshotai/kimi-k2.6"}
-	or, err := translateFromResponses(req, route, cfg)
+	or, err := translateFromResponses(req, route)
 	if err != nil {
 		t.Fatal(err)
 	}

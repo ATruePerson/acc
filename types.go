@@ -20,10 +20,6 @@ type Config struct {
 	// SystemPrepend is prepended to every system prompt — use it to force
 	// behavior the upstream model otherwise ignores (e.g. respond in English).
 	SystemPrepend string `json:"system_prepend"`
-	// VisionRoute, when set, is the model that image-bearing requests are
-	// rerouted to when the chosen model is text-only. Defaults to
-	// models/gemini-3.5-flash when omitted.
-	VisionRoute *Route `json:"vision_route,omitempty"`
 }
 
 type ModelPrice struct {
@@ -37,21 +33,20 @@ type Provider struct {
 }
 
 type Route struct {
-	Provider        string   `json:"provider"`
-	Model           string   `json:"model"`
-	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
-	Temperature     *float64 `json:"temperature,omitempty"`
-	TopP            *float64 `json:"top_p,omitempty"`
-	MaxTokens       int      `json:"max_tokens,omitempty"`
+	Provider        string         `json:"provider"`
+	Model           string         `json:"model"`
+	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
+	Temperature     *float64       `json:"temperature,omitempty"`
+	TopP            *float64       `json:"top_p,omitempty"`
+	MaxTokens       int            `json:"max_tokens,omitempty"`
+	Stream          *bool          `json:"stream,omitempty"`
 	// SystemPrepend, when set, overrides the global Config.SystemPrepend for
 	// this route/alias only — lets each model carry its own identity/behavior
 	// prompt (e.g. the real Claude system prompt per tier).
 	SystemPrepend string `json:"system_prepend,omitempty"`
-	// Vision marks a route whose model accepts image_url content blocks. When
-	// false (the default), image blocks are dropped and replaced with a text
-	// placeholder so a text-only upstream (e.g. DeepSeek) doesn't 400 on a
-	// pasted screenshot.
-	Vision bool `json:"vision,omitempty"`
+	// ExtraBody is a map of arbitrary JSON fields to merge into the outgoing
+	// OpenAI-compatible request body.
+	ExtraBody map[string]any `json:"extra_body,omitempty"`
 	// Fallbacks is an ordered list of routes to try when this route returns 429
 	// (rate limited). The proxy tries each in sequence and stops after the first
 	// success or after the last fallback fails.
@@ -196,8 +191,20 @@ type OpenAIChoice struct {
 }
 
 type OpenAIUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
+	PromptTokens            int `json:"prompt_tokens"`
+	CompletionTokens        int `json:"completion_tokens"`
+	CompletionTokensDetails *struct {
+		ReasoningTokens int `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details,omitempty"`
+}
+
+// reasoningTokens returns the reasoning_tokens count if the upstream reported
+// it (OpenAI-style nested detail), else 0.
+func (u *OpenAIUsage) reasoningTokens() int {
+	if u != nil && u.CompletionTokensDetails != nil {
+		return u.CompletionTokensDetails.ReasoningTokens
+	}
+	return 0
 }
 
 // ---------- Responses API (front) ----------

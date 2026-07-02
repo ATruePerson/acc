@@ -1,7 +1,7 @@
 #!/bin/sh
 # acc installer — downloads the latest prebuilt binary for your OS/arch.
 #
-#   curl -fsSL https://raw.githubusercontent.com/ATruePerson/acc/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/ATruePerson/acc/main/scripts/install.sh | sh
 #
 # Installs to ~/.local/bin/acc (no sudo, no Go toolchain needed).
 set -eu

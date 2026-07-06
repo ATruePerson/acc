@@ -1,5 +1,10 @@
 {
   "port": 9999,
+  "vision_route": {
+    "provider": "opencode",
+    "model": "gemini-3.5-flash",
+    "temperature": 0
+  },
   "providers": {
     "nvidia": {
       "base_url": "https://integrate.api.nvidia.com/v1",
@@ -21,30 +26,33 @@
   "routes": {
     "opus": {
       "system_prepend": "@system_prompts/Opus",
-      "model": "nvidia/nemotron-3-ultra-550b-a55b",
+      "model": "z-ai/glm-5.2",
       "provider": "nvidia",
-      "temperature": 0.3,
+      "temperature": 1,
       "top_p": 0.95,
-      "max_tokens": 48000,
+      "max_tokens": 131072,
       "extra_body": {
         "chat_template_kwargs": {
           "enable_thinking": true
         }
       },
+      "vision": true,
+      "toolcalling": true,
       "stream": true,
       "fallbacks": [
         {
           "system_prepend": "@system_prompts/Opus",
-          "model": "deepseek-ai/deepseek-v4-pro",
+          "model": "minimaxai/minimax-m3",
           "provider": "nvidia",
-          "temperature": 0.3,
+          "temperature": 1,
           "top_p": 0.95,
-          "max_tokens": 48000,
+          "max_tokens": 131072,
           "extra_body": {
             "chat_template_kwargs": {
               "enable_thinking": true
             }
           },
+          "vision": true,
           "stream": true
         }
       ]
@@ -53,7 +61,7 @@
       "system_prepend": "@system_prompts/Sonnet",
       "provider": "opencode",
       "model": "big-pickle",
-      "temperature": 1.5,
+      "temperature": 0,
       "top_p": 0.95,
       "max_tokens": 48000,
       "extra_body": {
@@ -67,14 +75,9 @@
           "system_prepend": "@system_prompts/Sonnet",
           "provider": "nvidia",
           "model": "nvidia/nemotron-3-super-120b-a12b",
-          "temperature": 1.5,
+          "temperature": 1,
           "top_p": 0.95,
           "max_tokens": 48000,
-          "extra_body": {
-            "chat_template_kwargs": {
-              "enable_thinking": true
-            }
-          },
           "stream": true
         }
       ]
@@ -83,49 +86,42 @@
       "system_prepend": "@system_prompts/Haiku",
       "provider": "nvidia",
       "model": "stepfun-ai/step-3.7-flash",
-      "temperature": 1.0,
+      "temperature": 1,
       "top_p": 0.95,
-      "max_tokens": 16000,
+      "max_tokens": 26000,
       "stream": true,
-      "fallbacks": [
-        {
-          "system_prepend": "@system_prompts/Haiku",
-          "provider": "nvidia",
-          "model": "minimaxai/minimax-m3",
-          "temperature": 1.0,
-          "top_p": 0.95,
-          "max_tokens": 16000,
-          "stream": true
-        }
-      ]
+      "vision": true
     }
   },
   "aliases": {
     "anthropic/claude-opus": {
       "system_prepend": "@system_prompts/Opus",
-      "model": "deepseek-ai/deepseek-v4-flash",
+      "model": "z-ai/glm-5.2",
       "provider": "nvidia",
-      "temperature": 0.3,
+      "temperature": 1,
       "top_p": 0.95,
-      "max_tokens": 98000,
+      "max_tokens": 131072,
+      "vision": true,
+      "toolcalling": true,
       "stream": true,
       "fallbacks": [
         {
           "system_prepend": "@system_prompts/Opus",
-          "model": "qwen/qwen3.5-397b-a17b",
+          "model": "minimaxai/minimax-m3",
           "provider": "nvidia",
-          "temperature": 0.3,
+          "temperature": 1,
           "top_p": 0.95,
-          "max_tokens": 98000,
+          "max_tokens": 131072,
+          "vision": true,
           "stream": true
         }
       ]
     },
-    "anthropic/claude-sonnet": {
+    "sonnet": {
       "system_prepend": "@system_prompts/Sonnet",
-      "model": "big-pickle",
       "provider": "opencode",
-      "temperature": 1.5,
+      "model": "big-pickle",
+      "temperature": 0,
       "top_p": 0.95,
       "max_tokens": 48000,
       "extra_body": {
@@ -137,9 +133,9 @@
       "fallbacks": [
         {
           "system_prepend": "@system_prompts/Sonnet",
-          "model": "nvidia/nemotron-3-super-120b-a12b",
           "provider": "nvidia",
-          "temperature": 1.5,
+          "model": "nvidia/nemotron-3-super-120b-a12b",
+          "temperature": 1,
           "top_p": 0.95,
           "max_tokens": 48000,
           "stream": true
@@ -148,23 +144,13 @@
     },
     "anthropic/claude-haiku": {
       "system_prepend": "@system_prompts/Haiku",
-      "model": "stepfun-ai/step-3.7-flash",
       "provider": "nvidia",
-      "temperature": 1.0,
+      "model": "stepfun-ai/step-3.7-flash",
+      "temperature": 1,
       "top_p": 0.95,
       "max_tokens": 26000,
-      "stream": true,
-      "fallbacks": [
-        {
-          "system_prepend": "@system_prompts/Haiku",
-          "provider": "nvidia",
-          "model": "deepseek-ai/deepseek-v4-flash",
-          "temperature": 1.0,
-          "top_p": 0.95,
-          "max_tokens": 26000,
-          "stream": true
-        }
-      ]
+      "vision": true,
+      "stream": true
     }
   }
 }

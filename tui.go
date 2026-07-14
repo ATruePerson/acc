@@ -11,9 +11,9 @@ import (
 )
 
 type LogEntry struct {
-	Timestamp time.Time
-	Model     string
-	Route     string
+	Timestamp    time.Time
+	Model        string
+	Route        string
 	Status       int
 	TokensIn     int
 	TokensOut    int
@@ -42,9 +42,9 @@ func AddTUILog(entry LogEntry) {
 	if err == nil {
 		defer f.Close()
 		type jLine struct {
-			Timestamp string  `json:"timestamp"`
-			Model     string  `json:"model"`
-			Route     string  `json:"route"`
+			Timestamp    string  `json:"timestamp"`
+			Model        string  `json:"model"`
+			Route        string  `json:"route"`
 			Status       int     `json:"status"`
 			TokensIn     int     `json:"tokens_in"`
 			TokensOut    int     `json:"tokens_out"`

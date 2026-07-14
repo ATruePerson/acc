@@ -30,11 +30,16 @@ acc setup
 
 # 3. Launch Claude Code through acc
 acc claude
+
+# Or launch Codex Desktop through acc
+acc codex
 ```
 
 That's it. `acc setup` asks which providers you have keys for and writes
 `~/.config/acc/.env` + `config.json`. `acc claude` starts the proxy and opens
-Claude Code already pointed at it — no environment variables to remember.
+Claude Code already pointed at it. `acc codex` safely backs up your Codex
+subscription connection, switches Codex Desktop to ACC, and reopens it. Your
+permissions, skills, plugins, and other Codex settings stay in place.
 
 ### Commands
 
@@ -44,7 +49,29 @@ Claude Code already pointed at it — no environment variables to remember.
 | `acc doctor`       | Test that your keys actually work (✅ / ❌ per provider) |
 | `acc models`       | List the model names you can use and where they route |
 | `acc claude [...]` | Start the proxy and launch Claude Code through it      |
+| `acc codex [path]` | Switch Codex Desktop to ACC and launch it              |
+| `acc codex --restore` | Switch Codex Desktop back to your subscription    |
 | `acc` / `acc -tui` | Run the proxy directly (`-tui` for the dashboard)      |
+
+Codex defaults to Sol. The three Codex-only ACC aliases are:
+
+| Codex model | ACC alias | Follows |
+| --- | --- | --- |
+| Codex 5.6 Sol | `openai/codex-5.6-sol` | `opus` route |
+| Codex 5.6 Terra | `openai/codex-5.6-terra` | `sonnet` route |
+| Codex 5.6 Luna | `openai/codex-5.6-luna` | `haiku` route |
+
+Choose one at launch:
+
+```bash
+acc codex --model openai/codex-5.6-luna /path/to/project
+```
+
+Running `acc codex` in a terminal shows a Sol/Terra/Luna picker. Codex Desktop
+currently hides locally supplied custom models from its own model picker, so the
+app may label the selected ACC model as `Custom`; select it through `acc codex`
+or `--model` instead. ACC opens the existing `/Applications/ChatGPT.app`
+directly and never runs the bundled `codex app` installer.
 
 ### From source
 
@@ -105,6 +132,7 @@ API keys come from environment variables — never hardcode secrets in config.js
 ## Features
 
 - **Protocol translation** — Anthropic `/v1/messages` ↔ OpenAI `/v1/chat/completions`
+- **Codex Desktop** — Responses API translation, model discovery, streaming, and tool round-trips
 - **Streaming** — real-time SSE with per-token flushing
 - **Tool use** — function calling in both directions
 - **Images** — translates image blocks to OpenAI format
@@ -157,6 +185,11 @@ Lists advertised Claude model IDs so model discovery works.
 
 Standard [Anthropic Messages API](https://docs.anthropic.com/en/api/messages)
 format. Translated to OpenAI chat completions upstream and back.
+
+### `POST /v1/responses`
+
+OpenAI Responses format used by Codex. Translated to OpenAI-compatible chat
+completions upstream and streamed back as Responses events.
 
 ## License
 

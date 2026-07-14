@@ -60,16 +60,18 @@ func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRe
 		or.Messages = append(or.Messages, msgs...)
 	}
 
-	// tools
-	for _, t := range ar.Tools {
-		or.Tools = append(or.Tools, OpenAITool{
-			Type: "function",
-			Function: OpenAIFunction{
-				Name:        t.Name,
-				Description: t.Description,
-				Parameters:  t.InputSchema,
-			},
-		})
+	// tools — skip when the route explicitly opts out
+	if route.Toolcalling == nil || *route.Toolcalling {
+		for _, t := range ar.Tools {
+			or.Tools = append(or.Tools, OpenAITool{
+				Type: "function",
+				Function: OpenAIFunction{
+					Name:        t.Name,
+					Description: t.Description,
+					Parameters:  t.InputSchema,
+				},
+			})
+		}
 	}
 
 	// effort: map thinking budget -> reasoning_effort bucket, falling back to
@@ -134,7 +136,7 @@ func translateMessage(m AnthropicMessage) ([]OpenAIMessage, error) {
 		case "text":
 			parts = append(parts, OpenAIContentPart{Type: "text", Text: b.Text})
 		case "image":
-				if b.Source != nil && b.Source.Type == "base64" {
+			if b.Source != nil && b.Source.Type == "base64" {
 				url := fmt.Sprintf("data:%s;base64,%s", b.Source.MediaType, b.Source.Data)
 				parts = append(parts, OpenAIContentPart{
 					Type:     "image_url",

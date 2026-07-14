@@ -2,12 +2,14 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -51,6 +53,8 @@ func dispatch(args []string) bool {
 		cmdBench()
 	case "claude", "run":
 		cmdClaude(args[2:])
+	case "codex":
+		cmdCodex(args[2:])
 	case "help", "--help", "-h":
 		printHelp()
 	default:
@@ -69,6 +73,8 @@ Usage:
   acc models          List the model names you can use
   acc bench           Benchmark every persona + fallback, judged for quality
   acc claude [args]   Start the proxy and launch Claude Code through it
+  acc codex [path]    Switch Codex Desktop to ACC and launch it
+  acc codex --restore Switch Codex Desktop back to your subscription
   acc help            Show this help
 
 First time? Run:  acc setup
@@ -307,6 +313,180 @@ func cmdClaude(extra []string) {
 	cmd.Run()
 }
 
+const defaultCodexModel = codexSolID
+
+func cmdCodex(args []string) {
+	flags := flag.NewFlagSet("acc codex", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	model := ""
+	restore := false
+	flags.StringVar(&model, "model", "", "ACC model alias to use")
+	flags.StringVar(&model, "m", "", "ACC model alias to use")
+	flags.BoolVar(&restore, "restore", false, "restore the previous Codex subscription settings")
+	if err := flags.Parse(args); err != nil {
+		fmt.Println("  Usage: acc codex [--model MODEL] [path] | acc codex --restore")
+		return
+	}
+	if len(flags.Args()) > 1 {
+		fmt.Println("  Usage: acc codex [--model MODEL] [path] | acc codex --restore")
+		return
+	}
+	if !restore {
+		if model == "" {
+			model = defaultCodexModel
+			if stdinIsTerminal() {
+				selected, err := chooseCodexModel(os.Stdin, os.Stdout)
+				if err != nil {
+					fmt.Printf("  Could not select a Codex model: %v\n", err)
+					return
+				}
+				model = selected
+			}
+		}
+		if !isCodexModel(model) {
+			fmt.Printf("  Unknown Codex model %q. Use %s, %s, or %s.\n", model, codexSolID, codexTerraID, codexLunaID)
+			return
+		}
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("  Could not find your home directory: %v\n", err)
+		return
+	}
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	codexCatalog := filepath.Join(home, ".codex", "acc-models.json")
+	restoreState := filepath.Join(accDir(), "codex-restore.json")
+	path := "."
+	if len(flags.Args()) == 1 {
+		path = flags.Args()[0]
+	}
+	if restore {
+		if err := restoreCodexApp(codexConfig, codexCatalog, restoreState); err != nil {
+			fmt.Printf("  Could not restore Codex settings: %v\n", err)
+			return
+		}
+		fmt.Println("  Restored your Codex subscription settings. Reopening Codex...")
+		launchCodexDesktop(path)
+		return
+	}
+
+	cfg, err := loadConfig(defaultConfigPath())
+	if err != nil {
+		fmt.Printf("  No config found. Run `acc setup` first. (%v)\n", err)
+		return
+	}
+	loadDotenv(defaultEnvPath())
+
+	base := fmt.Sprintf("http://localhost:%d", cfg.Port)
+	if !proxyAlive(base) {
+		fmt.Printf("  Starting acc on port %d...\n", cfg.Port)
+		if err := startProxyDetached(); err != nil {
+			fmt.Printf("  Could not start acc: %v\n", err)
+			return
+		}
+		if !waitForProxy(base, 10*time.Second) {
+			fmt.Println("  acc did not come up in time. Try `acc` in another terminal.")
+			return
+		}
+	}
+
+	app, err := findCodexDesktopApp()
+	if err != nil {
+		fmt.Printf("  ChatGPT desktop app not found: %v\n", err)
+		return
+	}
+	apiBase := strings.TrimRight(base, "/") + "/v1"
+	if err := configureCodexApp(codexConfig, codexCatalog, restoreState, apiBase, model); err != nil {
+		fmt.Printf("  Could not configure Codex Desktop: %v\n", err)
+		return
+	}
+
+	fmt.Printf("  Codex is using ACC model %s. Reopening Codex...\n\n", model)
+	launchCodexDesktopWith(app, path)
+}
+
+func launchCodexDesktop(path string) {
+	app, err := findCodexDesktopApp()
+	if err != nil {
+		fmt.Printf("  ChatGPT desktop app not found: %v\n", err)
+		return
+	}
+	launchCodexDesktopWith(app, path)
+}
+
+func stdinIsTerminal() bool {
+	info, err := os.Stdin.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func chooseCodexModel(in io.Reader, out io.Writer) (string, error) {
+	fmt.Fprintln(out, "  Select an ACC model:")
+	fmt.Fprintln(out, "    1) Sol   (Opus route)")
+	fmt.Fprintln(out, "    2) Terra (Sonnet route)")
+	fmt.Fprintln(out, "    3) Luna  (Haiku route)")
+	fmt.Fprint(out, "  Choice [1]: ")
+	choice, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && len(choice) == 0 {
+		return "", err
+	}
+	switch strings.TrimSpace(choice) {
+	case "", "1":
+		return codexSolID, nil
+	case "2":
+		return codexTerraID, nil
+	case "3":
+		return codexLunaID, nil
+	default:
+		return "", fmt.Errorf("enter 1, 2, or 3")
+	}
+}
+
+func findCodexDesktopApp() (string, error) {
+	home, _ := os.UserHomeDir()
+	return findCodexDesktopAppFor(runtime.GOOS, home)
+}
+
+func findCodexDesktopAppFor(goos, home string) (string, error) {
+	if goos != "darwin" {
+		return "", fmt.Errorf("direct desktop launch is currently supported on macOS")
+	}
+
+	for _, candidate := range []string{
+		filepath.Join(home, "Applications", "ChatGPT.app"),
+		"/Applications/ChatGPT.app",
+	} {
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("install ChatGPT.app in Applications")
+}
+
+func codexOpenArgs(app, path string) []string {
+	return []string{"-a", app, path}
+}
+
+func launchCodexDesktopWith(app, path string) {
+	// Codex reads provider settings when its app server starts, so a running app
+	// must close before `codex app` reopens it.
+	if runtime.GOOS == "darwin" {
+		script := `tell application "System Events"
+set codexRunning to exists process "Codex"
+set chatGPTRunning to exists process "ChatGPT"
+end tell
+if codexRunning then tell application "Codex" to quit
+if chatGPTRunning then tell application "ChatGPT" to quit`
+		_ = exec.Command("osascript", "-e", script).Run()
+		time.Sleep(750 * time.Millisecond)
+	}
+	cmd := exec.Command("open", codexOpenArgs(app, path)...)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Printf("  Could not launch Codex Desktop: %v\n", err)
+	}
+}
+
 func proxyAlive(base string) bool {
 	client := &http.Client{Timeout: 1 * time.Second}
 	resp, err := client.Get(base + "/health")
@@ -334,9 +514,17 @@ func startProxyDetached() error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(self)
+	cmd := exec.Command(proxyExecutable(self))
 	cmd.Stdout, cmd.Stderr = nil, nil
 	return cmd.Start()
+}
+
+func proxyExecutable(commandPath string) string {
+	managed := filepath.Join(filepath.Dir(commandPath), "acc-proxy")
+	if info, err := os.Stat(managed); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0 {
+		return managed
+	}
+	return commandPath
 }
 
 // defaultConfigJSON is the config written by `acc setup`. Providers reference

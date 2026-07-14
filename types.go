@@ -33,13 +33,13 @@ type Provider struct {
 }
 
 type Route struct {
-	Provider        string         `json:"provider"`
-	Model           string         `json:"model"`
-	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
-	Temperature     *float64       `json:"temperature,omitempty"`
-	TopP            *float64       `json:"top_p,omitempty"`
-	MaxTokens       int            `json:"max_tokens,omitempty"`
-	Stream          *bool          `json:"stream,omitempty"`
+	Provider        string   `json:"provider"`
+	Model           string   `json:"model"`
+	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
+	Temperature     *float64 `json:"temperature,omitempty"`
+	TopP            *float64 `json:"top_p,omitempty"`
+	MaxTokens       int      `json:"max_tokens,omitempty"`
+	Stream          *bool    `json:"stream,omitempty"`
 	// SystemPrepend, when set, overrides the global Config.SystemPrepend for
 	// this route/alias only — lets each model carry its own identity/behavior
 	// prompt (e.g. the real Claude system prompt per tier).
@@ -50,7 +50,8 @@ type Route struct {
 	// Fallbacks is an ordered list of routes to try when this route returns 429
 	// (rate limited). The proxy tries each in sequence and stops after the first
 	// success or after the last fallback fails.
-	Fallbacks []Route `json:"fallbacks,omitempty"`
+	Toolcalling *bool   `json:"toolcalling,omitempty"`
+	Fallbacks   []Route `json:"fallbacks,omitempty"`
 }
 
 type EffortMap struct {
@@ -153,6 +154,7 @@ type OpenAIFunction struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Parameters  json.RawMessage `json:"parameters"`
+	Strict      *bool           `json:"strict,omitempty"`
 }
 
 type OpenAIToolCall struct {
@@ -210,14 +212,16 @@ func (u *OpenAIUsage) reasoningTokens() int {
 // ---------- Responses API (front) ----------
 
 type ResponsesRequest struct {
-	Model       string              `json:"model"`
-	Input       json.RawMessage     `json:"input"` // string OR []ResponsesItem
-	Stream      bool                `json:"stream"`
-	Tools       []ResponsesTool     `json:"tools,omitempty"`
-	Reasoning   *ResponsesReasoning `json:"reasoning,omitempty"`
-	Temperature *float64            `json:"temperature,omitempty"`
-	TopP        *float64            `json:"top_p,omitempty"`
-	MaxTokens   int                 `json:"max_tokens,omitempty"`
+	Model           string              `json:"model"`
+	Instructions    string              `json:"instructions,omitempty"`
+	Input           json.RawMessage     `json:"input"` // string OR []ResponsesItem
+	Stream          bool                `json:"stream"`
+	Tools           []ResponsesTool     `json:"tools,omitempty"`
+	Reasoning       *ResponsesReasoning `json:"reasoning,omitempty"`
+	Temperature     *float64            `json:"temperature,omitempty"`
+	TopP            *float64            `json:"top_p,omitempty"`
+	MaxTokens       int                 `json:"max_tokens,omitempty"`
+	MaxOutputTokens int                 `json:"max_output_tokens,omitempty"`
 }
 
 type ResponsesReasoning struct {
@@ -225,8 +229,12 @@ type ResponsesReasoning struct {
 }
 
 type ResponsesTool struct {
-	Type     string            `json:"type"`
-	Function ResponsesFunction `json:"function"`
+	Type        string            `json:"type"`
+	Name        string            `json:"name,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Parameters  json.RawMessage   `json:"parameters,omitempty"`
+	Strict      *bool             `json:"strict,omitempty"`
+	Function    ResponsesFunction `json:"function,omitempty"`
 }
 
 type ResponsesFunction struct {
@@ -238,18 +246,27 @@ type ResponsesFunction struct {
 type ResponsesItem struct {
 	ID        string          `json:"id,omitempty"`
 	Type      string          `json:"type"` // "message", "function_call", "function_call_output"
-	Role      string          `json:"role,omitempty"` // for message
-	Content   json.RawMessage `json:"content,omitempty"` // string OR []part
-	Name      string          `json:"name,omitempty"` // for function_call
+	Status    string          `json:"status,omitempty"`
+	Role      string          `json:"role,omitempty"`      // for message
+	Content   json.RawMessage `json:"content,omitempty"`   // string OR []part
+	Name      string          `json:"name,omitempty"`      // for function_call
 	Arguments string          `json:"arguments,omitempty"` // for function_call
-	CallID    string          `json:"call_id,omitempty"` // for function_call_output
-	Output    string          `json:"output,omitempty"` // for function_call_output
+	CallID    string          `json:"call_id,omitempty"`   // for function_call and output
+	Output    string          `json:"output,omitempty"`    // for function_call_output
 }
 
 type ResponsesResponse struct {
 	ID        string          `json:"id"`
+	Object    string          `json:"object"`
 	CreatedAt int64           `json:"created_at"`
+	Status    string          `json:"status"`
 	Model     string          `json:"model"`
 	Output    []ResponsesItem `json:"output"`
-	Usage     *OpenAIUsage    `json:"usage,omitempty"`
+	Usage     *ResponsesUsage `json:"usage,omitempty"`
+}
+
+type ResponsesUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	TotalTokens  int `json:"total_tokens"`
 }

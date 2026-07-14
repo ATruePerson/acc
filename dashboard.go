@@ -77,7 +77,6 @@ func (s *server) handleDashboardInfo(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(data)
 }
 
-
 const dashboardHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>

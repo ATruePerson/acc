@@ -2,6 +2,9 @@
 
 `acc-proxy` is a high-performance Go gateway that intercepts Anthropic SDK requests (like Codex) and translates them into OpenAI-compatible requests, routing to cheaper or specialized upstreams (NVIDIA NIM, Gemini, OpenRouter, OpenCode).
 
+For the current Codex Desktop integration, model-family mapping, launch rules,
+and failure history, read [`ACC.md`](ACC.md) before changing `acc codex`.
+
 > ZAI (`api.z.ai`) was removed 2026-06-28 — it is paid (error 1113 insufficient balance). `z-ai/glm-5.1` on the NVIDIA provider is a different, free thing.
 
 ## Architecture

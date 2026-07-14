@@ -54,7 +54,11 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
-	s := &server{cfgPath: path, http: &http.Client{Timeout: 5 * time.Minute}}
+	s := &server{
+		cfgPath: path,
+		http:    newUpstreamHTTPClient(),
+		limiter: newProviderRateLimiter(cfg),
+	}
 	s.cfg.Store(cfg)
 	if fi, statErr := os.Stat(path); statErr == nil {
 		s.cfgModNano.Store(fi.ModTime().UnixNano())
@@ -62,6 +66,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/messages", s.handleMessages)
 	mux.HandleFunc("/v1/responses", s.handleResponses)
+	mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("acc-proxy ok"))
@@ -124,6 +129,15 @@ func main() {
 	}
 }
 
+func newUpstreamHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// A dead model can stall before sending HTTP headers, which happens before
+	// the streaming first-token guard gets a chance to run. Bound that phase to
+	// the same window so the normal route fallback can take over.
+	transport.ResponseHeaderTimeout = firstTokenTimeout
+	return &http.Client{Timeout: 5 * time.Minute, Transport: transport}
+}
+
 type server struct {
 	// cfg is hot-swappable: reloadIfChanged replaces the whole pointer when
 	// config.json changes on disk, so model edits take effect without a restart.
@@ -131,6 +145,7 @@ type server struct {
 	cfgPath    string
 	cfgModNano atomic.Int64
 	http       *http.Client
+	limiter    *providerRateLimiter
 }
 
 // reloadIfChanged re-reads the config file when its modtime has advanced, so
@@ -213,9 +228,6 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-
-
-
 	routes := append([]Route{route}, route.Fallbacks...)
 
 	var (
@@ -283,6 +295,12 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			}
 			upstream.Header.Set("Content-Type", "application/json")
 			upstream.Header.Set("Authorization", "Bearer "+prov.APIKey)
+
+			if err := s.limiter.Wait(r.Context(), currentRoute.Provider); err != nil {
+				httpErr(w, 504, fmt.Sprintf("rate limiter interrupted for %s/%s: %v", currentRoute.Provider, currentRoute.Model, err))
+				logit(currentRoute.Model, 504, 0, 0, 0, or.ReasoningEffort)
+				return
+			}
 
 			resp, err = s.http.Do(upstream)
 			if err != nil {
@@ -423,22 +441,250 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	logit(activeRoute.Model, resp.StatusCode, tokensIn, tokensOut, reasoningOut, or.ReasoningEffort)
 }
 
-func (s *server) handleModels(w http.ResponseWriter, r *http.Request) {
-	// Advertise only the 5 Claude family models the user keeps in their picker.
-	// Every other alias/backend still routes fine through /v1/messages — they are
-	// just hidden from the model-selection list.
-	allow := []string{"claude-opus", "claude-sonnet", "claude-haiku", "claude-fable", "claude-mythos"}
+// handleChatCompletions implements an OpenAI-compatible /v1/chat/completions
+// endpoint. It routes the model name through the same config as /v1/messages,
+// then forwards the (already OpenAI-format) body directly to the upstream,
+// avoiding a double translation loop.
+func (s *server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	s.reloadIfChanged()
+	cfg := s.cfg.Load()
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		httpErr(w, 400, "read body: "+err.Error())
+		return
+	}
 
-	var data []map[string]any
-	for _, name := range allow {
-		id := "anthropic/" + name
-		data = append(data, map[string]any{
-			"type": "model", "id": id, "display_name": id,
-			"created_at": "2025-01-01T00:00:00Z",
+	var meta struct {
+		Model  string `json:"model"`
+		Stream bool   `json:"stream"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		httpErr(w, 400, "parse request: "+err.Error())
+		return
+	}
+
+	route, err := s.routeFor(meta.Model)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+
+	logit := func(routeModel string, status, in, out, reasoning int, effort string) {
+		AddTUILog(LogEntry{
+			Timestamp: time.Now(), Model: meta.Model, Route: routeModel,
+			Status: status, TokensIn: in, TokensOut: out, Budget: 0, Effort: effort,
 		})
 	}
+
+	routes := append([]Route{route}, route.Fallbacks...)
+
+	var (
+		resp         *http.Response
+		activeRoute  Route
+		streamReader io.Reader
+	)
+
+	for ri, currentRoute := range routes {
+		activeRoute = currentRoute
+		prov, ok := cfg.Providers[currentRoute.Provider]
+		if !ok {
+			if ri == len(routes)-1 {
+				httpErr(w, 500, "unknown provider: "+currentRoute.Provider)
+				logit(currentRoute.Model, 500, 0, 0, 0, "")
+				return
+			}
+			log.Printf("unknown provider %q for route %d, trying fallback", currentRoute.Provider, ri)
+			continue
+		}
+
+		body := raw
+		// Rewrite model name to the actual upstream model. The client sends
+		// "anthropic/claude-haiku" but the upstream expects "stepfun-ai/step-3.7-flash".
+		var merged map[string]any
+		if err := json.Unmarshal(body, &merged); err == nil {
+			merged["model"] = currentRoute.Model
+			for k, v := range currentRoute.ExtraBody {
+				merged[k] = v
+			}
+			if newBody, err := json.Marshal(merged); err == nil {
+				body = newBody
+			}
+		}
+
+		maxAttempts := 10
+		if ri < len(routes)-1 {
+			maxAttempts = 2
+		}
+
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			upstream, err := http.NewRequestWithContext(r.Context(), "POST", prov.BaseURL+"/chat/completions", bytes.NewReader(body))
+			if err != nil {
+				httpErr(w, 500, err.Error())
+				logit(currentRoute.Model, 500, 0, 0, 0, "")
+				return
+			}
+			upstream.Header.Set("Content-Type", "application/json")
+			upstream.Header.Set("Authorization", "Bearer "+prov.APIKey)
+
+			if err := s.limiter.Wait(r.Context(), currentRoute.Provider); err != nil {
+				httpErr(w, 504, fmt.Sprintf("rate limiter interrupted for %s/%s: %v", currentRoute.Provider, currentRoute.Model, err))
+				logit(currentRoute.Model, 504, 0, 0, 0, "")
+				return
+			}
+
+			resp, err = s.http.Do(upstream)
+			if err != nil {
+				httpErr(w, 502, "upstream: "+err.Error())
+				logit(currentRoute.Model, 502, 0, 0, 0, "")
+				return
+			}
+
+			if resp.StatusCode == 503 && attempt < maxAttempts {
+				baseInt := 1 << attempt
+				base := float64(baseInt)
+				jitter := base * 0.5 * (float64(time.Now().UnixNano()%1000) / 1000.0)
+				sleepSecs := base + jitter
+				if sleepSecs > 30 {
+					sleepSecs = 30
+				}
+				sleepDuration := time.Duration(sleepSecs * float64(time.Second))
+				log.Printf("openai: upstream %d for model=%s->%s/%s: retrying in %v (attempt %d/%d)", resp.StatusCode, meta.Model, currentRoute.Provider, currentRoute.Model, sleepDuration.Round(100*time.Millisecond), attempt, maxAttempts)
+				resp.Body.Close()
+				select {
+				case <-r.Context().Done():
+					log.Printf("openai: client disconnected during retry backoff for model=%s", meta.Model)
+					return
+				case <-time.After(sleepDuration):
+				}
+				continue
+			}
+			break
+		}
+
+		shouldFallback := resp.StatusCode == 429 || resp.StatusCode >= 500
+		var degradedBody []byte
+		if !shouldFallback && resp.StatusCode == 400 {
+			degradedBody, _ = io.ReadAll(resp.Body)
+			resp.Body.Close()
+			resp.Body = io.NopCloser(bytes.NewReader(degradedBody))
+			if bytes.Contains(degradedBody, []byte("DEGRADED")) || bytes.Contains(degradedBody, []byte("cannot be invoked")) {
+				shouldFallback = true
+			}
+		}
+		if shouldFallback && ri < len(routes)-1 {
+			status := resp.StatusCode
+			b := degradedBody
+			if b == nil {
+				b, _ = io.ReadAll(resp.Body)
+			}
+			resp.Body.Close()
+			resp = nil
+			log.Printf("openai: upstream %d on %s/%s, falling back: %s", status, currentRoute.Provider, currentRoute.Model, truncate(string(b), 200))
+			logit(currentRoute.Model, status, 0, 0, 0, "")
+			continue
+		}
+
+		if meta.Stream && resp.StatusCode < 400 {
+			sr, timedOut := awaitFirstByte(resp.Body, firstTokenTimeout)
+			if timedOut {
+				resp.Body.Close()
+				resp = nil
+				log.Printf("openai: no token from %s/%s within %s", currentRoute.Provider, currentRoute.Model, firstTokenTimeout)
+				logit(currentRoute.Model, 504, 0, 0, 0, "")
+				if ri < len(routes)-1 {
+					continue
+				}
+				httpErr(w, 504, fmt.Sprintf("%s and its fallback gave no response in time. Try again or switch models.", meta.Model))
+				return
+			}
+			streamReader = sr
+		}
+		break
+	}
+
+	defer func() {
+		if resp != nil && resp.Body != nil {
+			resp.Body.Close()
+		}
+	}()
+
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		log.Printf("openai: upstream %d for model=%s->%s/%s: %s", resp.StatusCode, meta.Model, activeRoute.Provider, activeRoute.Model, truncate(string(b), 500))
+		msg := fmt.Sprintf("upstream %s/%s: %s", activeRoute.Provider, activeRoute.Model, truncate(string(b), 300))
+		switch {
+		case resp.StatusCode == 429:
+			msg = fmt.Sprintf("Rate-limited on %s. Wait a bit or switch models.", activeRoute.Model)
+		case resp.StatusCode >= 500:
+			msg = fmt.Sprintf("%s (provider %s) is down — server error %d. Try again or switch models.", activeRoute.Model, activeRoute.Provider, resp.StatusCode)
+		}
+		httpErr(w, resp.StatusCode, msg)
+		logit(activeRoute.Model, resp.StatusCode, 0, 0, 0, "")
+		return
+	}
+
+	if meta.Stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		if streamReader == nil {
+			streamReader = resp.Body
+		}
+		io.Copy(w, streamReader)
+		logit(activeRoute.Model, resp.StatusCode, 0, 0, 0, "")
+		return
+	}
+
+	b, _ := io.ReadAll(resp.Body)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"data": data, "has_more": false})
+	w.WriteHeader(resp.StatusCode)
+	w.Write(b)
+
+	tokensIn, tokensOut := 0, 0
+	var usage struct {
+		Prompt     int `json:"prompt_tokens"`
+		Completion int `json:"completion_tokens"`
+	}
+	if json.Unmarshal(b, &usage) == nil {
+		tokensIn = usage.Prompt
+		tokensOut = usage.Completion
+	}
+	logit(activeRoute.Model, resp.StatusCode, tokensIn, tokensOut, 0, "")
+}
+
+func (s *server) handleModels(w http.ResponseWriter, r *http.Request) {
+	// Check client type: Anthropic SDK sends anthropic-version header, OpenAI clients
+	// don't. Serve the right format so both can discover models.
+	isAnthropic := r.Header.Get("anthropic-version") != ""
+	isCodex := strings.Contains(strings.ToLower(r.UserAgent()), "codex")
+
+	allow := []string{"claude-opus", "claude-sonnet", "claude-haiku", "claude-fable", "claude-mythos"}
+
+	w.Header().Set("Content-Type", "application/json")
+	if isCodex {
+		json.NewEncoder(w).Encode(map[string]any{"models": codexModelCatalogEntries()})
+	} else if isAnthropic {
+		var data []map[string]any
+		for _, name := range allow {
+			id := "anthropic/" + name
+			data = append(data, map[string]any{
+				"type": "model", "id": id, "display_name": id,
+				"created_at": "2025-01-01T00:00:00Z",
+			})
+		}
+		json.NewEncoder(w).Encode(map[string]any{"data": data, "has_more": false})
+	} else {
+		var data []map[string]any
+		for _, name := range allow {
+			id := "anthropic/" + name
+			data = append(data, map[string]any{
+				"id": id, "object": "model",
+				"created": 1735689600, "owned_by": "acc-proxy",
+			})
+		}
+		json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
+	}
 }
 
 // normalizeModelID strips the "anthropic/" prefix and normalizes separators so
@@ -469,8 +715,8 @@ func modelCatalog() []modelDef {
 		{"claude-glm", []string{"claude-opus", "claude-gl"}, Route{Provider: "nvidia", Model: "z-ai/glm-5.1", ReasoningEffort: "high"}},
 		{"claude-minimax", []string{"minimax-m3", "claude-m3", "minimaxai/minimax-m3", "claude-mini"}, Route{Provider: "nvidia", Model: "minimaxai/minimax-m3", ReasoningEffort: "high"}},
 		{"claude-deepseek-v4", []string{"deepseek-v4-pro", "claude-v4", "deepseek-ai/deepseek-v4-pro", "claude-deep"}, Route{Provider: "nvidia", Model: "deepseek-ai/deepseek-v4-pro", ReasoningEffort: "high"}},
-{"claude-gemini-pro", []string{"gemini-pro", "gemini-3.1-pro-preview", "gemini-3-pro"}, Route{Provider: "gemini", Model: "models/gemini-3.1-pro-preview"}},
-			{"claude-gemini-flash", []string{"gemini-flash", "gemini-3.5-flash", "gemini-3-flash"}, Route{Provider: "gemini", Model: "models/gemini-3.5-flash"}},
+		{"claude-gemini-pro", []string{"gemini-pro", "gemini-3.1-pro-preview", "gemini-3-pro"}, Route{Provider: "gemini", Model: "models/gemini-3.1-pro-preview"}},
+		{"claude-gemini-flash", []string{"gemini-flash", "gemini-3.5-flash", "gemini-3-flash"}, Route{Provider: "gemini", Model: "models/gemini-3.5-flash"}},
 	}
 }
 
@@ -485,6 +731,11 @@ func (s *server) effectiveAliases() map[string]Route {
 		}
 	}
 	if cfg := s.cfg.Load(); cfg != nil {
+		for _, model := range codexNamedModels() {
+			if route, ok := cfg.Routes[model.Family]; ok {
+				m[normalizeModelID(model.ID)] = route
+			}
+		}
 		for k, r := range cfg.Aliases {
 			m[normalizeModelID(k)] = r
 		}
@@ -513,7 +764,7 @@ func (s *server) routeFor(model string) (Route, error) {
 
 	if parts := strings.SplitN(model, "/", 3); len(parts) == 3 {
 		if _, ok := cfg.Providers[parts[1]]; ok {
-				return Route{Provider: parts[1], Model: parts[2]}, nil
+			return Route{Provider: parts[1], Model: parts[2]}, nil
 		}
 	}
 
@@ -527,7 +778,6 @@ func (s *server) routeFor(model string) (Route, error) {
 
 	return Route{}, fmt.Errorf("unrecognized model ID %q — did you mean anthropic/claude-kimi-k2 or a direct provider path like anthropic/nvidia/moonshotai/kimi-k2.6?", model)
 }
-
 
 // ---------- Config ----------
 

@@ -14,10 +14,14 @@ import (
 )
 
 // translateFromResponses converts a Responses API request into an OpenAI request.
-func translateFromResponses(req *ResponsesRequest, route Route) (*OpenAIRequest, error) {
+func translateFromResponses(req *ResponsesRequest, route Route, cfg *Config) (*OpenAIRequest, error) {
+	maxTokens := req.MaxOutputTokens
+	if maxTokens == 0 {
+		maxTokens = req.MaxTokens
+	}
 	or := &OpenAIRequest{
 		Model:       route.Model,
-		MaxTokens:   req.MaxTokens,
+		MaxTokens:   maxTokens,
 		Stream:      req.Stream,
 		Temperature: req.Temperature,
 		TopP:        req.TopP,
@@ -29,6 +33,28 @@ func translateFromResponses(req *ResponsesRequest, route Route) (*OpenAIRequest,
 	}
 	if route.TopP != nil {
 		or.TopP = route.TopP
+	}
+	if route.MaxTokens > 0 {
+		or.MaxTokens = route.MaxTokens
+	}
+
+	system := req.Instructions
+	prepend := ""
+	if cfg != nil {
+		prepend = cfg.SystemPrepend
+	}
+	if route.SystemPrepend != "" {
+		prepend = route.SystemPrepend
+	}
+	if prepend != "" {
+		if system != "" {
+			system = prepend + "\n\n" + system
+		} else {
+			system = prepend
+		}
+	}
+	if system != "" {
+		or.Messages = append(or.Messages, OpenAIMessage{Role: "system", Content: jsonString(system)})
 	}
 
 	// Determine reasoning effort
@@ -45,16 +71,28 @@ func translateFromResponses(req *ResponsesRequest, route Route) (*OpenAIRequest,
 		or.StreamOptions = &StreamOptions{IncludeUsage: true}
 	}
 
-	// Translate tools
-	for _, t := range req.Tools {
-		or.Tools = append(or.Tools, OpenAITool{
-			Type: "function",
-			Function: OpenAIFunction{
-				Name:        t.Function.Name,
-				Description: t.Function.Description,
-				Parameters:  t.Function.Parameters,
-			},
-		})
+	// Codex sends Responses tools in the flat form. Keep accepting the older
+	// nested function form so existing clients do not break.
+	if route.Toolcalling == nil || *route.Toolcalling {
+		for _, t := range req.Tools {
+			fn := t.Function
+			strict := t.Strict
+			if t.Name != "" {
+				fn = ResponsesFunction{Name: t.Name, Description: t.Description, Parameters: t.Parameters}
+			}
+			if fn.Name == "" {
+				continue
+			}
+			or.Tools = append(or.Tools, OpenAITool{
+				Type: "function",
+				Function: OpenAIFunction{
+					Name:        fn.Name,
+					Description: fn.Description,
+					Parameters:  fn.Parameters,
+					Strict:      strict,
+				},
+			})
+		}
 	}
 
 	// Translate input -> messages
@@ -75,14 +113,21 @@ func translateFromResponses(req *ResponsesRequest, route Route) (*OpenAIRequest,
 			for _, item := range items {
 				switch item.Type {
 				case "message":
+					content, err := responsesContentToChat(item.Content)
+					if err != nil {
+						return nil, fmt.Errorf("bad message content: %w", err)
+					}
 					or.Messages = append(or.Messages, OpenAIMessage{
 						Role:    item.Role,
-						Content: item.Content,
+						Content: content,
 					})
 				case "function_call":
-					id := item.ID
+					id := item.CallID
+					if id == "" {
+						id = item.ID
+					}
 					var thoughtSig string
-					if parts := strings.SplitN(item.ID, "__thought__", 2); len(parts) == 2 {
+					if parts := strings.SplitN(id, "__thought__", 2); len(parts) == 2 {
 						id = parts[0]
 						thoughtSig = parts[1]
 					}
@@ -150,16 +195,66 @@ func translateFromResponses(req *ResponsesRequest, route Route) (*OpenAIRequest,
 	return or, nil
 }
 
+func responsesContentToChat(raw json.RawMessage) (json.RawMessage, error) {
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return jsonString(text), nil
+	}
+
+	var parts []struct {
+		Type     string          `json:"type"`
+		Text     string          `json:"text,omitempty"`
+		ImageURL json.RawMessage `json:"image_url,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return nil, err
+	}
+
+	var out []OpenAIContentPart
+	for _, part := range parts {
+		switch part.Type {
+		case "input_text", "output_text", "text":
+			out = append(out, OpenAIContentPart{Type: "text", Text: part.Text})
+		case "input_image", "image_url":
+			var url string
+			if err := json.Unmarshal(part.ImageURL, &url); err != nil {
+				var image OpenAIImageURL
+				if json.Unmarshal(part.ImageURL, &image) == nil {
+					url = image.URL
+				}
+			}
+			if url != "" {
+				out = append(out, OpenAIContentPart{Type: "image_url", ImageURL: &OpenAIImageURL{URL: url}})
+			}
+		default:
+			if part.Text != "" {
+				out = append(out, OpenAIContentPart{Type: "text", Text: part.Text})
+			}
+		}
+	}
+	if len(out) == 1 && out[0].Type == "text" {
+		return jsonString(out[0].Text), nil
+	}
+	encoded, err := json.Marshal(out)
+	return encoded, err
+}
+
 // translateToResponses converts a non-streaming OpenAI response back to Responses API format.
 func translateToResponses(or *OpenAIResponse, model string) *ResponsesResponse {
 	resp := &ResponsesResponse{
 		ID:        "resp_" + randID(),
+		Object:    "response",
 		CreatedAt: time.Now().Unix(),
+		Status:    "completed",
 		Model:     model,
 		Output:    []ResponsesItem{},
 	}
 	if or.Usage != nil {
-		resp.Usage = or.Usage
+		resp.Usage = &ResponsesUsage{
+			InputTokens:  or.Usage.PromptTokens,
+			OutputTokens: or.Usage.CompletionTokens,
+			TotalTokens:  or.Usage.PromptTokens + or.Usage.CompletionTokens,
+		}
 	}
 	if len(or.Choices) > 0 {
 		ch := or.Choices[0]
@@ -167,25 +262,32 @@ func translateToResponses(or *OpenAIResponse, model string) *ResponsesResponse {
 			// If there's content, add message item
 			txt := decodeStringContent(ch.Message.Content)
 			if txt != "" {
+				content, _ := json.Marshal([]map[string]any{{
+					"type": "output_text", "text": txt, "annotations": []any{},
+				}})
 				resp.Output = append(resp.Output, ResponsesItem{
 					ID:      "item_" + randID(),
 					Type:    "message",
+					Status:  "completed",
 					Role:    "assistant",
-					Content: ch.Message.Content,
-				})
-			} else if len(ch.Message.Content) > 0 && string(ch.Message.Content) != "null" {
-				resp.Output = append(resp.Output, ResponsesItem{
-					ID:      "item_" + randID(),
-					Type:    "message",
-					Role:    "assistant",
-					Content: ch.Message.Content,
+					Content: content,
 				})
 			}
 			// If there are tool calls, add function_call items
 			for _, tc := range ch.Message.ToolCalls {
+				callID := tc.ID
+				thoughtSig := tc.Function.ThoughtSignature
+				if tc.ExtraContent != nil && tc.ExtraContent.Google != nil && tc.ExtraContent.Google.ThoughtSignature != "" {
+					thoughtSig = tc.ExtraContent.Google.ThoughtSignature
+				}
+				if thoughtSig != "" {
+					callID += "__thought__" + thoughtSig
+				}
 				resp.Output = append(resp.Output, ResponsesItem{
-					ID:        tc.ID,
+					ID:        "fc_" + randID(),
 					Type:      "function_call",
+					Status:    "completed",
+					CallID:    callID,
 					Name:      tc.Function.Name,
 					Arguments: tc.Function.Arguments,
 				})
@@ -241,6 +343,12 @@ func (s *server) executeUpstream(
 			}
 			upstream.Header.Set("Content-Type", "application/json")
 			upstream.Header.Set("Authorization", "Bearer "+prov.APIKey)
+
+			if err := s.limiter.Wait(ctx, currentRoute.Provider); err != nil {
+				httpErr(w, 504, fmt.Sprintf("rate limiter interrupted for %s/%s: %v", currentRoute.Provider, currentRoute.Model, err))
+				logit(currentRoute.Model, 504, 0, 0, or.ReasoningEffort)
+				return nil, Route{}, err
+			}
 
 			resp, err = s.http.Do(upstream)
 			if err != nil {
@@ -339,7 +447,12 @@ func (s *server) executeUpstream(
 // streamTranslateResponses rewrites OpenAI stream chunk payloads to Responses API SSE stream format.
 func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model string) (int, int) {
 	flusher, _ := w.(http.Flusher)
+	sequence := 0
 	send := func(event string, data any) {
+		if payload, ok := data.(map[string]any); ok {
+			payload["sequence_number"] = sequence
+			sequence++
+		}
 		b, _ := json.Marshal(data)
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
 		if flusher != nil {
@@ -351,9 +464,15 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 	send("response.created", map[string]any{
 		"type": "response.created",
 		"response": map[string]any{
-			"id":     respID,
-			"model":  model,
-			"output": []any{},
+			"id": respID, "object": "response", "status": "in_progress",
+			"model": model, "output": []any{},
+		},
+	})
+	send("response.in_progress", map[string]any{
+		"type": "response.in_progress",
+		"response": map[string]any{
+			"id": respID, "object": "response", "status": "in_progress",
+			"model": model, "output": []any{},
 		},
 	})
 
@@ -365,8 +484,11 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 		textIndex       = -1
 		toolBlocks      = map[int]string{} // map tc.Index -> toolItemID
 		toolIndexMap    = map[int]int{}    // map tc.Index -> outputIndex
+		toolCallIDs     = map[int]string{}
 		toolNames       = map[int]string{}
 		toolArgs        = map[int]string{}
+		toolOrder       []int
+		completedItems  []any
 		inputTokens     = 0
 		outputTokens    = 0
 	)
@@ -376,16 +498,22 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 			itemID = "item_" + randID()
 			textIndex = nextIndex
 			nextIndex++
-			send("response.output_item.created", map[string]any{
-				"type":         "response.output_item.created",
+			send("response.output_item.added", map[string]any{
+				"type":         "response.output_item.added",
 				"response_id":  respID,
 				"output_index": textIndex,
 				"item": map[string]any{
 					"id":      itemID,
 					"type":    "message",
+					"status":  "in_progress",
 					"role":    "assistant",
 					"content": []any{},
 				},
+			})
+			send("response.content_part.added", map[string]any{
+				"type": "response.content_part.added", "response_id": respID,
+				"output_index": textIndex, "content_index": 0, "item_id": itemID,
+				"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
 			})
 			textOpen = true
 		}
@@ -394,29 +522,34 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 	closeMessage := func() {
 		if textOpen && itemID != "" {
 			send("response.output_text.done", map[string]any{
-				"type":         "response.output_text.done",
-				"response_id":  respID,
-				"output_index": textIndex,
-				"item_id":      itemID,
-				"text":         accumulatedText,
+				"type":          "response.output_text.done",
+				"response_id":   respID,
+				"output_index":  textIndex,
+				"content_index": 0,
+				"item_id":       itemID,
+				"text":          accumulatedText,
 			})
+			send("response.content_part.done", map[string]any{
+				"type": "response.content_part.done", "response_id": respID,
+				"output_index": textIndex, "content_index": 0, "item_id": itemID,
+				"part": map[string]any{"type": "output_text", "text": accumulatedText, "annotations": []any{}},
+			})
+			messageItem := map[string]any{
+				"id": itemID, "type": "message", "status": "completed", "role": "assistant",
+				"content": []any{map[string]any{
+					"type": "output_text", "text": accumulatedText, "annotations": []any{},
+				}},
+			}
 			send("response.output_item.done", map[string]any{
 				"type":         "response.output_item.done",
 				"response_id":  respID,
 				"output_index": textIndex,
-				"item": map[string]any{
-					"id":   itemID,
-					"type": "message",
-					"role": "assistant",
-					"content": []any{
-						map[string]any{
-							"type": "text",
-							"text": accumulatedText,
-						},
-					},
-				},
+				"item":         messageItem,
 			})
+			completedItems = append(completedItems, messageItem)
 			textOpen = false
+			itemID = ""
+			accumulatedText = ""
 		}
 	}
 
@@ -457,11 +590,12 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 			ensureMessageCreated()
 			accumulatedText += txt
 			send("response.output_text.delta", map[string]any{
-				"type":         "response.output_text.delta",
-				"response_id":  respID,
-				"output_index": textIndex,
-				"item_id":      itemID,
-				"delta":        txt,
+				"type":          "response.output_text.delta",
+				"response_id":   respID,
+				"output_index":  textIndex,
+				"content_index": 0,
+				"item_id":       itemID,
+				"delta":         txt,
 			})
 		}
 
@@ -470,24 +604,31 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 			toolItemID, exists := toolBlocks[tc.Index]
 			if !exists {
 				closeMessage()
-				toolItemID = "item_" + randID()
+				toolItemID = "fc_" + randID()
 				toolBlocks[tc.Index] = toolItemID
 				toolIndexMap[tc.Index] = nextIndex
+				toolOrder = append(toolOrder, tc.Index)
 				nextIndex++
+				toolCallIDs[tc.Index] = tc.ID
 				if tc.Function.Name != "" {
 					toolNames[tc.Index] = tc.Function.Name
 				}
-				send("response.output_item.created", map[string]any{
-					"type":         "response.output_item.created",
+				send("response.output_item.added", map[string]any{
+					"type":         "response.output_item.added",
 					"response_id":  respID,
 					"output_index": toolIndexMap[tc.Index],
 					"item": map[string]any{
 						"id":        toolItemID,
 						"type":      "function_call",
+						"status":    "in_progress",
+						"call_id":   toolCallIDs[tc.Index],
 						"name":      toolNames[tc.Index],
 						"arguments": "",
 					},
 				})
+			}
+			if tc.ID != "" {
+				toolCallIDs[tc.Index] = tc.ID
 			}
 			if tc.Function.Name != "" {
 				toolNames[tc.Index] = tc.Function.Name
@@ -511,7 +652,8 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 	closeMessage()
 
 	// Done for tools
-	for idx, toolItemID := range toolBlocks {
+	for _, idx := range toolOrder {
+		toolItemID := toolBlocks[idx]
 		send("response.function_call_arguments.done", map[string]any{
 			"type":         "response.function_call_arguments.done",
 			"response_id":  respID,
@@ -520,28 +662,27 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 			"name":         toolNames[idx],
 			"arguments":    toolArgs[idx],
 		})
+		toolItem := map[string]any{
+			"id": toolItemID, "type": "function_call", "status": "completed",
+			"call_id": toolCallIDs[idx], "name": toolNames[idx], "arguments": toolArgs[idx],
+		}
 		send("response.output_item.done", map[string]any{
 			"type":         "response.output_item.done",
 			"response_id":  respID,
 			"output_index": toolIndexMap[idx],
-			"item": map[string]any{
-				"id":        toolItemID,
-				"type":      "function_call",
-				"name":      toolNames[idx],
-				"arguments": toolArgs[idx],
-			},
+			"item":         toolItem,
 		})
+		completedItems = append(completedItems, toolItem)
 	}
 
-	send("response.done", map[string]any{
-		"type": "response.done",
+	send("response.completed", map[string]any{
+		"type": "response.completed",
 		"response": map[string]any{
-			"id":     respID,
-			"model":  model,
-			"status": "completed",
+			"id": respID, "object": "response", "model": model,
+			"status": "completed", "output": completedItems,
 			"usage": map[string]any{
-				"prompt_tokens":     inputTokens,
-				"completion_tokens": outputTokens,
+				"input_tokens": inputTokens, "output_tokens": outputTokens,
+				"total_tokens": inputTokens + outputTokens,
 			},
 		},
 	})
@@ -589,7 +730,7 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	routes := append([]Route{route}, route.Fallbacks...)
 
-	or, err := translateFromResponses(&req, route)
+	or, err := translateFromResponses(&req, route, cfg)
 	if err != nil {
 		httpErr(w, 400, "translate: "+err.Error())
 		logit(route.Model, 400, 0, 0, "")

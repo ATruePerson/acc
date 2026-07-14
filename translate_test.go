@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -27,7 +28,7 @@ func TestImageBlockTranslates(t *testing.T) {
 		Model:    "claude-opus-4-8",
 		Messages: []AnthropicMessage{{Role: "user", Content: json.RawMessage(content)}},
 	}
-	or, err := translateRequest(ar, Route{Model: "glm-4.6", Vision: true}, testCfg())
+	or, err := translateRequest(ar, Route{Model: "glm-4.6"}, testCfg())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +122,7 @@ func TestRouteOverridesTemperatureAndMaxTokens(t *testing.T) {
 
 func TestToolResultBecomesToolMessage(t *testing.T) {
 	content := `[{"type":"tool_result","tool_use_id":"call_1","content":"42"}]`
-	msgs, err := translateMessage(AnthropicMessage{Role: "user", Content: json.RawMessage(content)}, false)
+	msgs, err := translateMessage(AnthropicMessage{Role: "user", Content: json.RawMessage(content)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +136,7 @@ func TestToolResultAndTextOrder(t *testing.T) {
 		{"type":"tool_result","tool_use_id":"call_1","content":"42"},
 		{"type":"text","text":"continue"}
 	]`
-	msgs, err := translateMessage(AnthropicMessage{Role: "user", Content: json.RawMessage(content)}, false)
+	msgs, err := translateMessage(AnthropicMessage{Role: "user", Content: json.RawMessage(content)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,6 +173,37 @@ func TestConfigAliasOverridesAndExtends(t *testing.T) {
 	glm, err := s.routeFor("claude-glm")
 	if err != nil || glm.Provider != "opencode" || glm.Model != "big-pickle" {
 		t.Fatalf("config override failed, got %+v err %v", glm, err)
+	}
+}
+
+func TestCodexAliasesFollowConfiguredFamilies(t *testing.T) {
+	cfg := &Config{Routes: map[string]Route{
+		"opus": {
+			Provider: "nvidia", Model: "z-ai/glm-5.2",
+			Fallbacks: []Route{{Provider: "nvidia", Model: "minimaxai/minimax-m3"}},
+		},
+		"sonnet": {
+			Provider: "opencode", Model: "big-pickle",
+			Fallbacks: []Route{{Provider: "nvidia", Model: "nvidia/nemotron-3-super-120b-a12b"}},
+		},
+		"haiku": {Provider: "nvidia", Model: "stepfun-ai/step-3.7-flash"},
+	}}
+	s := testServer(cfg)
+	tests := []struct {
+		id, family string
+	}{
+		{"openai/codex-5.6-sol", "opus"},
+		{"openai/codex-5.6-terra", "sonnet"},
+		{"openai/codex-5.6-luna", "haiku"},
+	}
+	for _, tc := range tests {
+		route, err := s.routeFor(tc.id)
+		if err != nil {
+			t.Fatalf("routeFor(%q): %v", tc.id, err)
+		}
+		if want := cfg.Routes[tc.family]; !reflect.DeepEqual(route, want) {
+			t.Errorf("routeFor(%q) = %+v, want full %s route %+v", tc.id, route, tc.family, want)
+		}
 	}
 }
 
@@ -227,10 +259,10 @@ func TestRouteFor(t *testing.T) {
 		{"anthropic/claude-nemotron-3-ultra", "nemotron-3-ultra-free", "opencode", "high"},
 		{"anthropic/claude-ultra", "nemotron-3-ultra-free", "opencode", "high"},
 		{"anthropic/claude-ultra-free", "nemotron-3-ultra-free", "opencode", "high"},
-		{"anthropic/claude-kim-2", "moonshotai/kimi-k2.6", "nvidia", "high"},
-		{"anthropic/claude_K_2", "moonshotai/kimi-k2.6", "nvidia", "high"},
-		{"anthropic/claude-kimi", "moonshotai/kimi-k2.6", "nvidia", "high"},
-		{"anthropic/claude-kim", "moonshotai/kimi-k2.6", "nvidia", "high"},
+		{"anthropic/claude-kim-2", "qwen/qwen-1m", "cloudflare", "high"},
+		{"anthropic/claude_K_2", "qwen/qwen-1m", "cloudflare", "high"},
+		{"anthropic/claude-kimi", "qwen/qwen-1m", "cloudflare", "high"},
+		{"anthropic/claude-kim", "qwen/qwen-1m", "cloudflare", "high"},
 		{"anthropic/claude-step", "deepseek-ai/deepseek-v4-flash", "nvidia", ""},
 		{"anthropic/claude-glm", "z-ai/glm-5.1", "nvidia", "high"},
 		{"anthropic/claude-gl", "z-ai/glm-5.1", "nvidia", "high"},
@@ -292,13 +324,13 @@ func TestGeminiThoughtSignature(t *testing.T) {
 			{Role: "assistant", Content: json.RawMessage(content)},
 		},
 	}
-	
+
 	// If provider is gemini, thought_signature must be injected as "skip_thought_signature_validator"
 	or, err := translateRequest(ar, Route{Provider: "gemini", Model: "gemini-model"}, testCfg())
 	if err != nil {
 		t.Fatal(err)
 	}
-	
+
 	found := false
 	for _, m := range or.Messages {
 		if m.Role == "assistant" {
@@ -357,4 +389,3 @@ func TestGeminiThoughtSignature(t *testing.T) {
 		t.Fatal("tool call with thought not found")
 	}
 }
-

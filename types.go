@@ -33,9 +33,25 @@ type Provider struct {
 }
 
 type Route struct {
-	Provider        string `json:"provider"`
-	Model           string `json:"model"`
-	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	Provider        string   `json:"provider"`
+	Model           string   `json:"model"`
+	ReasoningEffort string   `json:"reasoning_effort,omitempty"`
+	Temperature     *float64 `json:"temperature,omitempty"`
+	TopP            *float64 `json:"top_p,omitempty"`
+	MaxTokens       int      `json:"max_tokens,omitempty"`
+	Stream          *bool    `json:"stream,omitempty"`
+	// SystemPrepend, when set, overrides the global Config.SystemPrepend for
+	// this route/alias only — lets each model carry its own identity/behavior
+	// prompt (e.g. the real Claude system prompt per tier).
+	SystemPrepend string `json:"system_prepend,omitempty"`
+	// ExtraBody is a map of arbitrary JSON fields to merge into the outgoing
+	// OpenAI-compatible request body.
+	ExtraBody map[string]any `json:"extra_body,omitempty"`
+	// Fallbacks is an ordered list of routes to try when this route returns 429
+	// (rate limited). The proxy tries each in sequence and stops after the first
+	// success or after the last fallback fails.
+	Toolcalling *bool   `json:"toolcalling,omitempty"`
+	Fallbacks   []Route `json:"fallbacks,omitempty"`
 }
 
 type EffortMap struct {
@@ -54,6 +70,7 @@ type AnthropicRequest struct {
 	Tools       []AnthropicTool    `json:"tools,omitempty"`
 	Thinking    *Thinking          `json:"thinking,omitempty"`
 	Temperature *float64           `json:"temperature,omitempty"`
+	TopP        *float64           `json:"top_p,omitempty"`
 }
 
 type Thinking struct {
@@ -103,6 +120,7 @@ type OpenAIRequest struct {
 	Tools           []OpenAITool    `json:"tools,omitempty"`
 	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
 	Temperature     *float64        `json:"temperature,omitempty"`
+	TopP            *float64        `json:"top_p,omitempty"`
 	StreamOptions   *StreamOptions  `json:"stream_options,omitempty"`
 }
 
@@ -136,18 +154,29 @@ type OpenAIFunction struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description"`
 	Parameters  json.RawMessage `json:"parameters"`
+	Strict      *bool           `json:"strict,omitempty"`
 }
 
 type OpenAIToolCall struct {
-	Index    int            `json:"index,omitempty"`
-	ID       string         `json:"id,omitempty"`
-	Type     string         `json:"type,omitempty"`
-	Function OpenAIFuncCall `json:"function"`
+	Index        int                 `json:"index,omitempty"`
+	ID           string              `json:"id,omitempty"`
+	Type         string              `json:"type,omitempty"`
+	Function     OpenAIFuncCall      `json:"function"`
+	ExtraContent *OpenAIExtraContent `json:"extra_content,omitempty"`
+}
+
+type OpenAIExtraContent struct {
+	Google *OpenAIGoogleExtra `json:"google,omitempty"`
+}
+
+type OpenAIGoogleExtra struct {
+	ThoughtSignature string `json:"thought_signature,omitempty"`
 }
 
 type OpenAIFuncCall struct {
-	Name      string `json:"name,omitempty"`
-	Arguments string `json:"arguments,omitempty"`
+	Name             string `json:"name,omitempty"`
+	Arguments        string `json:"arguments,omitempty"`
+	ThoughtSignature string `json:"thought_signature,omitempty"`
 }
 
 // ---------- OpenAI response (back) ----------
@@ -164,6 +193,80 @@ type OpenAIChoice struct {
 }
 
 type OpenAIUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
+	PromptTokens            int `json:"prompt_tokens"`
+	CompletionTokens        int `json:"completion_tokens"`
+	CompletionTokensDetails *struct {
+		ReasoningTokens int `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details,omitempty"`
+}
+
+// reasoningTokens returns the reasoning_tokens count if the upstream reported
+// it (OpenAI-style nested detail), else 0.
+func (u *OpenAIUsage) reasoningTokens() int {
+	if u != nil && u.CompletionTokensDetails != nil {
+		return u.CompletionTokensDetails.ReasoningTokens
+	}
+	return 0
+}
+
+// ---------- Responses API (front) ----------
+
+type ResponsesRequest struct {
+	Model           string              `json:"model"`
+	Instructions    string              `json:"instructions,omitempty"`
+	Input           json.RawMessage     `json:"input"` // string OR []ResponsesItem
+	Stream          bool                `json:"stream"`
+	Tools           []ResponsesTool     `json:"tools,omitempty"`
+	Reasoning       *ResponsesReasoning `json:"reasoning,omitempty"`
+	Temperature     *float64            `json:"temperature,omitempty"`
+	TopP            *float64            `json:"top_p,omitempty"`
+	MaxTokens       int                 `json:"max_tokens,omitempty"`
+	MaxOutputTokens int                 `json:"max_output_tokens,omitempty"`
+}
+
+type ResponsesReasoning struct {
+	Effort string `json:"effort,omitempty"`
+}
+
+type ResponsesTool struct {
+	Type        string            `json:"type"`
+	Name        string            `json:"name,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Parameters  json.RawMessage   `json:"parameters,omitempty"`
+	Strict      *bool             `json:"strict,omitempty"`
+	Function    ResponsesFunction `json:"function,omitempty"`
+}
+
+type ResponsesFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
+type ResponsesItem struct {
+	ID        string          `json:"id,omitempty"`
+	Type      string          `json:"type"` // "message", "function_call", "function_call_output"
+	Status    string          `json:"status,omitempty"`
+	Role      string          `json:"role,omitempty"`      // for message
+	Content   json.RawMessage `json:"content,omitempty"`   // string OR []part
+	Name      string          `json:"name,omitempty"`      // for function_call
+	Arguments string          `json:"arguments,omitempty"` // for function_call
+	CallID    string          `json:"call_id,omitempty"`   // for function_call and output
+	Output    string          `json:"output,omitempty"`    // for function_call_output
+}
+
+type ResponsesResponse struct {
+	ID        string          `json:"id"`
+	Object    string          `json:"object"`
+	CreatedAt int64           `json:"created_at"`
+	Status    string          `json:"status"`
+	Model     string          `json:"model"`
+	Output    []ResponsesItem `json:"output"`
+	Usage     *ResponsesUsage `json:"usage,omitempty"`
+}
+
+type ResponsesUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	TotalTokens  int `json:"total_tokens"`
 }

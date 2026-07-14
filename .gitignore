@@ -18,7 +18,9 @@ go.work.sum
 
 # Runtime metrics log
 test_runs.jsonl
+bench_runs.jsonl
+bench_runs/
 
 # Local project context (not for repo)
 CLAUDE.md
-gemini.md
+docs/gemini.md

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -72,6 +73,53 @@ func TestSystemPromptBecomesFirstMessage(t *testing.T) {
 	}
 }
 
+func TestRouteSystemPrependOverridesGlobal(t *testing.T) {
+	ar := &AnthropicRequest{
+		Model:    "x",
+		System:   json.RawMessage(`"base"`),
+		Messages: []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	}
+	cfg := testCfg()
+	cfg.SystemPrepend = "GLOBAL"
+	route := Route{Model: "x", SystemPrepend: "I am Claude Fable 5."}
+	or, _ := translateRequest(ar, route, cfg)
+
+	sys := string(or.Messages[0].Content)
+	if !strings.Contains(sys, "I am Claude Fable 5.") {
+		t.Fatalf("route prepend missing from system: %s", sys)
+	}
+	if strings.Contains(sys, "GLOBAL") {
+		t.Fatalf("global prepend should be overridden, got: %s", sys)
+	}
+	if !strings.Contains(sys, "base") {
+		t.Fatalf("original system text dropped: %s", sys)
+	}
+}
+
+func TestRouteOverridesTemperatureAndMaxTokens(t *testing.T) {
+	tempVal := 0.2
+	tempOrig := 1.0
+	ar := &AnthropicRequest{
+		Model:       "x",
+		MaxTokens:   4000,
+		Temperature: &tempOrig,
+		Messages:    []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
+	}
+	route := Route{
+		Model:       "x",
+		Temperature: &tempVal,
+		MaxTokens:   500,
+	}
+	or, _ := translateRequest(ar, route, testCfg())
+
+	if or.MaxTokens != 500 {
+		t.Errorf("got MaxTokens %d, want 500", or.MaxTokens)
+	}
+	if or.Temperature == nil || *or.Temperature != 0.2 {
+		t.Errorf("got Temperature %v, want 0.2", or.Temperature)
+	}
+}
+
 func TestToolResultBecomesToolMessage(t *testing.T) {
 	content := `[{"type":"tool_result","tool_use_id":"call_1","content":"42"}]`
 	msgs, err := translateMessage(AnthropicMessage{Role: "user", Content: json.RawMessage(content)})
@@ -104,7 +152,7 @@ func TestToolResultAndTextOrder(t *testing.T) {
 }
 
 func TestConfigAliasOverridesAndExtends(t *testing.T) {
-	s := &server{cfg: &Config{
+	s := testServer(&Config{
 		Providers: map[string]Provider{
 			"nvidia":   {BaseURL: "x", APIKey: "k"},
 			"opencode": {BaseURL: "y", APIKey: "k"},
@@ -115,7 +163,7 @@ func TestConfigAliasOverridesAndExtends(t *testing.T) {
 			// override a built-in canonical
 			"claude_GLM": {Provider: "opencode", Model: "big-pickle", ReasoningEffort: "medium"},
 		},
-	}}
+	})
 
 	fast, err := s.routeFor("anthropic/claude-fast")
 	if err != nil || fast.Model != "stepfun-ai/step-3.7-flash" || fast.ReasoningEffort != "low" {
@@ -125,6 +173,37 @@ func TestConfigAliasOverridesAndExtends(t *testing.T) {
 	glm, err := s.routeFor("claude-glm")
 	if err != nil || glm.Provider != "opencode" || glm.Model != "big-pickle" {
 		t.Fatalf("config override failed, got %+v err %v", glm, err)
+	}
+}
+
+func TestCodexAliasesFollowConfiguredFamilies(t *testing.T) {
+	cfg := &Config{Routes: map[string]Route{
+		"opus": {
+			Provider: "nvidia", Model: "z-ai/glm-5.2",
+			Fallbacks: []Route{{Provider: "nvidia", Model: "minimaxai/minimax-m3"}},
+		},
+		"sonnet": {
+			Provider: "opencode", Model: "big-pickle",
+			Fallbacks: []Route{{Provider: "nvidia", Model: "nvidia/nemotron-3-super-120b-a12b"}},
+		},
+		"haiku": {Provider: "nvidia", Model: "stepfun-ai/step-3.7-flash"},
+	}}
+	s := testServer(cfg)
+	tests := []struct {
+		id, family string
+	}{
+		{"openai/codex-5.6-sol", "opus"},
+		{"openai/codex-5.6-terra", "sonnet"},
+		{"openai/codex-5.6-luna", "haiku"},
+	}
+	for _, tc := range tests {
+		route, err := s.routeFor(tc.id)
+		if err != nil {
+			t.Fatalf("routeFor(%q): %v", tc.id, err)
+		}
+		if want := cfg.Routes[tc.family]; !reflect.DeepEqual(route, want) {
+			t.Errorf("routeFor(%q) = %+v, want full %s route %+v", tc.id, route, tc.family, want)
+		}
 	}
 }
 
@@ -142,9 +221,9 @@ func TestCostFor(t *testing.T) {
 }
 
 func TestCatalogModelsAllRoute(t *testing.T) {
-	s := &server{cfg: &Config{Providers: map[string]Provider{
+	s := testServer(&Config{Providers: map[string]Provider{
 		"nvidia": {}, "opencode": {}, "openrouter": {},
-	}}}
+	}})
 	for _, d := range modelCatalog() {
 		if _, err := s.routeFor("anthropic/" + d.Canonical); err != nil {
 			t.Errorf("catalog canonical %q does not route: %v", d.Canonical, err)
@@ -153,14 +232,12 @@ func TestCatalogModelsAllRoute(t *testing.T) {
 }
 
 func TestRouteFor(t *testing.T) {
-	s := &server{
-		cfg: &Config{
-			Providers: map[string]Provider{
-				"nvidia":   {BaseURL: "https://integrate.api.nvidia.com/v1", APIKey: "fake"},
-				"opencode": {BaseURL: "https://opencode.ai/zen/v1", APIKey: "fake"},
-			},
+	s := testServer(&Config{
+		Providers: map[string]Provider{
+			"nvidia":   {BaseURL: "https://integrate.api.nvidia.com/v1", APIKey: "fake"},
+			"opencode": {BaseURL: "https://opencode.ai/zen/v1", APIKey: "fake"},
 		},
-	}
+	})
 
 	testCases := []struct {
 		inputModel     string
@@ -168,27 +245,31 @@ func TestRouteFor(t *testing.T) {
 		expectedProv   string
 		expectedEffort string
 	}{
-		{"anthropic/claude_step_3.7_flash", "stepfun-ai/step-3.7-flash", "nvidia", "max"},
-		{"anthropic/stepfun-ai/step-3.7-flash", "stepfun-ai/step-3.7-flash", "nvidia", "max"},
-		{"anthropic/stepfun_ai_step_3.7_flash", "stepfun-ai/step-3.7-flash", "nvidia", "max"},
-		{"stepfun-ai/step-3.7-flash", "stepfun-ai/step-3.7-flash", "nvidia", "max"},
-		{"stepfun_ai_step_3.7_flash", "stepfun-ai/step-3.7-flash", "nvidia", "max"},
+		{"anthropic/claude_step_3.7_flash", "deepseek-ai/deepseek-v4-flash", "nvidia", ""},
+		{"anthropic/stepfun-ai/step-3.7-flash", "deepseek-ai/deepseek-v4-flash", "nvidia", ""},
+		{"anthropic/stepfun_ai_step_3.7_flash", "deepseek-ai/deepseek-v4-flash", "nvidia", ""},
+		{"stepfun-ai/step-3.7-flash", "deepseek-ai/deepseek-v4-flash", "nvidia", ""},
+		{"stepfun_ai_step_3.7_flash", "deepseek-ai/deepseek-v4-flash", "nvidia", ""},
 
 		// Manual overrides tests
 		{"anthropic/opencode/big-pickle", "big-pickle", "opencode", "high"},
 		{"anthropic/claude-pickle", "big-pickle", "opencode", "high"},
-		{"claude-mimo-v2.5-free", "mimo-v2.5-free", "opencode", "high"},
-		{"anthropic/opencode/mimo-v2.5-free", "mimo-v2.5-free", "opencode", "high"},
-		{"anthropic/claude_M_2.6", "mimo-v2.5-free", "opencode", "high"},
-		{"anthropic/claude-mimo", "mimo-v2.5-free", "opencode", "high"},
-		{"anthropic/claude-mim", "mimo-v2.5-free", "opencode", "high"},
-		{"anthropic/claude-kim-2", "moonshotai/kimi-k2.6", "nvidia", "high"},
-		{"anthropic/claude_K_2", "moonshotai/kimi-k2.6", "nvidia", "high"},
-		{"anthropic/claude-kimi", "moonshotai/kimi-k2.6", "nvidia", "high"},
-		{"anthropic/claude-kim", "moonshotai/kimi-k2.6", "nvidia", "high"},
-		{"anthropic/claude-step", "stepfun-ai/step-3.7-flash", "nvidia", "max"},
+		{"claude-nemotron-3-ultra-free", "nemotron-3-ultra-free", "opencode", "high"},
+		{"anthropic/opencode/nemotron-3-ultra-free", "nemotron-3-ultra-free", "opencode", "high"},
+		{"anthropic/claude-nemotron-3-ultra", "nemotron-3-ultra-free", "opencode", "high"},
+		{"anthropic/claude-ultra", "nemotron-3-ultra-free", "opencode", "high"},
+		{"anthropic/claude-ultra-free", "nemotron-3-ultra-free", "opencode", "high"},
+		{"anthropic/claude-kim-2", "qwen/qwen-1m", "cloudflare", "high"},
+		{"anthropic/claude_K_2", "qwen/qwen-1m", "cloudflare", "high"},
+		{"anthropic/claude-kimi", "qwen/qwen-1m", "cloudflare", "high"},
+		{"anthropic/claude-kim", "qwen/qwen-1m", "cloudflare", "high"},
+		{"anthropic/claude-step", "deepseek-ai/deepseek-v4-flash", "nvidia", ""},
 		{"anthropic/claude-glm", "z-ai/glm-5.1", "nvidia", "high"},
 		{"anthropic/claude-gl", "z-ai/glm-5.1", "nvidia", "high"},
+		{"anthropic/claude-minimax", "minimaxai/minimax-m3", "nvidia", "high"},
+		{"anthropic/claude-deepseek-v4", "deepseek-ai/deepseek-v4-pro", "nvidia", "high"},
+		{"anthropic/claude-mini", "minimaxai/minimax-m3", "nvidia", "high"},
+		{"anthropic/claude-deep", "deepseek-ai/deepseek-v4-pro", "nvidia", "high"},
 	}
 
 	for _, tc := range testCases {
@@ -205,5 +286,106 @@ func TestRouteFor(t *testing.T) {
 		if route.ReasoningEffort != tc.expectedEffort {
 			t.Errorf("routeFor(%s) returned reasoning_effort %q, want %s", tc.inputModel, route.ReasoningEffort, tc.expectedEffort)
 		}
+	}
+}
+
+func TestSanitizeReasoningEffort(t *testing.T) {
+	testCases := []struct {
+		provider string
+		effort   string
+		expected string
+	}{
+		{"opencode", "ultracode", "max"},
+		{"opencode", "max", "max"},
+		{"opencode", "high", "high"},
+		{"nvidia", "ultracode", "high"},
+		{"nvidia", "max", "high"},
+		{"nvidia", "medium", "medium"},
+		{"gemini", "xhigh", "high"},
+		{"random", "ultracode", "ultracode"}, // unknown provider gets returned as is
+	}
+
+	for _, tc := range testCases {
+		got := sanitizeReasoningEffort(tc.provider, tc.effort)
+		if got != tc.expected {
+			t.Errorf("sanitizeReasoningEffort(%q, %q) = %q, want %q", tc.provider, tc.effort, got, tc.expected)
+		}
+	}
+}
+
+func TestGeminiThoughtSignature(t *testing.T) {
+	// Setup an assistant message containing a tool call
+	content := `[
+		{"type":"tool_use","id":"call_123","name":"run_test","input":{}}
+	]`
+	ar := &AnthropicRequest{
+		Model: "gemini-model",
+		Messages: []AnthropicMessage{
+			{Role: "assistant", Content: json.RawMessage(content)},
+		},
+	}
+
+	// If provider is gemini, thought_signature must be injected as "skip_thought_signature_validator"
+	or, err := translateRequest(ar, Route{Provider: "gemini", Model: "gemini-model"}, testCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found := false
+	for _, m := range or.Messages {
+		if m.Role == "assistant" {
+			for _, tc := range m.ToolCalls {
+				if tc.Function.Name == "run_test" {
+					found = true
+					if tc.ExtraContent == nil || tc.ExtraContent.Google == nil || tc.ExtraContent.Google.ThoughtSignature != "skip_thought_signature_validator" {
+						t.Errorf("expected thought_signature skip_thought_signature_validator in ExtraContent")
+					}
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("tool call not found in translated messages")
+	}
+
+	// Test that an incoming tool call with __thought__ is successfully split into real ID and thought signature
+	contentWithThought := `[
+		{"type":"tool_use","id":"call_abc__thought__SIG_999","name":"run_test","input":{}}
+	]`
+	arWithThought := &AnthropicRequest{
+		Model: "gemini-model",
+		Messages: []AnthropicMessage{
+			{Role: "assistant", Content: json.RawMessage(contentWithThought)},
+			{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"call_abc__thought__SIG_999","content":"success"}]`)},
+		},
+	}
+	or3, err := translateRequest(arWithThought, Route{Provider: "gemini", Model: "gemini-model"}, testCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	foundThought := false
+	for _, m := range or3.Messages {
+		switch m.Role {
+		case "assistant":
+			for _, tc := range m.ToolCalls {
+				if tc.Function.Name == "run_test" {
+					foundThought = true
+					if tc.ID != "call_abc" {
+						t.Errorf("expected split ID 'call_abc', got %q", tc.ID)
+					}
+					if tc.ExtraContent == nil || tc.ExtraContent.Google == nil || tc.ExtraContent.Google.ThoughtSignature != "SIG_999" {
+						t.Errorf("expected split ThoughtSignature 'SIG_999' in ExtraContent")
+					}
+				}
+			}
+		case "tool":
+			if m.ToolCallID != "call_abc" {
+				t.Errorf("expected stripped ToolCallID 'call_abc', got %q", m.ToolCallID)
+			}
+		}
+	}
+	if !foundThought {
+		t.Fatal("tool call with thought not found")
 	}
 }

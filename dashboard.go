@@ -48,6 +48,35 @@ func (s *server) handleDashboardRestart(w http.ResponseWriter, r *http.Request) 
 	}()
 }
 
+func (s *server) handleDashboardInfo(w http.ResponseWriter, r *http.Request) {
+	s.reloadIfChanged()
+	cfg := s.cfg.Load()
+
+	providers := []string{}
+	for p := range cfg.Providers {
+		providers = append(providers, p)
+	}
+
+	aliases := []string{}
+	for k := range cfg.Aliases {
+		aliases = append(aliases, k)
+	}
+
+	routes := []string{}
+	for k := range cfg.Routes {
+		routes = append(routes, k)
+	}
+
+	data := map[string]any{
+		"providers": providers,
+		"aliases":   aliases,
+		"routes":    routes,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(data)
+}
+
 const dashboardHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // translateRequest converts an Anthropic /v1/messages request into an
@@ -14,12 +15,35 @@ func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRe
 		MaxTokens:   ar.MaxTokens,
 		Stream:      ar.Stream,
 		Temperature: ar.Temperature,
+		TopP:        ar.TopP,
 	}
+
+	// Apply route-level overrides if specified in config.json
+	if route.Temperature != nil {
+		or.Temperature = route.Temperature
+	}
+	if route.TopP != nil {
+		or.TopP = route.TopP
+	}
+	if route.MaxTokens > 0 {
+		or.MaxTokens = route.MaxTokens
+	}
+	// NOTE: do NOT let a route force the upstream stream flag to diverge from
+	// the client's. The response handler decides stream vs unary parsing from
+	// the client request (ar.Stream); if the alias forced upstream streaming on
+	// a unary client, the SSE body hits the unary JSON parser and 502s
+	// ("invalid character 'd'" from a `data:` line). Real streaming clients
+	// (Claude Code) already send stream:true, so forcing it here buys nothing.
+	_ = route.Stream
 
 	// system prompt -> leading system message (with optional prepend)
 	sys := decodeSystem(ar.System)
-	if cfg.SystemPrepend != "" {
-		sys = cfg.SystemPrepend + "\n\n" + sys
+	prepend := cfg.SystemPrepend
+	if route.SystemPrepend != "" {
+		prepend = route.SystemPrepend // per-route overrides the global prepend
+	}
+	if prepend != "" {
+		sys = prepend + "\n\n" + sys
 	}
 	if sys != "" {
 		or.Messages = append(or.Messages, OpenAIMessage{
@@ -36,28 +60,56 @@ func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRe
 		or.Messages = append(or.Messages, msgs...)
 	}
 
-	// tools
-	for _, t := range ar.Tools {
-		or.Tools = append(or.Tools, OpenAITool{
-			Type: "function",
-			Function: OpenAIFunction{
-				Name:        t.Name,
-				Description: t.Description,
-				Parameters:  t.InputSchema,
-			},
-		})
+	// tools — skip when the route explicitly opts out
+	if route.Toolcalling == nil || *route.Toolcalling {
+		for _, t := range ar.Tools {
+			or.Tools = append(or.Tools, OpenAITool{
+				Type: "function",
+				Function: OpenAIFunction{
+					Name:        t.Name,
+					Description: t.Description,
+					Parameters:  t.InputSchema,
+				},
+			})
+		}
 	}
 
-	// effort: map thinking budget -> reasoning_effort bucket
+	// effort: map thinking budget -> reasoning_effort bucket, falling back to
+	// the route's own effort when no bucket matches (or no effort block is
+	// configured). Without this fallback an empty effort map would silently
+	// downgrade every thinking request to "low".
 	if ar.Thinking != nil && ar.Thinking.BudgetTokens > 0 {
 		or.ReasoningEffort = bucketForBudget(ar.Thinking.BudgetTokens, cfg)
-	} else if route.ReasoningEffort != "" {
+	}
+	if or.ReasoningEffort == "" && route.ReasoningEffort != "" {
 		or.ReasoningEffort = route.ReasoningEffort
 	}
+	if or.ReasoningEffort != "" {
+		or.ReasoningEffort = sanitizeReasoningEffort(route.Provider, or.ReasoningEffort)
+	}
 
-	if ar.Stream {
+	if or.Stream {
 		or.StreamOptions = &StreamOptions{IncludeUsage: true}
 	}
+
+	if route.Provider == "gemini" {
+		for i := range or.Messages {
+			for j := range or.Messages[i].ToolCalls {
+				tc := &or.Messages[i].ToolCalls[j]
+				thoughtSig := tc.Function.ThoughtSignature
+				tc.Function.ThoughtSignature = ""
+				if thoughtSig == "" {
+					thoughtSig = "skip_thought_signature_validator"
+				}
+				tc.ExtraContent = &OpenAIExtraContent{
+					Google: &OpenAIGoogleExtra{
+						ThoughtSignature: thoughtSig,
+					},
+				}
+			}
+		}
+	}
+
 	return or, nil
 }
 
@@ -92,19 +144,30 @@ func translateMessage(m AnthropicMessage) ([]OpenAIMessage, error) {
 				})
 			}
 		case "tool_use":
+			id := b.ID
+			var thoughtSig string
+			if parts := strings.SplitN(b.ID, "__thought__", 2); len(parts) == 2 {
+				id = parts[0]
+				thoughtSig = parts[1]
+			}
 			toolCalls = append(toolCalls, OpenAIToolCall{
-				ID:   b.ID,
+				ID:   id,
 				Type: "function",
 				Function: OpenAIFuncCall{
-					Name:      b.Name,
-					Arguments: string(b.Input),
+					Name:             b.Name,
+					Arguments:        string(b.Input),
+					ThoughtSignature: thoughtSig,
 				},
 			})
 		case "tool_result":
+			id := b.ToolUseID
+			if parts := strings.SplitN(b.ToolUseID, "__thought__", 2); len(parts) == 2 {
+				id = parts[0]
+			}
 			// flush as its own tool message
 			out = append(out, OpenAIMessage{
 				Role:       "tool",
-				ToolCallID: b.ToolUseID,
+				ToolCallID: id,
 				Content:    jsonString(decodeToolResult(b.Content)),
 			})
 		}
@@ -141,17 +204,26 @@ func translateResponse(or *OpenAIResponse, model string) map[string]any {
 				if len(input) == 0 {
 					input = []byte("{}")
 				}
+				thoughtSig := tc.Function.ThoughtSignature
+				if tc.ExtraContent != nil && tc.ExtraContent.Google != nil && tc.ExtraContent.Google.ThoughtSignature != "" {
+					thoughtSig = tc.ExtraContent.Google.ThoughtSignature
+				}
+				id := tc.ID
+				if thoughtSig != "" {
+					id = fmt.Sprintf("%s__thought__%s", tc.ID, thoughtSig)
+				}
 				content = append(content, map[string]any{
 					"type":  "tool_use",
-					"id":    tc.ID,
+					"id":    id,
 					"name":  tc.Function.Name,
 					"input": input,
 				})
 			}
 		}
-		if ch.FinishReason == "tool_calls" {
+		switch ch.FinishReason {
+		case "tool_calls":
 			stopReason = "tool_use"
-		} else if ch.FinishReason == "length" {
+		case "length":
 			stopReason = "max_tokens"
 		}
 	}
@@ -242,7 +314,9 @@ func bucketForBudget(budget int, cfg *Config) string {
 		}
 	}
 	if bestBudget == -1 {
-		return "low"
+		// no bucket matched (or no effort block configured); let the caller
+		// fall back to the route's own effort instead of forcing "low".
+		return ""
 	}
 	return best
 }
@@ -263,4 +337,34 @@ func costFor(model string, in, out int, cfg *Config) float64 {
 func jsonString(s string) json.RawMessage {
 	b, _ := json.Marshal(s)
 	return b
+}
+
+func sanitizeReasoningEffort(provider string, effort string) string {
+	if effort == "" {
+		return ""
+	}
+	switch provider {
+	case "opencode":
+		// opencode expects one of high, low, medium, max, xhigh
+		switch effort {
+		case "low", "medium", "high", "max", "xhigh":
+			return effort
+		case "ultracode":
+			return "max" // fallback to max
+		default:
+			return "high"
+		}
+	case "nvidia", "gemini", "zai", "openrouter":
+		// standard OpenAI/Nvidia/etc usually expects low, medium, high
+		switch effort {
+		case "low", "medium", "high":
+			return effort
+		case "max", "xhigh", "ultracode":
+			return "high" // fallback to high
+		default:
+			return "high"
+		}
+	default:
+		return effort
+	}
 }

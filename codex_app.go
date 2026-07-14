@@ -223,6 +223,51 @@ func isCodexModel(model string) bool {
 	return false
 }
 
+// activeCodexModel reads the route selected by `acc codex`. Desktop currently
+// sends its own gpt-5.4 IDs for Custom, so the proxy uses this as the source of
+// truth when it receives those IDs.
+func activeCodexModel() (string, bool) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", false
+	}
+	return activeCodexModelFromConfig(filepath.Join(home, ".codex", "config.toml"))
+}
+
+func activeCodexModelFromConfig(path string) (string, bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+
+	var model, provider string
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			break // Only the root settings choose the desktop model.
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		unquoted, err := strconv.Unquote(value)
+		if err != nil {
+			continue
+		}
+		switch strings.TrimSpace(key) {
+		case "model":
+			model = unquoted
+		case "model_provider":
+			provider = unquoted
+		}
+	}
+	return model, provider == "acc" && isCodexModel(model)
+}
+
 func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err

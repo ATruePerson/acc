@@ -36,16 +36,40 @@ func TestCodexOpenArgsOpenExistingAppWithoutInstaller(t *testing.T) {
 }
 
 func TestChooseCodexModel(t *testing.T) {
-	var out bytes.Buffer
-	got, err := chooseCodexModel(strings.NewReader("2\n"), &out)
-	if err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"2\n", codexTerraID},
+		{"Sol\n", codexSolID},
+		{"terra\n", codexTerraID},
+		{"LUNA\n", codexLunaID},
 	}
-	if got != codexTerraID {
-		t.Fatalf("choice 2 = %q, want %q", got, codexTerraID)
+
+	for _, tc := range cases {
+		t.Run(strings.TrimSpace(tc.input), func(t *testing.T) {
+			var out bytes.Buffer
+			got, err := chooseCodexModel(strings.NewReader(tc.input), &out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("choice %q = %q, want %q", tc.input, got, tc.want)
+			}
+			if !strings.Contains(out.String(), "Terra") || !strings.Contains(out.String(), "Sonnet") {
+				t.Fatalf("picker does not explain family mapping:\n%s", out.String())
+			}
+		})
 	}
-	if !strings.Contains(out.String(), "Terra") || !strings.Contains(out.String(), "Sonnet") {
-		t.Fatalf("picker does not explain family mapping:\n%s", out.String())
+}
+
+func TestDetachedProxyCommandStartsIndependentSession(t *testing.T) {
+	cmd := detachedProxyCommand("/tmp/acc-proxy")
+	if len(cmd.Args) != 2 || cmd.Args[0] != "nohup" || cmd.Args[1] != "/tmp/acc-proxy" {
+		t.Fatalf("command args = %q, want nohup /tmp/acc-proxy", cmd.Args)
+	}
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setsid {
+		t.Fatal("detached proxy must start in its own session")
 	}
 }
 

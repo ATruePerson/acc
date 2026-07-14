@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -430,15 +431,15 @@ func chooseCodexModel(in io.Reader, out io.Writer) (string, error) {
 	if err != nil && len(choice) == 0 {
 		return "", err
 	}
-	switch strings.TrimSpace(choice) {
-	case "", "1":
+	switch strings.ToLower(strings.TrimSpace(choice)) {
+	case "", "1", "sol":
 		return codexSolID, nil
-	case "2":
+	case "2", "terra":
 		return codexTerraID, nil
-	case "3":
+	case "3", "luna":
 		return codexLunaID, nil
 	default:
-		return "", fmt.Errorf("enter 1, 2, or 3")
+		return "", fmt.Errorf("enter 1, 2, 3, Sol, Terra, or Luna")
 	}
 }
 
@@ -514,9 +515,30 @@ func startProxyDetached() error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(proxyExecutable(self))
-	cmd.Stdout, cmd.Stderr = nil, nil
-	return cmd.Start()
+	if err := os.MkdirAll(accDir(), 0700); err != nil {
+		return err
+	}
+	logFile, err := os.OpenFile(filepath.Join(accDir(), "proxy.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return err
+	}
+	defer logFile.Close()
+
+	cmd := detachedProxyCommand(proxyExecutable(self))
+	cmd.Stdout, cmd.Stderr = logFile, logFile
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Process.Release()
+}
+
+func detachedProxyCommand(proxy string) *exec.Cmd {
+	cmd := exec.Command("nohup", proxy)
+	cmd.Stdin = nil
+	// `acc codex` exits as soon as it reopens Desktop. A new session plus nohup
+	// keeps the proxy alive after the launching terminal command is gone.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	return cmd
 }
 
 func proxyExecutable(commandPath string) string {

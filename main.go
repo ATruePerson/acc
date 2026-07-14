@@ -746,8 +746,9 @@ func (s *server) effectiveAliases() map[string]Route {
 func (s *server) routeFor(model string) (Route, error) {
 	cfg := s.cfg.Load()
 	normalizedModel := normalizeModelID(model)
+	aliases := s.effectiveAliases()
 
-	if r, ok := s.effectiveAliases()[normalizedModel]; ok {
+	if r, ok := aliases[normalizedModel]; ok {
 		// Enforce NVIDIA-only for fable/mythos aliases to avoid Gemini fallbacks
 		if strings.Contains(normalizedModel, "fable") || strings.Contains(normalizedModel, "mythos") {
 			if r.Provider != "nvidia" {
@@ -760,6 +761,18 @@ func (s *server) routeFor(model string) (Route, error) {
 			}
 		}
 		return r, nil
+	}
+
+	// Codex Desktop currently replaces a configured custom model with one of
+	// these built-in IDs (for example, Custom Light -> gpt-5.4-mini). Preserve
+	// the Sol/Terra/Luna selection that `acc codex` wrote to its config instead
+	// of rejecting the request as an unknown model.
+	if strings.HasPrefix(normalizedModel, "gpt-5.4") {
+		if selected, ok := activeCodexModel(); ok {
+			if r, ok := aliases[normalizeModelID(selected)]; ok {
+				return r, nil
+			}
+		}
 	}
 
 	if parts := strings.SplitN(model, "/", 3); len(parts) == 3 {

@@ -4,193 +4,159 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/ATruePerson/acc.svg)](https://pkg.go.dev/github.com/ATruePerson/acc)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-Anthropic API → OpenAI-compatible proxy. Routes Claude SDK calls to
-third-party providers (NVIDIA NIM, Gemini, OpenRouter, OpenCode, ZAI) by
-translating message format, tool use, streaming, and images between protocols.
+A local gateway for Claude Code and Codex Desktop. It accepts Anthropic Messages
+and OpenAI Responses requests, translates them to OpenAI-compatible chat
+completions, then routes them to the provider and model you choose.
 
-Point Claude Code (or any Anthropic-SDK client) at acc, and your requests get
-re-routed to cheaper or alternative models without the client knowing the
-difference.
+Use it to keep your normal client while routing to NVIDIA NIM, Gemini,
+OpenRouter, OpenCode, or another OpenAI-compatible provider.
 
-## Dashboard
-
-Run with `-tui` for a live terminal dashboard showing active routes and
-per-request logs:
-
-![acc dashboard](docs/dashboard.png)
-
-## Quick Start (no toolchain needed)
+## Quick start
 
 ```bash
-# 1. Install (downloads a prebuilt binary to ~/.local/bin)
+# Install the latest release. No Go toolchain needed.
 curl -fsSL https://raw.githubusercontent.com/ATruePerson/acc/main/scripts/install.sh | sh
 
-# 2. Set up — pick providers, paste keys, writes config for you
+# Save provider keys and create ~/.config/acc/config.json.
 acc setup
 
-# 3. Launch Claude Code through acc
+# Start Claude Code through ACC.
 acc claude
 
-# Or launch Codex Desktop through acc
+# Or switch Codex Desktop to ACC.
 acc codex
 ```
 
-That's it. `acc setup` asks which providers you have keys for and writes
-`~/.config/acc/.env` + `config.json`. `acc claude` starts the proxy and opens
-Claude Code already pointed at it. `acc codex` safely backs up your Codex
-subscription connection, switches Codex Desktop to ACC, and reopens it. Your
-permissions, skills, plugins, and other Codex settings stay in place.
+`acc setup` stores keys in `~/.config/acc/.env` and creates a config file if
+one does not exist. `acc claude` starts the gateway when needed and launches
+Claude Code with the right connection. `acc codex` backs up your Codex provider
+settings, switches it to ACC, and reopens the existing ChatGPT desktop app.
 
-### Commands
+## Commands
 
-| Command            | What it does                                          |
-| ------------------ | ----------------------------------------------------- |
-| `acc setup`        | First-time setup: pick providers, paste keys          |
-| `acc doctor`       | Test that your keys actually work (✅ / ❌ per provider) |
-| `acc models`       | List the model names you can use and where they route |
-| `acc claude [...]` | Start the proxy and launch Claude Code through it      |
-| `acc codex [path]` | Switch Codex Desktop to ACC and launch it              |
-| `acc codex --restore` | Switch Codex Desktop back to your subscription    |
-| `acc` / `acc -tui` | Run the proxy directly (`-tui` for the dashboard)      |
+| Command | What it does |
+| --- | --- |
+| `acc setup` | Save provider keys and create the first config file. |
+| `acc doctor` | Check whether configured provider keys work. |
+| `acc models` | List built-in model aliases and your config aliases. |
+| `acc bench` | Benchmark configured personas and fallbacks. |
+| `acc claude [args]` | Start ACC and launch Claude Code through it. |
+| `acc codex [path]` | Switch Codex Desktop to ACC and open a workspace. |
+| `acc codex --restore` | Restore the previous Codex provider settings. |
+| `acc` | Run the gateway directly. |
+| `acc -tui` | Run the gateway with the terminal dashboard. |
+| `acc -ui` | Run the gateway and open the web dashboard. |
 
-Codex defaults to Sol. The three Codex-only ACC aliases are:
+### Codex Desktop
 
-| Codex model | ACC alias | Follows |
+`acc codex` defaults to Sol and offers three model aliases:
+
+| Model | Alias | Uses your config's |
 | --- | --- | --- |
-| Codex 5.6 Sol | `openai/codex-5.6-sol` | `opus` route |
-| Codex 5.6 Terra | `openai/codex-5.6-terra` | `sonnet` route |
-| Codex 5.6 Luna | `openai/codex-5.6-luna` | `haiku` route |
+| Sol | `openai/codex-5.6-sol` | `opus` route |
+| Terra | `openai/codex-5.6-terra` | `sonnet` route |
+| Luna | `openai/codex-5.6-luna` | `haiku` route |
 
-Choose one at launch:
+Choose one directly when scripting:
 
 ```bash
 acc codex --model openai/codex-5.6-luna /path/to/project
 ```
 
-Running `acc codex` in a terminal shows a Sol/Terra/Luna picker. Codex Desktop
-currently hides locally supplied custom models from its own model picker, so the
-app may label the selected ACC model as `Custom`; select it through `acc codex`
-or `--model` instead. ACC opens the existing `/Applications/ChatGPT.app`
-directly and never runs the bundled `codex app` installer.
-
-### From source
-
-```bash
-go install github.com/ATruePerson/acc@latest   # or: go run . -config config.json
-export ANTHROPIC_BASE_URL=http://localhost:9999 # if not using `acc claude`
-```
-
-The `-env` flag loads a dotenv file (default `~/.config/acc/.env`).
-Variables are set only if not already in the environment.
+In an interactive terminal, `acc codex` shows a Sol/Terra/Luna picker. Codex
+Desktop may label these locally supplied models as `Custom`, so use `acc codex`
+or `--model` to choose one reliably. `acc codex --restore` puts your previous
+Codex connection back.
 
 ## Configuration
 
-### `config.json`
+ACC reads `~/.config/acc/config.json` by default. Routes are yours to control:
+`opus`, `sonnet`, and `haiku` each point to a provider, model, optional fallback,
+and request settings. Restart ACC after changing the file.
 
-Routes map Claude model families to upstream providers:
+Provider keys belong in `~/.config/acc/.env`, never in `config.json` or Git.
+You can name any provider in `providers` as long as it exposes an
+OpenAI-compatible `/chat/completions` endpoint.
 
-| Slot    | Default route                          |
-| ------- | -------------------------------------- |
-| opus    | GLM-5.1 via NVIDIA NIM                 |
-| sonnet  | big-pickle via OpenCode                |
-| haiku   | DeepSeek V4 Flash via NVIDIA NIM       |
-| vision  | Gemini 3.5 Flash (image requests)      |
-
-Override per-request by using the direct path form as the model name:
+Use a direct provider path to bypass family routing for one request:
 
 ```
 <anything>/<provider>/<model...>
 ```
 
-Example: `anthropic/nvidia/z-ai/glm-5.1` routes to NVIDIA using GLM-5.1 directly.
+For example, `anthropic/nvidia/z-ai/glm-5.2` uses the `nvidia` provider from
+your config and sends it `z-ai/glm-5.2`.
 
-### Effort mapping
-
-Thinking budget tokens → `reasoning_effort` bucket:
+Thinking budgets map to the closest `reasoning_effort` value in your config:
 
 ```json
 "effort": {
   "low":       { "budget": 2000,  "reasoning": "low" },
   "medium":    { "budget": 6000,  "reasoning": "low" },
   "high":      { "budget": 16000, "reasoning": "medium" },
+  "xhigh":     { "budget": 24000, "reasoning": "high" },
+  "max":       { "budget": 32000, "reasoning": "high" },
   "ultracode": { "budget": 48000, "reasoning": "high" }
 }
 ```
 
-### Providers
+## What it handles
 
-| Provider    | Base URL                                    |
-|-------------|---------------------------------------------|
-| NVIDIA NIM  | `https://integrate.api.nvidia.com/v1`       |
-| Gemini      | `https://generativelanguage.googleapis.com/v1beta/openai` |
-| OpenRouter  | `https://openrouter.ai/api/v1`              |
-| ZAI         | `https://api.z.ai/api/paas/v4`              |
-| OpenCode    | `https://opencode.ai/zen/v1`                |
-
-API keys come from environment variables — never hardcode secrets in config.json.
-
-## Features
-
-- **Protocol translation** — Anthropic `/v1/messages` ↔ OpenAI `/v1/chat/completions`
-- **Codex Desktop** — Responses API translation, model discovery, streaming, and tool round-trips
-- **Streaming** — real-time SSE with per-token flushing
-- **Tool use** — function calling in both directions
-- **Images** — translates image blocks to OpenAI format
-- **Effort mapping** — thinking budget → reasoning_effort
-- **Graceful shutdown** — drains active requests on SIGINT/SIGTERM
-- **Context cancellation** — cancels upstream if client disconnects
-- **CORS** — cross-origin headers for desktop/UI tools
-- **Config validation** — catches misspelled providers at startup, not first request
+- Anthropic Messages, OpenAI Responses, and OpenAI Chat Completions endpoints.
+- Streaming responses, tool calls, tool results, and images.
+- Codex model discovery and multi-turn tool calls.
+- Per-provider rate limiting, retrying, and configured fallbacks.
+- Live terminal and web dashboards with request logs.
+- Config validation before the gateway starts.
 
 ## Security
 
-**Run on localhost only.** acc has no authentication. It binds to all
-interfaces on the configured port, so exposing it to a network lets anyone
-send requests through your upstream API keys.
+ACC has no authentication and currently listens on every network interface on
+its configured port. Keep it on a trusted network. If someone else can reach
+that port, they can use your provider keys through ACC.
 
-Other things to keep in mind:
+- Keep `~/.config/acc/.env` private. `chmod 600 ~/.config/acc/.env` is a good
+  default on a shared machine.
+- ACC does not provide TLS. Do not expose it to the internet.
+- Prompts, tool data, and images leave your machine for the provider selected
+  by the route.
+- The web endpoints allow cross-origin requests. That is useful for local tools,
+  but makes network exposure riskier.
 
-- **Protect your key file.** The default dotenv path is `~/.config/acc/.env`;
-  restrict file permissions (`chmod 600`) so other users on the machine
-  cannot read your provider keys.
-- **No TLS.** Traffic between your client and acc is plaintext. That is
-  fine for `localhost`, but do not terminate TLS here and expose the port.
-- **Data leaves your machine.** Every prompt, tool call, and image is
-  forwarded to whichever upstream provider your routing config selects.
-- **Upstream errors are echoed.** Failed provider responses are logged and
-  partially returned to the client, which can leak provider error details.
-- **CORS is open.** `Access-Control-Allow-Origin: *` is intentional for
-  local desktop tools, but it widens who can call the API if the port is
-  reachable.
+## From source
+
+```bash
+go install github.com/ATruePerson/acc@latest
+# Or in this repository:
+go run . -config config.json
+```
+
+If you start the gateway yourself, point Anthropic clients at it:
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:9999
+```
+
+The `-env` flag loads a dotenv file, defaulting to `~/.config/acc/.env`.
+Existing environment variables win over values from that file.
+
+## API
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health` | Health check. Returns `acc-proxy ok`. |
+| `GET /v1/models` | Model discovery for Anthropic and OpenAI clients. |
+| `POST /v1/messages` | Anthropic Messages API. |
+| `POST /v1/responses` | OpenAI Responses API, used by Codex. |
+| `POST /v1/chat/completions` | OpenAI-compatible chat endpoint. |
+| `GET /app` | Web dashboard. |
 
 ## Tests
 
 ```bash
-go test -v ./...
+make test
 ```
-
-## API
-
-### `GET /health`
-
-```
-acc ok
-```
-
-### `GET /v1/models`
-
-Lists advertised Claude model IDs so model discovery works.
-
-### `POST /v1/messages`
-
-Standard [Anthropic Messages API](https://docs.anthropic.com/en/api/messages)
-format. Translated to OpenAI chat completions upstream and back.
-
-### `POST /v1/responses`
-
-OpenAI Responses format used by Codex. Translated to OpenAI-compatible chat
-completions upstream and streamed back as Responses events.
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE).

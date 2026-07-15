@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -47,6 +49,69 @@ func TestRenderMCPConfigUsesACCSubcommandsAndKeepsRawOsascriptOptIn(t *testing.T
 	}
 	if _, ok := decoded.Servers["acc-osascript"]; !ok {
 		t.Fatal("raw osascript missing after opt-in")
+	}
+}
+
+func TestInstallClaude3PMCPConfigReplacesLegacyServersAndPreservesSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "claude_desktop_config.json")
+	original := []byte(`{
+  "mcpServers": {
+    "websearch": {"command":"node","args":["old-web.js"]},
+    "mac-control": {"command":"node","args":["old-mac.js"]},
+    "osascript": {"command":"node","args":["old-osa.js"]},
+    "tavily": {"command":"npx","env":{"TOKEN":"keep-me"}}
+  },
+  "deploymentMode": "3p",
+  "preferences": {"menuBarEnabled": false}
+}`)
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	backup, err := installClaude3PMCPConfig(path, "/tmp/acc", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupData, err := os.ReadFile(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(backupData) != string(original) {
+		t.Fatal("Claude-3p backup did not preserve the original config")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if string(decoded["deploymentMode"]) != `"3p"` || !strings.Contains(string(decoded["preferences"]), "menuBarEnabled") {
+		t.Fatalf("Claude-3p settings were lost: %s", data)
+	}
+	var servers map[string]struct {
+		Command string            `json:"command"`
+		Args    []string          `json:"args"`
+		Env     map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal(decoded["mcpServers"], &servers); err != nil {
+		t.Fatal(err)
+	}
+	for _, legacy := range []string{"websearch", "mac-control", "osascript"} {
+		if _, ok := servers[legacy]; ok {
+			t.Fatalf("legacy server %s was not removed", legacy)
+		}
+	}
+	for _, name := range []string{"acc-websearch", "acc-mac-control", "acc-osascript"} {
+		server, ok := servers[name]
+		if !ok || server.Command != "/tmp/acc" {
+			t.Fatalf("ACC server %s missing or invalid: %+v", name, server)
+		}
+	}
+	if servers["tavily"].Command != "npx" || servers["tavily"].Env["TOKEN"] != "keep-me" {
+		t.Fatalf("unrelated MCP server was changed: %+v", servers["tavily"])
 	}
 }
 
@@ -158,16 +223,35 @@ func TestNotesHTMLConversionEscapesText(t *testing.T) {
 	}
 }
 
+func TestBuildNoteMutationJXAPreservesTitleOnReplace(t *testing.T) {
+	script := buildNoteMutationJXA("id", "title", "Notes", "On My Mac", "<div>replacement</div>", true)
+	for _, expected := range []string{
+		"const originalTitle = safeName(target.note);",
+		"target.note.body = '<div>' + escapeHTML(originalTitle) + '</div>' + fragment;",
+		"result.titlePreserved = result.title === originalTitle;",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("replacement script does not preserve and verify the title; missing %q", expected)
+		}
+	}
+}
+
 func TestClaudeArgsAddMCPConfigWithoutOverridingExplicitChoice(t *testing.T) {
 	got := claudeArgsWithMCP([]string{"--model", "sonnet"}, "/tmp/mcp.json")
-	want := []string{"--mcp-config", "/tmp/mcp.json", "--model", "sonnet"}
+	want := []string{"--model", "sonnet", "--strict-mcp-config", "--mcp-config", "/tmp/mcp.json"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("args = %q, want %q", got, want)
 	}
 	explicit := []string{"--mcp-config", "/custom.json"}
 	got = claudeArgsWithMCP(explicit, "/tmp/mcp.json")
-	if strings.Join(got, "|") != strings.Join(explicit, "|") {
+	want = []string{"--mcp-config", "/custom.json", "--strict-mcp-config"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("explicit MCP config was overwritten: %q", got)
+	}
+	explicit = []string{"--strict-mcp-config", "--mcp-config=/custom.json"}
+	got = claudeArgsWithMCP(explicit, "/tmp/mcp.json")
+	if strings.Join(got, "|") != strings.Join(explicit, "|") {
+		t.Fatalf("strict MCP config flags were duplicated: %q", got)
 	}
 }
 

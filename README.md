@@ -60,7 +60,8 @@ ACC includes two safe-by-default local MCP servers for Claude Code:
   the newest 1, 3, or 7 notes from a specific folder.
 
 `acc claude` creates `~/.config/acc/mcp.json` when missing and passes it through
-Claude Code's `--mcp-config` option. It does not rewrite Claude's global config.
+Claude Code's `--mcp-config` option in strict mode. That keeps older global MCP
+servers from shadowing ACC's tools without rewriting Claude's global config.
 Install or refresh it directly with:
 
 ```bash
@@ -68,11 +69,21 @@ acc mcp install
 acc mcp doctor
 ```
 
+The separate Claude-3p desktop app reads its own config. Merge ACC into that
+config, remove only the three legacy custom servers, and preserve unrelated
+servers and preferences with:
+
+```bash
+acc mcp install --claude-3p
+```
+
 The unrestricted `acc-osascript` server is bundled but disabled by default.
 Enable it only when you need arbitrary AppleScript or JXA:
 
 ```bash
 acc mcp install --include-raw-osascript
+# Claude-3p, including raw osascript:
+acc mcp install --claude-3p --include-raw-osascript
 ```
 
 `web_fetch` accepts only public HTTP(S) destinations and rejects private/local
@@ -84,21 +95,21 @@ after the call; apps already running before the call are left alone.
 
 `acc codex` refreshes Codex's catalog from enabled entries in
 `config.json.models`, backs up the old connection, and reopens Codex without a
-terminal picker. Sol is the default only for new tasks; Codex keeps the model
+terminal picker. Opus is the default only for new tasks; Codex keeps the model
 stored on existing tasks. The default config includes these five stable IDs:
 
 | Model | Stable ID | Backend |
 | --- | --- | --- |
-| Sol | `gpt-5.6-sol` | `routes.opus` |
-| Terra | `gpt-5.6-terra` | `routes.sonnet` |
-| Luna | `gpt-5.6-luna` | `routes.haiku` |
+| Opus | `opus` | `routes.opus` |
+| Sonnet | `sonnet` | `routes.sonnet` |
+| Haiku | `haiku` | `routes.haiku` |
 | MiniMax M3 | `acc-minimax-m3` | NVIDIA direct |
 | Nemotron Super | `acc-nemotron-super` | NVIDIA direct |
 
 Choose one directly when scripting:
 
 ```bash
-acc codex --model gpt-5.6-luna /path/to/project
+acc codex --model haiku /path/to/project
 ```
 
 The catalog contains only the efforts declared for each model. Unsupported
@@ -106,7 +117,7 @@ choices are rejected before ACC contacts a provider. Model and effort arrive on
 every request, so separate Codex tasks stay independent. `acc codex --restore`
 puts your previous Codex connection back.
 
-Sol is one logical model: text uses NVIDIA GLM-5.2 first, with an explicit
+Opus is one logical model: text uses NVIDIA GLM-5.2 first, with an explicit
 MiniMax M3 fallback. Image or mixed text-image requests go directly to MiniMax
 M3 because GLM-5.2 is text-only. ACC never quietly lowers the selected effort.
 

@@ -265,7 +265,7 @@ func TestHandleModelsCodexShape(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.Models) != 3 || body.Models[0].Slug != "gpt-5.6-luna" || body.Models[0].BaseInstructions == "" {
+	if len(body.Models) != 3 || body.Models[0].Slug != "haiku" || body.Models[0].BaseInstructions == "" {
 		t.Fatalf("unexpected Codex models response: %s", w.Body.String())
 	}
 }

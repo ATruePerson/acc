@@ -184,9 +184,9 @@ func TestCodexAliasesFollowConfiguredFamilies(t *testing.T) {
 	tests := []struct {
 		id, family string
 	}{
-		{codexSolID, "opus"},
-		{codexTerraID, "sonnet"},
-		{codexLunaID, "haiku"},
+		{codexOpusID, "opus"},
+		{codexSonnetID, "sonnet"},
+		{codexHaikuID, "haiku"},
 	}
 	for _, tc := range tests {
 		route, err := s.routeFor(tc.id)

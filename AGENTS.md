@@ -66,7 +66,7 @@ A route's `extra_body` is **flat-merged to the top level** of the outgoing reque
 
 - **nemotron-ultra (550B) is slow.** `reasoning_budget` 32000 hangs 6+ min on a trivial prompt; at 8000 it answers in ~99s. Still the slowest tier — 550B is heavy regardless. Only a model swap fixes speed.
 - **Gemini 3.x multi-turn tools work now** — the proxy injects `skip_thought_signature_validator` (`translate.go`/`stream.go`/`responses_handler.go`). The old "never use 3.x for tools" rule is obsolete. Verified live: 2-turn tool round-trip on gemini-3.1-pro.
-- **Vision:** set `"vision": true` only on Gemini + minimax (vision-capable). NVIDIA reasoning models (nemotron/deepseek/glm) are text-only. Sol image or mixed text-image requests skip GLM-5.2 and start directly on its MiniMax M3 fallback route; never mark GLM image-capable or send it image content.
+- **Vision:** set `"vision": true` only on Gemini + minimax (vision-capable). NVIDIA reasoning models (nemotron/deepseek/glm) are text-only. Opus image or mixed text-image requests skip GLM-5.2 and start directly on its MiniMax M3 fallback route; never mark GLM image-capable or send it image content.
 - **MiniMax tools:** MiniMax M3 returns `DEGRADED function cannot be invoked` for function calls. Keep its Codex `tool_call_support` false and exclude it from any request carrying tools; never silently strip tools to make the fallback work.
 - **big-pickle** (opencode) is a codename for `deepseek-v4-flash` — a reasoning model that returns EMPTY content if `max_tokens` is too low (spends it all in `reasoning_content`).
 

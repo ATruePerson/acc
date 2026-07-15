@@ -34,9 +34,9 @@ func TestCodexOpenArgsOpenExistingAppWithoutInstaller(t *testing.T) {
 	}
 }
 
-func TestCodexDefaultsToTheSingleSolEntry(t *testing.T) {
-	if defaultCodexModel != codexSolID {
-		t.Fatalf("default Codex model = %q, want %q", defaultCodexModel, codexSolID)
+func TestCodexDefaultsToOpus(t *testing.T) {
+	if defaultCodexModel != codexOpusID {
+		t.Fatalf("default Codex model = %q, want %q", defaultCodexModel, codexOpusID)
 	}
 }
 
@@ -73,9 +73,9 @@ func TestCodexModelCatalogHasNamedModels(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []struct{ slug, display string }{
-		{"gpt-5.6-luna", "GPT-5.6 Luna"},
-		{"gpt-5.6-sol", "GPT-5.6 Sol"},
-		{"gpt-5.6-terra", "GPT-5.6 Terra"},
+		{"haiku", "Haiku"},
+		{"opus", "Opus"},
+		{"sonnet", "Sonnet"},
 	}
 	if len(catalog.Models) != len(want) {
 		t.Fatalf("got %d models, want %d", len(catalog.Models), len(want))
@@ -115,7 +115,7 @@ func TestConfigureAndRestoreCodexApp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := configureCodexApp(configPath, catalogPath, restorePath, "http://localhost:9999/v1", codexSolID, cfg)
+	err := configureCodexApp(configPath, catalogPath, restorePath, "http://localhost:9999/v1", codexOpusID, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestConfigureAndRestoreCodexApp(t *testing.T) {
 	text := string(configured)
 	for _, required := range []string{
 		`sandbox_mode = "workspace-write"`,
-		`model = "gpt-5.6-sol"`,
+		`model = "opus"`,
 		`model_provider = "acc"`,
 		`model_catalog_json = "` + catalogPath + `"`,
 		`web_search = "disabled"`,
@@ -143,14 +143,14 @@ func TestConfigureAndRestoreCodexApp(t *testing.T) {
 	if strings.Contains(text, `model = "gpt-subscription"`) {
 		t.Fatalf("old root model was not replaced:\n%s", text)
 	}
-	if err := configureCodexApp(configPath, catalogPath, restorePath, "http://localhost:9999/v1", codexTerraID, cfg); err != nil {
+	if err := configureCodexApp(configPath, catalogPath, restorePath, "http://localhost:9999/v1", codexSonnetID, cfg); err != nil {
 		t.Fatal(err)
 	}
 	switched, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(switched), `model = "gpt-5.6-terra"`) {
+	if !strings.Contains(string(switched), `model = "sonnet"`) {
 		t.Fatalf("second launch did not switch models:\n%s", switched)
 	}
 
@@ -203,6 +203,41 @@ func TestDefaultConfigIsValidAndLoads(t *testing.T) {
 	// every route must point at a defined provider
 	if err := validateConfig(&c); err != nil {
 		t.Fatalf("default config fails validation: %v", err)
+	}
+}
+
+func TestDefaultConfigUsesRequestedOpusSonnetHaikuAliases(t *testing.T) {
+	b, err := os.ReadFile("config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []string{"opus", "sonnet", "haiku"} {
+		capability, ok := cfg.Models[id]
+		if !ok || !capability.Enabled {
+			t.Errorf("required model alias %q is missing or disabled", id)
+		}
+		if capability.DisplayName != strings.ToUpper(id[:1])+id[1:] {
+			t.Errorf("alias %q display name = %q", id, capability.DisplayName)
+		}
+	}
+	for _, forbidden := range []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} {
+		if _, exists := cfg.Models[forbidden]; exists {
+			t.Errorf("retired Sol/Terra/Luna alias remains configured: %q", forbidden)
+		}
+	}
+	visible := codexNamedModels(&cfg)
+	if len(visible) != 3 {
+		t.Fatalf("user-facing catalog has %d models, want only Opus/Sonnet/Haiku", len(visible))
+	}
+	for _, entry := range codexModelCatalogEntries(&cfg) {
+		if entry["default_reasoning_level"] != "max" {
+			t.Errorf("%v default reasoning = %v, want maximum", entry["slug"], entry["default_reasoning_level"])
+		}
 	}
 }
 

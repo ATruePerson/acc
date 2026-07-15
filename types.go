@@ -61,6 +61,9 @@ type Route struct {
 
 type ModelCapability struct {
 	DisplayName string `json:"display_name"`
+	// CatalogVisible defaults to true. Benchmark and fallback-only candidates
+	// remain directly routable when false without cluttering the client menu.
+	CatalogVisible *bool `json:"catalog_visible,omitempty"`
 	// Route references Config.Routes. Provider+Model can instead define a direct
 	// selectable model without duplicating a named family route.
 	Route    string `json:"route,omitempty"`
@@ -69,14 +72,17 @@ type ModelCapability struct {
 
 	Reasoning map[string]ReasoningTarget `json:"reasoning,omitempty"`
 
-	ToolCallSupport   bool   `json:"tool_call_support"`
-	StreamingSupport  bool   `json:"streaming_support"`
-	ImageInputSupport bool   `json:"image_input_support"`
-	FileInputSupport  bool   `json:"file_input_support"`
-	MaxContext        int    `json:"max_context"`
-	MaxOutput         int    `json:"max_output"`
-	Enabled           bool   `json:"enabled"`
-	FallbackModel     string `json:"fallback_model,omitempty"`
+	ToolCallSupport   bool     `json:"tool_call_support"`
+	StreamingSupport  bool     `json:"streaming_support"`
+	ImageInputSupport bool     `json:"image_input_support"`
+	FileInputSupport  bool     `json:"file_input_support"`
+	MaxContext        int      `json:"max_context"`
+	MaxOutput         int      `json:"max_output"`
+	Enabled           bool     `json:"enabled"`
+	FallbackModel     string   `json:"fallback_model,omitempty"`
+	FallbackModels    []string `json:"fallback_models,omitempty"`
+	// ImageModel is considered only when the request actually contains an image.
+	ImageModel string `json:"image_model,omitempty"`
 }
 
 type ReasoningTarget struct {

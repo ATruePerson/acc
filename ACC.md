@@ -22,7 +22,7 @@ tasks. `AGENTS.md` remains the main repository guide.
 - When a command needs to start the background gateway, it prefers the sibling
   `acc-proxy` binary. This keeps `acc-stop` and `acc-restart` able to find and
   manage the process; do not regress to launching the `acc` command itself.
-- ACC backs up the existing Codex config once, writes the ACC provider and Sol
+- ACC backs up the existing Codex config once, writes the ACC provider and Opus
   as the new-task default, closes the running app, then reopens ChatGPT at the
   requested workspace. It never prompts in the terminal; Codex owns per-task
   model selection.
@@ -47,11 +47,11 @@ exact effort mappings, limits, and an optional explicit fallback model.
 
 | Codex name | Stable ID | Current primary | Explicit fallback | Efforts exposed |
 | --- | --- | --- | --- | --- |
-| Sol | `gpt-5.6-sol` | NVIDIA `z-ai/glm-5.2` | `acc-minimax-m3` | minimal, low, medium, high |
-| Terra | `gpt-5.6-terra` | OpenCode `big-pickle` | `acc-nemotron-super` | minimal, low, medium, high, xhigh, max |
-| Luna | `gpt-5.6-luna` | NVIDIA `stepfun-ai/step-3.7-flash` | none | minimal |
+| Opus | `opus` | NVIDIA `z-ai/glm-5.2` | `acc-minimax-m3` | minimal, low, medium, high |
+| Sonnet | `sonnet` | OpenCode `big-pickle` | `acc-nemotron-super` | minimal, low, medium, high, xhigh, max |
+| Haiku | `haiku` | NVIDIA `stepfun-ai/step-3.7-flash` | none | minimal |
 
-Sol is one logical Codex entry. Text starts on GLM-5.2 and uses MiniMax M3 only
+Opus is one logical Codex entry. Text starts on GLM-5.2 and uses MiniMax M3 only
 as its explicitly configured fallback. Image or mixed text-image input skips
 text-only GLM-5.2 and starts directly on MiniMax M3. This is a capability
 reroute, not an invisible effort downgrade: MiniMax currently exposes only
@@ -76,10 +76,18 @@ Codex, project, tool, safety, developer, and user instructions remain separate.
 
 - Claude Code can load ACC's local MCP bundle from
   `~/.config/acc/mcp.json`. `acc claude` supplies that file through
-  `--mcp-config`; it does not rewrite `~/.claude.json`. The safe default bundle
-  contains `acc-websearch` and `acc-mac-control`. Unrestricted
+  `--mcp-config --strict-mcp-config`; it does not rewrite `~/.claude.json`.
+  Strict mode prevents legacy global servers with overlapping tools from
+  shadowing the ACC bundle. The safe default bundle contains `acc-websearch`
+  and `acc-mac-control`. Unrestricted
   `acc-osascript` is opt-in through
   `acc mcp install --include-raw-osascript`.
+- Claude-3p is a separate desktop client with its own config at
+  `~/Library/Application Support/Claude-3p/claude_desktop_config.json`.
+  `acc mcp install --claude-3p` merges the ACC servers there, removes only the
+  three legacy custom entries, preserves unrelated servers and preferences,
+  and creates a backup. Add `--include-raw-osascript` when that unrestricted
+  tool is explicitly wanted in Claude-3p.
 - `acc-mac-control` addresses Notes by nested `folderPath`, supports folder
   `Instructions` notes, and returns recent note IDs with counts 1, 3, or 7.
   Write tools preserve existing note HTML where possible and replace/delete
@@ -97,7 +105,7 @@ Codex, project, tool, safety, developer, and user instructions remain separate.
   connector authentication and deployment do not pass through the model
   provider. Never claim a Sites deployment was tested unless one was created.
 - Scheduled local jobs store model ID and effort, but the current automation
-  schema has no custom `model_provider` field. A task using `gpt-5.6-terra`
+  schema has no custom `model_provider` field. A task using `sonnet`
   therefore does not prove it used ACC. Do not advertise scheduled ACC support
   until Codex persists the custom provider too.
 
@@ -106,7 +114,7 @@ Codex, project, tool, safety, developer, and user instructions remain separate.
 The first desktop attempt used the bundled `codex app` installer and created a
 duplicate `/Applications/Codex.app`; it was verified byte-for-byte against the
 real app and removed with Kabir's approval. The app showed a blank custom model
-menu. Two Sol requests reached ACC, failed over from GLM 5.2 to MiniMax M3, and
+menu. Two Opus requests reached ACC, failed over from GLM 5.2 to MiniMax M3, and
 ended with HTTP 504 because the fallback emitted no response before the
 first-token timeout. A later live check showed GLM could also stall before
 returning HTTP headers, which bypassed the first-token guard; ACC now applies the
@@ -125,8 +133,8 @@ registry and per-request stable IDs replace that path.
 - `big-pickle` is a reasoning model and can spend a small output limit entirely
   on reasoning. Do not mistake empty text at tiny limits for a transport failure.
 - NVIDIA GLM-5.2 produced no response for 120 seconds during an `xhigh` probe on
-  2026-07-14. Do not expose Sol Extra High until a live probe succeeds.
-- Terra `xhigh` and `max` both returned 200 through OpenCode on 2026-07-14.
+  2026-07-14. Do not expose Opus Extra High until a live probe succeeds.
+- Sonnet `xhigh` and `max` both returned 200 through OpenCode on 2026-07-14.
 
 ## Verification
 

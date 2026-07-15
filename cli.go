@@ -334,7 +334,7 @@ func cmdClaude(extra []string) {
 	cmd.Run()
 }
 
-const defaultCodexModel = codexSolID
+const defaultCodexModel = codexOpusID
 
 func cmdCodex(args []string) {
 	flags := flag.NewFlagSet("acc codex", flag.ContinueOnError)
@@ -556,48 +556,49 @@ const defaultConfigJSON = `{
     "opencode":   { "base_url": "https://opencode.ai/zen/v1", "api_key": "${OPENCODE_API_KEY}" }
   },
   "models": {
-    "gpt-5.6-sol": {
-      "display_name": "GPT-5.6 Sol", "route": "opus", "enabled": true,
-      "reasoning": { "minimal": {}, "low": { "effort": "low" }, "medium": { "effort": "medium" }, "high": { "effort": "high" } },
+    "opus": {
+      "display_name": "Opus", "route": "opus", "enabled": true,
+      "reasoning": { "max": { "effort": "high" } },
       "tool_call_support": true, "streaming_support": true,
       "image_input_support": false, "file_input_support": false,
-      "max_context": 131072, "max_output": 131072,
-      "fallback_model": "acc-minimax-m3"
+      "max_context": 262144, "max_output": 65536,
+      "fallback_models": ["acc-openrouter-nemotron-ultra"], "image_model": "acc-minimax-m3"
     },
-    "gpt-5.6-terra": {
-      "display_name": "GPT-5.6 Terra", "route": "sonnet", "enabled": true,
-      "reasoning": { "minimal": {}, "low": { "effort": "low" }, "medium": { "effort": "medium" }, "high": { "effort": "high" }, "xhigh": { "effort": "xhigh" }, "max": { "effort": "max" } },
+    "sonnet": {
+      "display_name": "Sonnet", "route": "sonnet", "enabled": true,
+      "reasoning": { "max": { "effort": "high" } },
       "tool_call_support": true, "streaming_support": true,
       "image_input_support": false, "file_input_support": false,
-      "max_context": 131072, "max_output": 48000,
-      "fallback_model": "acc-nemotron-super"
+      "max_context": 262144, "max_output": 65536,
+      "fallback_models": ["acc-openrouter-nemotron-ultra"], "image_model": "acc-minimax-m3"
     },
-    "gpt-5.6-luna": {
-      "display_name": "GPT-5.6 Luna", "route": "haiku", "enabled": true,
-      "reasoning": { "minimal": {} },
+    "haiku": {
+      "display_name": "Haiku", "route": "haiku", "enabled": true,
+      "reasoning": { "max": { "effort": "high" } },
       "tool_call_support": true, "streaming_support": true,
       "image_input_support": false, "file_input_support": false,
-      "max_context": 131072, "max_output": 26000
+      "max_context": 262144, "max_output": 65536,
+      "fallback_models": ["acc-openrouter-nemotron-ultra"], "image_model": "acc-minimax-m3"
     },
     "acc-minimax-m3": {
-      "display_name": "MiniMax M3 (NVIDIA)", "provider": "nvidia", "model": "minimaxai/minimax-m3", "enabled": true,
-      "reasoning": { "minimal": {} },
+      "display_name": "MiniMax M3 (NVIDIA)", "catalog_visible": false, "provider": "nvidia", "model": "minimaxai/minimax-m3", "enabled": true,
+      "reasoning": { "max": {} },
       "tool_call_support": false, "streaming_support": true,
       "image_input_support": true, "file_input_support": false,
       "max_context": 131072, "max_output": 131072
     },
-    "acc-nemotron-super": {
-      "display_name": "Nemotron Super 120B (NVIDIA)", "provider": "nvidia", "model": "nvidia/nemotron-3-super-120b-a12b", "enabled": true,
-      "reasoning": { "minimal": {}, "low": { "effort": "low" }, "medium": { "effort": "medium" }, "high": { "effort": "high" } },
+    "acc-openrouter-nemotron-ultra": {
+      "display_name": "OpenRouter Nemotron 3 Ultra Free", "catalog_visible": false, "provider": "openrouter", "model": "nvidia/nemotron-3-ultra-550b-a55b:free", "enabled": true,
+      "reasoning": { "max": { "effort": "high" } },
       "tool_call_support": true, "streaming_support": true,
       "image_input_support": false, "file_input_support": false,
-      "max_context": 131072, "max_output": 48000
+      "max_context": 1000000, "max_output": 65536
     }
   },
   "routes": {
-    "opus":   { "provider": "nvidia",   "model": "z-ai/glm-5.2" },
-    "sonnet": { "provider": "opencode", "model": "big-pickle" },
-    "haiku":  { "provider": "nvidia",   "model": "stepfun-ai/step-3.7-flash" }
+    "opus":   { "provider": "openrouter", "model": "tencent/hy3:free", "reasoning_effort": "high", "max_tokens": 65536, "toolcalling": true, "stream": true },
+    "sonnet": { "provider": "openrouter", "model": "tencent/hy3:free", "reasoning_effort": "high", "max_tokens": 65536, "toolcalling": true, "stream": true },
+    "haiku":  { "provider": "openrouter", "model": "tencent/hy3:free", "reasoning_effort": "high", "max_tokens": 65536, "toolcalling": true, "stream": true }
   },
   "effort": {
     "low":       { "budget": 2000,  "reasoning": "low" },

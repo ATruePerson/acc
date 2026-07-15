@@ -20,6 +20,9 @@ function safeFolders(owner) { try { return owner.folders(); } catch (e) { return
 function safeNotes(folder) { try { return folder.notes(); } catch (e) { return []; } }
 function safeName(object) { try { return String(object.name()); } catch (e) { return ''; } }
 function safeID(object) { try { return String(object.id()); } catch (e) { return ''; } }
+function escapeHTML(value) {
+  return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
 function isoDate(value) { try { return value ? value.toISOString() : null; } catch (e) { return null; } }
 function matchingAccounts(want) {
   const accounts = Notes.accounts();
@@ -123,7 +126,7 @@ func newMacControlMCPServer() *mcpServer {
 	additive := map[string]any{"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false}
 	mutating := map[string]any{"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false}
 	server := &mcpServer{
-		Name: "acc-mac-control", Version: "3.0.0",
+		Name: "acc-mac-control", Version: "3.0.1",
 		Tools: []mcpTool{
 			{Name: "calendar_list_events", Description: "List local Calendar events. ACC closes Calendar afterward only if this tool opened it.", Annotations: readOnly, InputSchema: objectSchema(map[string]any{"start": stringProperty("ISO 8601 start, default now"), "end": stringProperty("ISO 8601 end, default 7 days later"), "calendar": stringProperty("Exact calendar name")}, nil)},
 			{Name: "calendar_create_event", Description: "Create a local Calendar event.", Annotations: additive, InputSchema: objectSchema(map[string]any{"title": stringProperty("Event title"), "start": stringProperty("ISO 8601 start"), "end": stringProperty("ISO 8601 end, default one hour later"), "calendar": stringProperty("Exact calendar name"), "location": stringProperty("Location"), "notes": stringProperty("Event notes"), "alarmMinutesBefore": map[string]any{"type": "integer", "minimum": 0}}, []string{"title", "start"})},
@@ -139,7 +142,7 @@ func newMacControlMCPServer() *mcpServer {
 			{Name: "notes_search", Description: "Search Apple Note titles and plaintext, optionally scoped to one nested folder path.", Annotations: readOnly, InputSchema: objectSchema(map[string]any{"query": stringProperty("Search text"), "folderPath": stringProperty("Optional exact nested folder path"), "account": stringProperty("Optional exact account name"), "recursive": map[string]any{"type": "boolean"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}, []string{"query"})},
 			{Name: "notes_create", Description: "Create a note in an existing folderPath. The folder must already exist.", Annotations: additive, InputSchema: objectSchema(map[string]any{"folderPath": stringProperty("Exact nested folder path"), "account": stringProperty("Optional exact account name"), "title": stringProperty("Note title"), "body": stringProperty("Plaintext body")}, []string{"folderPath", "title"})},
 			{Name: "notes_append", Description: "Append plaintext to a note by ID or exact title + folderPath while preserving its existing HTML formatting.", Annotations: additive, InputSchema: objectSchema(map[string]any{"id": stringProperty("Note ID"), "title": stringProperty("Exact note title"), "folderPath": stringProperty("Exact nested folder path"), "account": stringProperty("Optional exact account name"), "text": stringProperty("Plaintext to append")}, []string{"text"})},
-			{Name: "notes_replace", Description: "Replace a note body by ID or exact title + folderPath. Requires confirm=true.", Annotations: mutating, InputSchema: objectSchema(map[string]any{"id": stringProperty("Note ID"), "title": stringProperty("Exact note title"), "folderPath": stringProperty("Exact nested folder path"), "account": stringProperty("Optional exact account name"), "text": stringProperty("New plaintext body"), "confirm": map[string]any{"type": "boolean", "description": "Must be true"}}, []string{"text", "confirm"})},
+			{Name: "notes_replace", Description: "Replace a note body while preserving its existing title. Accepts ID or exact title + folderPath and requires confirm=true.", Annotations: mutating, InputSchema: objectSchema(map[string]any{"id": stringProperty("Note ID"), "title": stringProperty("Exact note title"), "folderPath": stringProperty("Exact nested folder path"), "account": stringProperty("Optional exact account name"), "text": stringProperty("New plaintext body"), "confirm": map[string]any{"type": "boolean", "description": "Must be true"}}, []string{"text", "confirm"})},
 			{Name: "notes_delete", Description: "Delete one Apple Note by ID or exact title + folderPath. Requires confirm=true and refuses ambiguous matches.", Annotations: mutating, InputSchema: objectSchema(map[string]any{"id": stringProperty("Note ID"), "title": stringProperty("Exact note title"), "folderPath": stringProperty("Exact nested folder path"), "account": stringProperty("Optional exact account name"), "confirm": map[string]any{"type": "boolean", "description": "Must be true"}}, []string{"confirm"})},
 			{Name: "notify", Description: "Show a local macOS banner notification.", Annotations: additive, InputSchema: objectSchema(map[string]any{"message": stringProperty("Notification body"), "title": stringProperty("Title"), "subtitle": stringProperty("Subtitle"), "sound": stringProperty("System sound name")}, []string{"message"})},
 		},
@@ -427,21 +430,29 @@ func mutateNote(ctx context.Context, args map[string]any, htmlBody string, repla
 			return nil, err
 		}
 	}
-	body := notesJXAHelpers + fmt.Sprintf(`
+	body := buildNoteMutationJXA(id, title, path, optionalString(args, "account"), htmlBody, replace)
+	return runManagedJXA(ctx, body, "Notes")
+}
+
+func buildNoteMutationJXA(id, title, path, account, htmlBody string, replace bool) string {
+	return notesJXAHelpers + fmt.Sprintf(`
 const matches = findNotes(%s, %s, %s, %s);
 if (!matches.length) return JSON.stringify({ok:false,error:'note not found'});
 if (matches.length > 1) return JSON.stringify({ok:false,error:'multiple matches; pass id or folderPath',matches:matches.map(m => noteInfo(m.note,m.location,false,false))});
 const target = matches[0];
+const originalTitle = safeName(target.note);
 const before = String(target.note.plaintext() || '');
 const fragment = %s;
-if (%s) target.note.body = fragment;
+if (%s) target.note.body = '<div>' + escapeHTML(originalTitle) + '</div>' + fragment;
 else target.note.body = String(target.note.body() || '') + fragment;
 const result = noteInfo(target.note, target.location, false, false);
-result.ok = true;
+result.originalTitle = originalTitle;
+result.titlePreserved = result.title === originalTitle;
+result.ok = result.titlePreserved;
+if (!result.titlePreserved) result.error = 'Apple Notes changed the title while updating the body';
 result.previousCharacterCount = before.length;
 result.newCharacterCount = String(target.note.plaintext() || '').length;
-return JSON.stringify(result);`, jxaLiteral(id), jxaLiteral(title), jxaLiteral(path), jxaLiteral(optionalString(args, "account")), jxaLiteral(htmlBody), jxaLiteral(replace))
-	return runManagedJXA(ctx, body, "Notes")
+return JSON.stringify(result);`, jxaLiteral(id), jxaLiteral(title), jxaLiteral(path), jxaLiteral(account), jxaLiteral(htmlBody), jxaLiteral(replace))
 }
 
 func calendarListEvents(ctx context.Context, args map[string]any) (any, error) {

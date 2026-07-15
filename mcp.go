@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 )
 
 const mcpProtocolVersion = "2024-11-05"
@@ -152,6 +153,10 @@ type mcpConfigServer struct {
 }
 
 func renderMCPConfig(executable string, includeRaw bool) ([]byte, error) {
+	return json.MarshalIndent(map[string]any{"mcpServers": bundledMCPServers(executable, includeRaw)}, "", "  ")
+}
+
+func bundledMCPServers(executable string, includeRaw bool) map[string]mcpConfigServer {
 	servers := map[string]mcpConfigServer{
 		"acc-websearch": {
 			Type: "stdio", Command: executable, Args: []string{"mcp", "serve", "websearch"},
@@ -165,7 +170,7 @@ func renderMCPConfig(executable string, includeRaw bool) ([]byte, error) {
 			Type: "stdio", Command: executable, Args: []string{"mcp", "serve", "osascript"},
 		}
 	}
-	return json.MarshalIndent(map[string]any{"mcpServers": servers}, "", "  ")
+	return servers
 }
 
 func defaultMCPConfigPath() string {
@@ -184,6 +189,68 @@ func writeMCPConfig(path, executable string, includeRaw bool) error {
 	return os.WriteFile(path, data, 0600)
 }
 
+func defaultClaude3PConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, "Library", "Application Support", "Claude-3p", "claude_desktop_config.json")
+}
+
+func installClaude3PMCPConfig(path, executable string, includeRaw bool) (string, error) {
+	original, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read Claude-3p config: %w", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("stat Claude-3p config: %w", err)
+	}
+	root := map[string]json.RawMessage{}
+	if err := json.Unmarshal(original, &root); err != nil {
+		return "", fmt.Errorf("parse Claude-3p config: %w", err)
+	}
+	servers := map[string]json.RawMessage{}
+	if raw := root["mcpServers"]; len(raw) > 0 && string(raw) != "null" {
+		if err := json.Unmarshal(raw, &servers); err != nil {
+			return "", fmt.Errorf("parse Claude-3p MCP servers: %w", err)
+		}
+	}
+	for _, legacy := range []string{"websearch", "mac-control", "osascript"} {
+		delete(servers, legacy)
+	}
+	for name, server := range bundledMCPServers(executable, includeRaw) {
+		encoded, err := json.Marshal(server)
+		if err != nil {
+			return "", err
+		}
+		servers[name] = encoded
+	}
+	encodedServers, err := json.Marshal(servers)
+	if err != nil {
+		return "", err
+	}
+	root["mcpServers"] = encodedServers
+	updated, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	updated = append(updated, '\n')
+
+	backup := fmt.Sprintf("%s.bak-%d", path, time.Now().UnixNano())
+	if err := os.WriteFile(backup, original, info.Mode().Perm()); err != nil {
+		return "", fmt.Errorf("back up Claude-3p config: %w", err)
+	}
+	temporary := path + ".acc-tmp"
+	if err := os.WriteFile(temporary, updated, info.Mode().Perm()); err != nil {
+		return "", fmt.Errorf("write Claude-3p config: %w", err)
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		return "", fmt.Errorf("replace Claude-3p config: %w", err)
+	}
+	return backup, nil
+}
+
 func ensureMCPConfig(executable string) (string, error) {
 	path := defaultMCPConfigPath()
 	if _, err := os.Stat(path); err == nil {
@@ -195,16 +262,25 @@ func ensureMCPConfig(executable string) (string, error) {
 }
 
 func claudeArgsWithMCP(args []string, configPath string) []string {
-	for i, arg := range args {
+	hasConfig := false
+	hasStrict := false
+	for _, arg := range args {
 		if arg == "--mcp-config" || strings.HasPrefix(arg, "--mcp-config=") {
-			return append([]string(nil), args...)
+			hasConfig = true
 		}
-		if i > 0 && args[i-1] == "--mcp-config" {
-			return append([]string(nil), args...)
+		if arg == "--strict-mcp-config" {
+			hasStrict = true
 		}
 	}
-	out := []string{"--mcp-config", configPath}
-	return append(out, args...)
+	out := make([]string, 0, len(args)+3)
+	out = append(out, args...)
+	if !hasStrict {
+		out = append(out, "--strict-mcp-config")
+	}
+	if !hasConfig {
+		out = append(out, "--mcp-config", configPath)
+	}
+	return out
 }
 
 func cmdMCP(args []string) {
@@ -230,9 +306,11 @@ func cmdMCP(args []string) {
 		flags := flag.NewFlagSet("acc mcp install", flag.ContinueOnError)
 		flags.SetOutput(io.Discard)
 		includeRaw := false
+		claude3P := false
 		flags.BoolVar(&includeRaw, "include-raw-osascript", false, "include unrestricted AppleScript/JXA execution")
+		flags.BoolVar(&claude3P, "claude-3p", false, "merge ACC servers into Claude-3p desktop config")
 		if err := flags.Parse(args[1:]); err != nil {
-			fmt.Println("Usage: acc mcp install [--include-raw-osascript]")
+			fmt.Println("Usage: acc mcp install [--claude-3p] [--include-raw-osascript]")
 			return
 		}
 		executable, err := os.Executable()
@@ -241,11 +319,26 @@ func cmdMCP(args []string) {
 			return
 		}
 		path := defaultMCPConfigPath()
-		if err := writeMCPConfig(path, executable, includeRaw); err != nil {
-			fmt.Println("  Could not write MCP config:", err)
-			return
+		if claude3P {
+			path = defaultClaude3PConfigPath()
+			if path == "" {
+				fmt.Println("  Could not locate the Claude-3p config")
+				return
+			}
+			backup, err := installClaude3PMCPConfig(path, executable, includeRaw)
+			if err != nil {
+				fmt.Println("  Could not update Claude-3p MCP config:", err)
+				return
+			}
+			fmt.Printf("  Updated Claude-3p MCP config at %s\n", path)
+			fmt.Printf("  Backup: %s\n", backup)
+		} else {
+			if err := writeMCPConfig(path, executable, includeRaw); err != nil {
+				fmt.Println("  Could not write MCP config:", err)
+				return
+			}
+			fmt.Printf("  Installed ACC MCP config at %s\n", path)
 		}
-		fmt.Printf("  Installed ACC MCP config at %s\n", path)
 		fmt.Println("  Enabled: websearch, mac-control")
 		if includeRaw {
 			fmt.Println("  Enabled: raw osascript (unrestricted Mac automation)")
@@ -300,6 +393,7 @@ func printMCPHelp() {
 
 Usage:
   acc mcp install                         Install safe Claude MCP config
+  acc mcp install --claude-3p             Replace legacy tools in Claude-3p
   acc mcp install --include-raw-osascript Also enable unrestricted AppleScript/JXA
   acc mcp doctor                          Check bundled tools and config
   acc mcp serve <name>                    Run one stdio MCP server

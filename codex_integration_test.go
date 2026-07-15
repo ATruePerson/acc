@@ -24,8 +24,8 @@ func codexTestConfig() *Config {
 			"haiku":  {Provider: "nvidia", Model: "stepfun-ai/step-3.7-flash", Toolcalling: boolPtr(true)},
 		},
 		Models: map[string]ModelCapability{
-			"gpt-5.6-sol": {
-				DisplayName: "GPT-5.6 Sol", Route: "opus", Enabled: true,
+			"opus": {
+				DisplayName: "Opus", Route: "opus", Enabled: true,
 				Reasoning: map[string]ReasoningTarget{
 					"minimal": {}, "low": {Effort: "low"}, "medium": {Effort: "medium"},
 					"high": {Effort: "high"}, "xhigh": {Effort: "xhigh"},
@@ -33,8 +33,8 @@ func codexTestConfig() *Config {
 				ToolCallSupport: true, StreamingSupport: true, ImageInputSupport: true,
 				MaxContext: 131072, MaxOutput: 131072,
 			},
-			"gpt-5.6-terra": {
-				DisplayName: "GPT-5.6 Terra", Route: "sonnet", Enabled: true,
+			"sonnet": {
+				DisplayName: "Sonnet", Route: "sonnet", Enabled: true,
 				Reasoning: map[string]ReasoningTarget{
 					"minimal": {}, "low": {Effort: "low"}, "medium": {Effort: "medium"},
 					"high": {Effort: "high"}, "xhigh": {Effort: "xhigh"}, "max": {Effort: "max"},
@@ -42,8 +42,8 @@ func codexTestConfig() *Config {
 				ToolCallSupport: true, StreamingSupport: true, FileInputSupport: true,
 				MaxContext: 131072, MaxOutput: 48000,
 			},
-			"gpt-5.6-luna": {
-				DisplayName: "GPT-5.6 Luna", Route: "haiku", Enabled: true,
+			"haiku": {
+				DisplayName: "Haiku", Route: "haiku", Enabled: true,
 				Reasoning:        map[string]ReasoningTarget{"minimal": {}, "low": {Effort: "low"}},
 				StreamingSupport: true, ImageInputSupport: true,
 				MaxContext: 131072, MaxOutput: 26000,
@@ -58,10 +58,18 @@ func codexTestConfig() *Config {
 func TestACCPersonaHasOneIdentityAndTruthfulBackendDisclosure(t *testing.T) {
 	prompt := accPersona("nvidia", "z-ai/glm-5.2")
 	for _, want := range []string{
+		"Core behavior",
+		"Claude Code runtime/tool adapter",
+		"Kabir's personal instructions",
 		"Your identity is Kabir's Second Brain.",
 		`Normal identity answer: “I’m Kabir’s Second Brain.”`,
 		`This task is currently being powered by nvidia/z-ai/glm-5.2.`,
 		"Only disclose the backend when Kabir explicitly asks",
+		"Tool results are authoritative",
+		"Inspect files before modifying them",
+		"Never claim a tool succeeded",
+		"Do not repeat a destructive call",
+		"Follow repository instructions such as AGENTS.md",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("persona missing %q:\n%s", want, prompt)
@@ -96,7 +104,7 @@ func TestCodexCatalogComesFromEnabledCapabilityRegistry(t *testing.T) {
 	if len(catalog.Models) != 3 {
 		t.Fatalf("catalog has %d models, want 3 enabled models", len(catalog.Models))
 	}
-	if catalog.Models[0].Slug != "gpt-5.6-luna" || catalog.Models[1].Slug != "gpt-5.6-sol" || catalog.Models[2].Slug != "gpt-5.6-terra" {
+	if catalog.Models[0].Slug != "haiku" || catalog.Models[1].Slug != "opus" || catalog.Models[2].Slug != "sonnet" {
 		t.Fatalf("catalog slugs are not stable and sorted: %+v", catalog.Models)
 	}
 	if !strings.Contains(catalog.Models[1].BaseInstructions, "Kabir's Second Brain") || strings.Contains(catalog.Models[1].BaseInstructions, "You are Codex") {
@@ -105,22 +113,89 @@ func TestCodexCatalogComesFromEnabledCapabilityRegistry(t *testing.T) {
 	if catalog.Models[1].Context != 131072 {
 		t.Fatalf("context window = %d, want 131072", catalog.Models[1].Context)
 	}
-	var sol, terra []string
+	var opus, sonnet []string
 	for _, model := range catalog.Models {
 		for _, level := range model.Levels {
-			if model.Slug == "gpt-5.6-sol" {
-				sol = append(sol, level.Effort)
+			if model.Slug == "opus" {
+				opus = append(opus, level.Effort)
 			}
-			if model.Slug == "gpt-5.6-terra" {
-				terra = append(terra, level.Effort)
+			if model.Slug == "sonnet" {
+				sonnet = append(sonnet, level.Effort)
 			}
 		}
 	}
-	if strings.Contains(strings.Join(sol, ","), "max") {
-		t.Fatalf("Sol exposes unsupported Max: %v", sol)
+	if strings.Contains(strings.Join(opus, ","), "max") {
+		t.Fatalf("Opus exposes unsupported Max: %v", opus)
 	}
-	if !strings.Contains(strings.Join(terra, ","), "max") {
-		t.Fatalf("Terra should expose provider-supported Max: %v", terra)
+	if !strings.Contains(strings.Join(sonnet, ","), "max") {
+		t.Fatalf("Sonnet should expose provider-supported Max: %v", sonnet)
+	}
+}
+
+func TestHiddenBenchmarkModelIsRoutableButNotInCatalog(t *testing.T) {
+	cfg := codexTestConfig()
+	hidden := false
+	cfg.Models["bench-hidden"] = ModelCapability{
+		DisplayName: "Hidden benchmark candidate", Provider: "nvidia", Model: "candidate", Enabled: true,
+		CatalogVisible: &hidden, StreamingSupport: true, ToolCallSupport: true,
+		Reasoning: map[string]ReasoningTarget{"high": {Effort: "high"}},
+	}
+
+	for _, model := range codexNamedModels(cfg) {
+		if model.ID == "bench-hidden" {
+			t.Fatal("hidden benchmark candidate leaked into the Codex catalog")
+		}
+	}
+	routes, err := testServer(cfg).responseModelChain("bench-hidden")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(routes) != 1 || routes[0].Route.Model != "candidate" {
+		t.Fatalf("hidden benchmark route = %+v", routes)
+	}
+}
+
+func TestCapabilityChainKeepsToolFallbackAndSeparateImageRoute(t *testing.T) {
+	cfg := codexTestConfig()
+	hidden := false
+	primary := cfg.Models[codexOpusID]
+	primary.ImageInputSupport = false
+	primary.FallbackModel = ""
+	primary.FallbackModels = []string{"tool-fallback"}
+	primary.ImageModel = "image-fallback"
+	cfg.Models[codexOpusID] = primary
+	cfg.Models["tool-fallback"] = ModelCapability{
+		DisplayName: "Tool fallback", CatalogVisible: &hidden, Provider: "nvidia", Model: "tool-model", Enabled: true,
+		ToolCallSupport: true, StreamingSupport: true, Reasoning: map[string]ReasoningTarget{"max": {Effort: "high"}},
+	}
+	cfg.Models["image-fallback"] = ModelCapability{
+		DisplayName: "Image fallback", CatalogVisible: &hidden, Provider: "nvidia", Model: "image-model", Enabled: true,
+		ToolCallSupport: false, StreamingSupport: true, ImageInputSupport: true, Reasoning: map[string]ReasoningTarget{"max": {}},
+	}
+
+	chain, err := testServer(cfg).responseModelChain(codexOpusID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolChain, err := selectResponseModelChain(&ResponsesRequest{
+		Model: codexOpusID, Input: json.RawMessage(`"hello"`),
+		Tools: []ResponsesTool{{Type: "function", Name: "exec", Parameters: json.RawMessage(`{"type":"object"}`)}},
+	}, chain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(toolChain) != 2 || toolChain[1].ID != "tool-fallback" {
+		t.Fatalf("tool chain dropped or included an incompatible route: %+v", toolChain)
+	}
+	imageChain, err := selectResponseModelChain(&ResponsesRequest{
+		Model: codexOpusID,
+		Input: json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]`),
+	}, chain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(imageChain) != 1 || imageChain[0].ID != "image-fallback" || !imageChain[0].CapabilityReroute {
+		t.Fatalf("image route was not selected separately: %+v", imageChain)
 	}
 }
 
@@ -138,9 +213,9 @@ func TestResponsesUseExactModelAndEffortOnEveryRequest(t *testing.T) {
 	}}}
 
 	requests := []string{
-		`{"model":"gpt-5.6-sol","instructions":"project rules","input":"first","reasoning":{"effort":"xhigh"}}`,
-		`{"model":"gpt-5.6-terra","instructions":"project rules","input":"second","reasoning":{"effort":"max"}}`,
-		`{"model":"gpt-5.6-sol","instructions":"project rules","input":"third","reasoning":{"effort":"minimal"}}`,
+		`{"model":"opus","instructions":"project rules","input":"first","reasoning":{"effort":"xhigh"}}`,
+		`{"model":"sonnet","instructions":"project rules","input":"second","reasoning":{"effort":"max"}}`,
+		`{"model":"opus","instructions":"project rules","input":"third","reasoning":{"effort":"minimal"}}`,
 	}
 	for _, body := range requests {
 		w := httptest.NewRecorder()
@@ -191,7 +266,7 @@ func TestEveryCodexEffortProducesItsExactProviderValue(t *testing.T) {
 	}}}
 
 	for _, effort := range []string{"minimal", "low", "medium", "high", "xhigh", "max"} {
-		body := `{"model":"gpt-5.6-terra","input":"test","reasoning":{"effort":"` + effort + `"}}`
+		body := `{"model":"sonnet","input":"test","reasoning":{"effort":"` + effort + `"}}`
 		w := httptest.NewRecorder()
 		s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
 		if w.Code != http.StatusOK {
@@ -225,7 +300,7 @@ func TestUnsupportedEffortReturnsClearErrorWithoutCallingProvider(t *testing.T) 
 	}}}
 
 	w := httptest.NewRecorder()
-	request := `{"model":"gpt-5.6-luna","input":"hello","reasoning":{"effort":"max"}}`
+	request := `{"model":"haiku","input":"hello","reasoning":{"effort":"max"}}`
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", w.Code, w.Body.String())
@@ -267,7 +342,7 @@ func TestUnavailableModelReturnsClearErrorWithoutCallingProvider(t *testing.T) {
 
 func TestResponsesPreservePluginToolFieldsParallelCallsImagesAndFiles(t *testing.T) {
 	req := &ResponsesRequest{
-		Model:             "gpt-5.6-terra",
+		Model:             "sonnet",
 		ParallelToolCalls: boolPtr(true),
 		ToolChoice:        json.RawMessage(`"auto"`),
 		Input: json.RawMessage(`[{"type":"message","role":"user","content":[
@@ -359,7 +434,7 @@ func TestResponsesMCPToolLoopEndToEnd(t *testing.T) {
 	}}}
 
 	first := `{
-		"model":"gpt-5.6-terra",
+		"model":"sonnet",
 		"instructions":"Plugin instruction: inspect before editing",
 		"input":"Inspect the persona",
 		"parallel_tool_calls":true,
@@ -374,7 +449,7 @@ func TestResponsesMCPToolLoopEndToEnd(t *testing.T) {
 	}
 
 	second := `{
-		"model":"gpt-5.6-terra",
+		"model":"sonnet",
 		"instructions":"Plugin instruction: inspect before editing",
 		"input":[
 			{"type":"message","role":"user","content":"Inspect the persona"},
@@ -405,7 +480,7 @@ func TestChatCompletionsInjectsOnlyACCPersonaAndPreservesUnknownFields(t *testin
 	}}}
 
 	body := `{
-		"model":"gpt-5.6-terra",
+		"model":"sonnet",
 		"messages":[
 			{"role":"system","content":"Private platform instruction that ACC must preserve."},
 			{"role":"user","content":"hello"}
@@ -433,9 +508,9 @@ func TestChatCompletionsInjectsOnlyACCPersonaAndPreservesUnknownFields(t *testin
 
 func TestFallbackIsReportedInHeadersAndUsesFallbackPersona(t *testing.T) {
 	cfg := codexTestConfig()
-	cfg.Models["gpt-5.6-sol"] = ModelCapability{
-		DisplayName: "GPT-5.6 Sol", Route: "opus", Enabled: true,
-		FallbackModel: "gpt-5.6-terra",
+	cfg.Models["opus"] = ModelCapability{
+		DisplayName: "Opus", Route: "opus", Enabled: true,
+		FallbackModel: "sonnet",
 		Reasoning:     map[string]ReasoningTarget{"high": {Effort: "high"}},
 	}
 	s := testServer(cfg)
@@ -458,7 +533,7 @@ func TestFallbackIsReportedInHeadersAndUsesFallbackPersona(t *testing.T) {
 	}}}
 
 	w := httptest.NewRecorder()
-	request := `{"model":"gpt-5.6-sol","input":"hello","reasoning":{"effort":"high"}}`
+	request := `{"model":"opus","input":"hello","reasoning":{"effort":"high"}}`
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
@@ -509,7 +584,7 @@ func TestResponsesCustomToolRoundTripWithFunctionTool(t *testing.T) {
 	}}}
 
 	request := `{
-		"model":"gpt-5.6-sol",
+		"model":"opus",
 		"input":"Inspect this repository",
 		"tools":[
 			{"type":"custom","name":"exec","description":"Run JavaScript code","format":{"type":"grammar","syntax":"lark","definition":"start: SOURCE\nSOURCE: /[\\s\\S]+/"},"x_codex_future":{"keep":"me"}},
@@ -559,7 +634,7 @@ func TestResponsesCustomToolResultRoundTrip(t *testing.T) {
 	}}}
 
 	request := `{
-		"model":"gpt-5.6-sol",
+		"model":"opus",
 		"input":[
 			{"type":"custom_tool_call","id":"ctc_1","call_id":"call_exec_2","name":"exec","input":"await tools.exec_command({cmd: 'pwd'})","x_codex_future":"kept"},
 			{"type":"custom_tool_call_output","call_id":"call_exec_2","output":"command output","x_codex_future":"kept"}
@@ -615,7 +690,7 @@ func TestResponsesStreamingCustomToolUsesNativeEvents(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(stream))}, nil
 	}}}
 
-	request := `{"model":"gpt-5.6-sol","stream":true,"input":"run pwd","tools":[{"type":"custom","name":"exec","description":"Run JavaScript code","format":{"type":"grammar","syntax":"lark","definition":"start: SOURCE\nSOURCE: /[\\s\\S]+/"}}]}`
+	request := `{"model":"opus","stream":true,"input":"run pwd","tools":[{"type":"custom","name":"exec","description":"Run JavaScript code","format":{"type":"grammar","syntax":"lark","definition":"start: SOURCE\nSOURCE: /[\\s\\S]+/"}}]}`
 	w := httptest.NewRecorder()
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
 	if w.Code != http.StatusOK {
@@ -636,7 +711,7 @@ func TestResponsesRejectsUnsupportedHostedToolWithBackend(t *testing.T) {
 		return chatSuccess("unexpected"), nil
 	}}}
 	w := httptest.NewRecorder()
-	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5.6-sol","input":"hello","tools":[{"type":"web_search","external_web_access":true,"search_content_types":["text"]}]}`)))
+	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"opus","input":"hello","tools":[{"type":"web_search","external_web_access":true,"search_content_types":["text"]}]}`)))
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `nvidia/z-ai/glm-5.2`) || !strings.Contains(w.Body.String(), `web_search`) {
 		t.Fatalf("hosted tool error is not actionable: status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -645,12 +720,12 @@ func TestResponsesRejectsUnsupportedHostedToolWithBackend(t *testing.T) {
 	}
 }
 
-func TestSolImageUsesMiniMaxAndNeverSendsImageToGLM(t *testing.T) {
+func TestOpusImageUsesMiniMaxAndNeverSendsImageToGLM(t *testing.T) {
 	cfg := codexTestConfig()
-	sol := cfg.Models[codexSolID]
-	sol.ImageInputSupport = false
-	sol.FallbackModel = "acc-minimax-m3"
-	cfg.Models[codexSolID] = sol
+	opus := cfg.Models[codexOpusID]
+	opus.ImageInputSupport = false
+	opus.FallbackModel = "acc-minimax-m3"
+	cfg.Models[codexOpusID] = opus
 	cfg.Models["acc-minimax-m3"] = ModelCapability{
 		DisplayName: "MiniMax M3", Provider: "nvidia", Model: "minimaxai/minimax-m3", Enabled: true,
 		ToolCallSupport: true, StreamingSupport: true, ImageInputSupport: true,
@@ -672,7 +747,7 @@ func TestSolImageUsesMiniMaxAndNeverSendsImageToGLM(t *testing.T) {
 		return chatSuccess("image understood"), nil
 	}}}
 
-	request := `{"model":"gpt-5.6-sol","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"what is this?"},{"type":"input_image","image_url":"data:image/png;base64,AAAA","detail":"original"}]}]}`
+	request := `{"model":"opus","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"what is this?"},{"type":"input_image","image_url":"data:image/png;base64,AAAA","detail":"original"}]}]}`
 	w := httptest.NewRecorder()
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "image understood") {
@@ -683,12 +758,12 @@ func TestSolImageUsesMiniMaxAndNeverSendsImageToGLM(t *testing.T) {
 	}
 }
 
-func TestSolImageDoesNotSilentlyDowngradeRequestedEffort(t *testing.T) {
+func TestOpusImageDoesNotSilentlyDowngradeRequestedEffort(t *testing.T) {
 	cfg := codexTestConfig()
-	sol := cfg.Models[codexSolID]
-	sol.ImageInputSupport = false
-	sol.FallbackModel = "acc-minimax-m3"
-	cfg.Models[codexSolID] = sol
+	opus := cfg.Models[codexOpusID]
+	opus.ImageInputSupport = false
+	opus.FallbackModel = "acc-minimax-m3"
+	cfg.Models[codexOpusID] = opus
 	cfg.Models["acc-minimax-m3"] = ModelCapability{
 		DisplayName: "MiniMax M3", Provider: "nvidia", Model: "minimaxai/minimax-m3", Enabled: true,
 		ToolCallSupport: true, StreamingSupport: true, ImageInputSupport: true,
@@ -700,7 +775,7 @@ func TestSolImageDoesNotSilentlyDowngradeRequestedEffort(t *testing.T) {
 		called = true
 		return chatSuccess("unexpected"), nil
 	}}}
-	request := `{"model":"gpt-5.6-sol","reasoning":{"effort":"high"},"input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`
+	request := `{"model":"opus","reasoning":{"effort":"high"},"input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`
 	w := httptest.NewRecorder()
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `does not support reasoning effort`) || !strings.Contains(w.Body.String(), `high`) {
@@ -711,39 +786,39 @@ func TestSolImageDoesNotSilentlyDowngradeRequestedEffort(t *testing.T) {
 	}
 }
 
-func TestSolToolRequestsDoNotFallbackToToollessMiniMax(t *testing.T) {
+func TestOpusToolRequestsDoNotFallbackToToollessMiniMax(t *testing.T) {
 	cfg := codexTestConfig()
-	sol := cfg.Models[codexSolID]
-	sol.FallbackModel = "acc-minimax-m3"
-	cfg.Models[codexSolID] = sol
+	opus := cfg.Models[codexOpusID]
+	opus.FallbackModel = "acc-minimax-m3"
+	cfg.Models[codexOpusID] = opus
 	cfg.Models["acc-minimax-m3"] = ModelCapability{
 		DisplayName: "MiniMax M3", Provider: "nvidia", Model: "minimaxai/minimax-m3", Enabled: true,
 		StreamingSupport: true, ImageInputSupport: true, ToolCallSupport: false,
 		Reasoning: map[string]ReasoningTarget{"minimal": {}},
 	}
 	s := testServer(cfg)
-	routes, err := s.responseModelChain(codexSolID)
+	routes, err := s.responseModelChain(codexOpusID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	selected, err := selectResponseModelChain(&ResponsesRequest{
-		Model: codexSolID, Input: json.RawMessage(`"hello"`),
+		Model: codexOpusID, Input: json.RawMessage(`"hello"`),
 		Tools: []ResponsesTool{{Type: "function", Name: "exec", Parameters: json.RawMessage(`{"type":"object"}`)}},
 	}, routes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(selected) != 1 || selected[0].ID != codexSolID {
-		t.Fatalf("tool request routes = %+v, want only the tool-capable Sol primary", selected)
+	if len(selected) != 1 || selected[0].ID != codexOpusID {
+		t.Fatalf("tool request routes = %+v, want only the tool-capable Opus primary", selected)
 	}
 }
 
-func TestSolImageWithToolsFailsInsteadOfDroppingTools(t *testing.T) {
+func TestOpusImageWithToolsFailsInsteadOfDroppingTools(t *testing.T) {
 	cfg := codexTestConfig()
-	sol := cfg.Models[codexSolID]
-	sol.ImageInputSupport = false
-	sol.FallbackModel = "acc-minimax-m3"
-	cfg.Models[codexSolID] = sol
+	opus := cfg.Models[codexOpusID]
+	opus.ImageInputSupport = false
+	opus.FallbackModel = "acc-minimax-m3"
+	cfg.Models[codexOpusID] = opus
 	cfg.Models["acc-minimax-m3"] = ModelCapability{
 		DisplayName: "MiniMax M3", Provider: "nvidia", Model: "minimaxai/minimax-m3", Enabled: true,
 		StreamingSupport: true, ImageInputSupport: true, ToolCallSupport: false,
@@ -755,7 +830,7 @@ func TestSolImageWithToolsFailsInsteadOfDroppingTools(t *testing.T) {
 		called = true
 		return chatSuccess("unexpected"), nil
 	}}}
-	request := `{"model":"gpt-5.6-sol","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}],"tools":[{"type":"function","name":"exec","parameters":{"type":"object"}}]}`
+	request := `{"model":"opus","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}],"tools":[{"type":"function","name":"exec","parameters":{"type":"object"}}]}`
 	w := httptest.NewRecorder()
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "supports both image input and tool calls") {
@@ -766,16 +841,16 @@ func TestSolImageWithToolsFailsInsteadOfDroppingTools(t *testing.T) {
 	}
 }
 
-func TestSolImageFailsClearlyWhenNoImageRouteExists(t *testing.T) {
+func TestOpusImageFailsClearlyWhenNoImageRouteExists(t *testing.T) {
 	cfg := codexTestConfig()
-	sol := cfg.Models[codexSolID]
-	sol.ImageInputSupport = false
-	sol.FallbackModel = "acc-text-only"
-	cfg.Models[codexSolID] = sol
+	opus := cfg.Models[codexOpusID]
+	opus.ImageInputSupport = false
+	opus.FallbackModel = "acc-text-only"
+	cfg.Models[codexOpusID] = opus
 	cfg.Models["acc-text-only"] = ModelCapability{DisplayName: "Text only", Provider: "nvidia", Model: "text-only", Enabled: true}
 	s := testServer(cfg)
 	w := httptest.NewRecorder()
-	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5.6-sol","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`)))
+	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"opus","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`)))
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "no configured image-capable route") {
 		t.Fatalf("image route failure is unclear: status=%d body=%s", w.Code, w.Body.String())
 	}

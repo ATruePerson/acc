@@ -10,9 +10,9 @@ import (
 )
 
 const (
-	codexSolID   = "gpt-5.6-sol"
-	codexTerraID = "gpt-5.6-terra"
-	codexLunaID  = "gpt-5.6-luna"
+	codexOpusID   = "opus"
+	codexSonnetID = "sonnet"
+	codexHaikuID  = "haiku"
 )
 
 type codexNamedModel struct {
@@ -26,6 +26,9 @@ func codexNamedModels(cfg *Config) []codexNamedModel {
 	models := make([]codexNamedModel, 0, len(cfg.Models))
 	for _, id := range enabledModelIDs(cfg) {
 		capability := cfg.Models[id]
+		if capability.CatalogVisible != nil && !*capability.CatalogVisible {
+			continue
+		}
 		route, err := resolveCapabilityRoute(cfg, id, capability)
 		if err != nil {
 			continue
@@ -51,7 +54,7 @@ func codexModelCatalogEntries(cfg *Config) []map[string]any {
 			})
 		}
 		defaultEffort := "minimal"
-		for _, candidate := range []string{"high", "medium", "low", "minimal"} {
+		for _, candidate := range []string{"max", "xhigh", "high", "medium", "low", "minimal"} {
 			if _, ok := model.Capability.Reasoning[candidate]; ok {
 				defaultEffort = candidate
 				break

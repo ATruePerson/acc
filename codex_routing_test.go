@@ -9,9 +9,9 @@ func TestRouteForUsesExactRequestedCodexModel(t *testing.T) {
 		selected string
 		want     string
 	}{
-		{codexSolID, "z-ai/glm-5.2"},
-		{codexTerraID, "big-pickle"},
-		{codexLunaID, "stepfun-ai/step-3.7-flash"},
+		{codexOpusID, "z-ai/glm-5.2"},
+		{codexSonnetID, "big-pickle"},
+		{codexHaikuID, "stepfun-ai/step-3.7-flash"},
 	}
 
 	for _, tc := range cases {

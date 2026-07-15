@@ -12,6 +12,7 @@ type resolvedModel struct {
 	Route             Route
 	Fallback          bool
 	CapabilityReroute bool
+	ImageOnly         bool
 }
 
 func enabledModelIDs(cfg *Config) []string {
@@ -62,16 +63,29 @@ func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
 			return nil, err
 		}
 		chain := []resolvedModel{{ID: modelID, Capability: capability, Route: route}}
-		if capability.FallbackModel != "" {
-			fallback, ok := cfg.Models[capability.FallbackModel]
+		seen := map[string]bool{modelID: true}
+		for _, fallbackID := range configuredFallbackModels(capability) {
+			fallback, ok := cfg.Models[fallbackID]
 			if !ok || !fallback.Enabled {
-				return nil, fmt.Errorf("model %q configures unavailable fallback model %q", modelID, capability.FallbackModel)
+				return nil, fmt.Errorf("model %q configures unavailable fallback model %q", modelID, fallbackID)
 			}
-			fallbackRoute, err := resolveCapabilityRoute(cfg, capability.FallbackModel, fallback)
+			fallbackRoute, err := resolveCapabilityRoute(cfg, fallbackID, fallback)
 			if err != nil {
 				return nil, err
 			}
-			chain = append(chain, resolvedModel{ID: capability.FallbackModel, Capability: fallback, Route: fallbackRoute, Fallback: true})
+			chain = append(chain, resolvedModel{ID: fallbackID, Capability: fallback, Route: fallbackRoute, Fallback: true})
+			seen[fallbackID] = true
+		}
+		if capability.ImageModel != "" && !seen[capability.ImageModel] {
+			imageCapability, ok := cfg.Models[capability.ImageModel]
+			if !ok || !imageCapability.Enabled {
+				return nil, fmt.Errorf("model %q configures unavailable image model %q", modelID, capability.ImageModel)
+			}
+			imageRoute, err := resolveCapabilityRoute(cfg, capability.ImageModel, imageCapability)
+			if err != nil {
+				return nil, err
+			}
+			chain = append(chain, resolvedModel{ID: capability.ImageModel, Capability: imageCapability, Route: imageRoute, Fallback: true, ImageOnly: true})
 		}
 		return chain, nil
 	}
@@ -87,6 +101,22 @@ func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
 		chain = append(chain, resolvedModel{ID: fallback.Provider + "/" + fallback.Model, Route: fallback, Fallback: true})
 	}
 	return chain, nil
+}
+
+func configuredFallbackModels(capability ModelCapability) []string {
+	ids := make([]string, 0, len(capability.FallbackModels)+1)
+	seen := map[string]bool{}
+	if capability.FallbackModel != "" {
+		ids = append(ids, capability.FallbackModel)
+		seen[capability.FallbackModel] = true
+	}
+	for _, id := range capability.FallbackModels {
+		if id != "" && !seen[id] {
+			ids = append(ids, id)
+			seen[id] = true
+		}
+	}
+	return ids
 }
 
 func supportedEfforts(capability ModelCapability) []string {
@@ -209,7 +239,7 @@ func responseInputRequirements(req *ResponsesRequest) (responseInputRequirement,
 }
 
 // selectResponseModelChain removes only explicitly incompatible routes. For
-// Sol image input this skips text-only GLM and begins on MiniMax. It never
+// Opus image input this skips text-only GLM and begins on MiniMax. It never
 // reintroduces a text-only route later in the fallback chain.
 func selectResponseModelChain(req *ResponsesRequest, routes []resolvedModel) ([]resolvedModel, error) {
 	requirements, err := responseInputRequirements(req)
@@ -218,12 +248,12 @@ func selectResponseModelChain(req *ResponsesRequest, routes []resolvedModel) ([]
 	}
 	needsTools := len(req.Tools) > 0
 	needsStreaming := req.Stream
-	if !requirements.Image && !requirements.File && !needsTools && !needsStreaming {
-		return routes, nil
-	}
 	eligible := make([]resolvedModel, 0, len(routes))
 	for _, target := range routes {
 		capability := target.Capability
+		if target.ImageOnly && !requirements.Image {
+			continue
+		}
 		if capability.DisplayName == "" { // Preserve legacy behavior where no capability metadata exists.
 			eligible = append(eligible, target)
 			continue

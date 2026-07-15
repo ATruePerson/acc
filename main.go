@@ -896,10 +896,19 @@ func validateConfig(cfg *Config) error {
 		if _, err := resolveCapabilityRoute(cfg, id, capability); err != nil {
 			return err
 		}
-		if capability.FallbackModel != "" {
-			fallback, ok := cfg.Models[capability.FallbackModel]
+		for _, fallbackID := range configuredFallbackModels(capability) {
+			fallback, ok := cfg.Models[fallbackID]
 			if !ok || !fallback.Enabled {
-				return fmt.Errorf("model %q: fallback model %q is unavailable", id, capability.FallbackModel)
+				return fmt.Errorf("model %q: fallback model %q is unavailable", id, fallbackID)
+			}
+		}
+		if capability.ImageModel != "" {
+			imageModel, ok := cfg.Models[capability.ImageModel]
+			if !ok || !imageModel.Enabled {
+				return fmt.Errorf("model %q: image model %q is unavailable", id, capability.ImageModel)
+			}
+			if !imageModel.ImageInputSupport {
+				return fmt.Errorf("model %q: image model %q does not support image input", id, capability.ImageModel)
 			}
 		}
 		for effort := range capability.Reasoning {

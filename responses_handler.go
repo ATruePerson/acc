@@ -15,16 +15,25 @@ import (
 
 // translateFromResponses converts a Responses API request into an OpenAI request.
 func translateFromResponses(req *ResponsesRequest, route Route, cfg *Config) (*OpenAIRequest, error) {
+	or, _, err := translateFromResponsesWithTools(req, route, cfg)
+	return or, err
+}
+
+// translateFromResponsesWithTools also returns the custom-tool mapping needed
+// to restore native Responses items after an OpenAI Chat Completions upstream.
+func translateFromResponsesWithTools(req *ResponsesRequest, route Route, cfg *Config) (*OpenAIRequest, *responseToolTranslation, error) {
 	maxTokens := req.MaxOutputTokens
 	if maxTokens == 0 {
 		maxTokens = req.MaxTokens
 	}
 	or := &OpenAIRequest{
-		Model:       route.Model,
-		MaxTokens:   maxTokens,
-		Stream:      req.Stream,
-		Temperature: req.Temperature,
-		TopP:        req.TopP,
+		Model:             route.Model,
+		MaxTokens:         maxTokens,
+		Stream:            req.Stream,
+		Temperature:       req.Temperature,
+		TopP:              req.TopP,
+		ParallelToolCalls: req.ParallelToolCalls,
+		ToolChoice:        req.ToolChoice,
 	}
 
 	// Apply route-level overrides if specified in config.json
@@ -43,9 +52,6 @@ func translateFromResponses(req *ResponsesRequest, route Route, cfg *Config) (*O
 	if cfg != nil {
 		prepend = cfg.SystemPrepend
 	}
-	if route.SystemPrepend != "" {
-		prepend = route.SystemPrepend
-	}
 	if prepend != "" {
 		if system != "" {
 			system = prepend + "\n\n" + system
@@ -63,37 +69,15 @@ func translateFromResponses(req *ResponsesRequest, route Route, cfg *Config) (*O
 	} else if route.ReasoningEffort != "" {
 		or.ReasoningEffort = route.ReasoningEffort
 	}
-	if or.ReasoningEffort != "" {
-		or.ReasoningEffort = sanitizeReasoningEffort(route.Provider, or.ReasoningEffort)
-	}
-
 	if req.Stream {
 		or.StreamOptions = &StreamOptions{IncludeUsage: true}
 	}
 
-	// Codex sends Responses tools in the flat form. Keep accepting the older
-	// nested function form so existing clients do not break.
-	if route.Toolcalling == nil || *route.Toolcalling {
-		for _, t := range req.Tools {
-			fn := t.Function
-			strict := t.Strict
-			if t.Name != "" {
-				fn = ResponsesFunction{Name: t.Name, Description: t.Description, Parameters: t.Parameters}
-			}
-			if fn.Name == "" {
-				continue
-			}
-			or.Tools = append(or.Tools, OpenAITool{
-				Type: "function",
-				Function: OpenAIFunction{
-					Name:        fn.Name,
-					Description: fn.Description,
-					Parameters:  fn.Parameters,
-					Strict:      strict,
-				},
-			})
-		}
+	translation, tools, err := translateResponseTools(req, route)
+	if err != nil {
+		return nil, nil, err
 	}
+	or.Tools = tools
 
 	// Translate input -> messages
 	if len(req.Input) > 0 {
@@ -107,7 +91,7 @@ func translateFromResponses(req *ResponsesRequest, route Route, cfg *Config) (*O
 		} else {
 			var items []ResponsesItem
 			if err := json.Unmarshal(req.Input, &items); err != nil {
-				return nil, fmt.Errorf("bad input: %w", err)
+				return nil, nil, fmt.Errorf("bad input: %w", err)
 			}
 
 			for _, item := range items {
@@ -115,7 +99,7 @@ func translateFromResponses(req *ResponsesRequest, route Route, cfg *Config) (*O
 				case "message":
 					content, err := responsesContentToChat(item.Content)
 					if err != nil {
-						return nil, fmt.Errorf("bad message content: %w", err)
+						return nil, nil, fmt.Errorf("bad message content: %w", err)
 					}
 					or.Messages = append(or.Messages, OpenAIMessage{
 						Role:    item.Role,
@@ -131,7 +115,6 @@ func translateFromResponses(req *ResponsesRequest, route Route, cfg *Config) (*O
 						id = parts[0]
 						thoughtSig = parts[1]
 					}
-					// Add this function call to the last assistant message, if any
 					toolCall := OpenAIToolCall{
 						ID:   id,
 						Type: "function",
@@ -141,23 +124,7 @@ func translateFromResponses(req *ResponsesRequest, route Route, cfg *Config) (*O
 							ThoughtSignature: thoughtSig,
 						},
 					}
-					// Look for the last assistant message
-					var lastAssistant *OpenAIMessage
-					for idx := len(or.Messages) - 1; idx >= 0; idx-- {
-						if or.Messages[idx].Role == "assistant" {
-							lastAssistant = &or.Messages[idx]
-							break
-						}
-					}
-					if lastAssistant != nil {
-						lastAssistant.ToolCalls = append(lastAssistant.ToolCalls, toolCall)
-					} else {
-						// Create assistant message
-						or.Messages = append(or.Messages, OpenAIMessage{
-							Role:      "assistant",
-							ToolCalls: []OpenAIToolCall{toolCall},
-						})
-					}
+					appendChatToolCall(&or.Messages, toolCall)
 				case "function_call_output":
 					id := item.CallID
 					if parts := strings.SplitN(item.CallID, "__thought__", 2); len(parts) == 2 {
@@ -167,8 +134,29 @@ func translateFromResponses(req *ResponsesRequest, route Route, cfg *Config) (*O
 					or.Messages = append(or.Messages, OpenAIMessage{
 						Role:       "tool",
 						ToolCallID: id,
-						Content:    jsonString(item.Output),
+						Content:    responseToolOutputContent(item.Output),
 					})
+				case "custom_tool_call":
+					definition, ok := translation.customForName(item.Name)
+					if !ok {
+						return nil, nil, fmt.Errorf("custom tool call %q has no matching custom tool definition", item.Name)
+					}
+					id := item.CallID
+					if id == "" {
+						id = item.ID
+					}
+					appendChatToolCall(&or.Messages, OpenAIToolCall{
+						ID: id, Type: "function",
+						Function: OpenAIFuncCall{Name: definition.BridgeName, Arguments: customToolArguments(item.Input)},
+					})
+				case "custom_tool_call_output":
+					or.Messages = append(or.Messages, OpenAIMessage{
+						Role:       "tool",
+						ToolCallID: item.CallID,
+						Content:    responseToolOutputContent(item.Output),
+					})
+				default:
+					return nil, nil, fmt.Errorf("unsupported Responses input item type %q", item.Type)
 				}
 			}
 		}
@@ -192,7 +180,7 @@ func translateFromResponses(req *ResponsesRequest, route Route, cfg *Config) (*O
 		}
 	}
 
-	return or, nil
+	return or, translation, nil
 }
 
 func responsesContentToChat(raw json.RawMessage) (json.RawMessage, error) {
@@ -205,6 +193,10 @@ func responsesContentToChat(raw json.RawMessage) (json.RawMessage, error) {
 		Type     string          `json:"type"`
 		Text     string          `json:"text,omitempty"`
 		ImageURL json.RawMessage `json:"image_url,omitempty"`
+		Detail   string          `json:"detail,omitempty"`
+		FileID   string          `json:"file_id,omitempty"`
+		FileData string          `json:"file_data,omitempty"`
+		Filename string          `json:"filename,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &parts); err != nil {
 		return nil, err
@@ -216,20 +208,31 @@ func responsesContentToChat(raw json.RawMessage) (json.RawMessage, error) {
 		case "input_text", "output_text", "text":
 			out = append(out, OpenAIContentPart{Type: "text", Text: part.Text})
 		case "input_image", "image_url":
+			detail := part.Detail
 			var url string
 			if err := json.Unmarshal(part.ImageURL, &url); err != nil {
-				var image OpenAIImageURL
+				var image struct {
+					URL    string `json:"url"`
+					Detail string `json:"detail,omitempty"`
+				}
 				if json.Unmarshal(part.ImageURL, &image) == nil {
 					url = image.URL
+					if detail == "" {
+						detail = image.Detail
+					}
 				}
 			}
 			if url != "" {
-				out = append(out, OpenAIContentPart{Type: "image_url", ImageURL: &OpenAIImageURL{URL: url}})
+				out = append(out, OpenAIContentPart{Type: "image_url", ImageURL: &OpenAIImageURL{URL: url}, Detail: detail})
+			} else {
+				return nil, fmt.Errorf("image input has no URL or data URI")
 			}
+		case "input_file", "file":
+			out = append(out, OpenAIContentPart{Type: "file", File: &OpenAIFile{
+				FileID: part.FileID, FileData: part.FileData, Filename: part.Filename,
+			}})
 		default:
-			if part.Text != "" {
-				out = append(out, OpenAIContentPart{Type: "text", Text: part.Text})
-			}
+			return nil, fmt.Errorf("unsupported Responses content part type %q", part.Type)
 		}
 	}
 	if len(out) == 1 && out[0].Type == "text" {
@@ -241,6 +244,11 @@ func responsesContentToChat(raw json.RawMessage) (json.RawMessage, error) {
 
 // translateToResponses converts a non-streaming OpenAI response back to Responses API format.
 func translateToResponses(or *OpenAIResponse, model string) *ResponsesResponse {
+	resp, _ := translateToResponsesWithTools(or, model, newResponseToolTranslation())
+	return resp
+}
+
+func translateToResponsesWithTools(or *OpenAIResponse, model string, translation *responseToolTranslation) (*ResponsesResponse, error) {
 	resp := &ResponsesResponse{
 		ID:        "resp_" + randID(),
 		Object:    "response",
@@ -273,8 +281,20 @@ func translateToResponses(or *OpenAIResponse, model string) *ResponsesResponse {
 					Content: content,
 				})
 			}
-			// If there are tool calls, add function_call items
+			// Restore native custom calls from ACC's single-string bridge while
+			// leaving ordinary function/MCP calls untouched.
 			for _, tc := range ch.Message.ToolCalls {
+				if definition, ok := translation.customForBridge(tc.Function.Name); ok {
+					input, err := customToolInput(tc.Function.Arguments)
+					if err != nil {
+						return nil, fmt.Errorf("restore custom tool %q: %w", definition.Name, err)
+					}
+					resp.Output = append(resp.Output, ResponsesItem{
+						ID: "ctc_" + randID(), Type: "custom_tool_call", Status: "completed",
+						CallID: tc.ID, Name: definition.Name, Input: input,
+					})
+					continue
+				}
 				callID := tc.ID
 				thoughtSig := tc.Function.ThoughtSignature
 				if tc.ExtraContent != nil && tc.ExtraContent.Google != nil && tc.ExtraContent.Google.ThoughtSignature != "" {
@@ -294,74 +314,92 @@ func translateToResponses(or *OpenAIResponse, model string) *ResponsesResponse {
 			}
 		}
 	}
-	return resp
+	return resp, nil
 }
 
 // executeUpstream runs the request retry/fallback loop against upstreams.
 func (s *server) executeUpstream(
 	ctx context.Context,
 	or *OpenAIRequest,
-	routes []Route,
+	routes []resolvedModel,
 	cfg *Config,
 	logit func(routeModel string, status, in, out int, effort string),
 	w http.ResponseWriter,
-) (*http.Response, Route, error) {
+) (*http.Response, resolvedModel, error) {
 	var (
 		resp        *http.Response
-		activeRoute Route
+		activeRoute resolvedModel
 	)
+	requestedReasoningEffort := or.ReasoningEffort
 
-	for ri, currentRoute := range routes {
-		activeRoute = currentRoute
+	for ri, target := range routes {
+		activeRoute = target
+		currentRoute := target.Route
 		prov, ok := cfg.Providers[currentRoute.Provider]
 		if !ok {
 			if ri == len(routes)-1 {
 				httpErr(w, 500, "unknown provider: "+currentRoute.Provider)
 				logit(currentRoute.Model, 500, 0, 0, "")
-				return nil, Route{}, fmt.Errorf("unknown provider: %s", currentRoute.Provider)
+				return nil, resolvedModel{}, fmt.Errorf("unknown provider: %s", currentRoute.Provider)
 			}
 			log.Printf("unknown provider %q for route %d, trying fallback", currentRoute.Provider, ri)
 			continue
 		}
 
-		// Update request with current route details
-		or.Model = currentRoute.Model
-		if or.ReasoningEffort != "" {
-			or.ReasoningEffort = sanitizeReasoningEffort(currentRoute.Provider, or.ReasoningEffort)
-		} else if currentRoute.ReasoningEffort != "" {
-			or.ReasoningEffort = sanitizeReasoningEffort(currentRoute.Provider, currentRoute.ReasoningEffort)
+		requestForRoute, err := requestWithACCPersona(or, currentRoute)
+		if err != nil {
+			httpErr(w, 500, "prepare request: "+err.Error())
+			return nil, resolvedModel{}, err
+		}
+		requestForRoute.Model = currentRoute.Model
+		requestForRoute.ReasoningEffort = ""
+		effortExtra, err := applyReasoningTarget(requestForRoute, target, requestedReasoningEffort)
+		if err != nil {
+			status := http.StatusBadRequest
+			if ri > 0 {
+				status = http.StatusBadGateway
+			}
+			httpErr(w, status, err.Error())
+			logit(currentRoute.Model, status, 0, 0, "")
+			return nil, resolvedModel{}, err
 		}
 
-		body, _ := json.Marshal(or)
+		body, _ := json.Marshal(requestForRoute)
+		body = mergeRouteExtraBody(body, currentRoute.ExtraBody)
+		body = mergeRouteExtraBody(body, effortExtra)
 
-		for attempt := 1; attempt <= 10; attempt++ {
+		maxAttempts := 10
+		if ri < len(routes)-1 {
+			maxAttempts = 1
+		}
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
 			upstream, err := http.NewRequestWithContext(ctx, "POST", prov.BaseURL+"/chat/completions", bytes.NewReader(body))
 			if err != nil {
 				httpErr(w, 500, err.Error())
-				logit(currentRoute.Model, 500, 0, 0, or.ReasoningEffort)
-				return nil, Route{}, err
+				logit(currentRoute.Model, 500, 0, 0, requestForRoute.ReasoningEffort)
+				return nil, resolvedModel{}, err
 			}
 			upstream.Header.Set("Content-Type", "application/json")
 			upstream.Header.Set("Authorization", "Bearer "+prov.APIKey)
 
 			if err := s.limiter.Wait(ctx, currentRoute.Provider); err != nil {
 				httpErr(w, 504, fmt.Sprintf("rate limiter interrupted for %s/%s: %v", currentRoute.Provider, currentRoute.Model, err))
-				logit(currentRoute.Model, 504, 0, 0, or.ReasoningEffort)
-				return nil, Route{}, err
+				logit(currentRoute.Model, 504, 0, 0, requestForRoute.ReasoningEffort)
+				return nil, resolvedModel{}, err
 			}
 
 			resp, err = s.http.Do(upstream)
 			if err != nil {
 				if ri == len(routes)-1 {
 					httpErr(w, 502, "upstream: "+err.Error())
-					logit(currentRoute.Model, 502, 0, 0, or.ReasoningEffort)
-					return nil, Route{}, err
+					logit(currentRoute.Model, 502, 0, 0, requestForRoute.ReasoningEffort)
+					return nil, resolvedModel{}, err
 				}
 				log.Printf("upstream connection failed for %s/%s, trying fallback: %v", currentRoute.Provider, currentRoute.Model, err)
 				break
 			}
 
-			if resp.StatusCode == 503 && attempt < 10 {
+			if resp.StatusCode == 503 && attempt < maxAttempts {
 				// Exponential backoff with jitter
 				baseInt := 1 << attempt
 				base := float64(baseInt)
@@ -372,13 +410,13 @@ func (s *server) executeUpstream(
 				}
 				sleepDuration := time.Duration(sleepSecs * float64(time.Second))
 
-				log.Printf("upstream 503 for model=%s/%s: retrying in %v (attempt %d/10)", currentRoute.Provider, currentRoute.Model, sleepDuration.Round(100*time.Millisecond), attempt)
+				log.Printf("upstream 503 for model=%s/%s: retrying in %v (attempt %d/%d)", currentRoute.Provider, currentRoute.Model, sleepDuration.Round(100*time.Millisecond), attempt, maxAttempts)
 				resp.Body.Close()
 
 				select {
 				case <-ctx.Done():
 					log.Printf("client disconnected during retry backoff")
-					return nil, Route{}, ctx.Err()
+					return nil, resolvedModel{}, ctx.Err()
 				case <-time.After(sleepDuration):
 				}
 				continue
@@ -390,46 +428,47 @@ func (s *server) executeUpstream(
 			continue
 		}
 
-		// On 429 or 5xx, try next fallback. Also treat a NVIDIA NIM "DEGRADED" 400
-		// (model node disabled upstream, not a bad request) as failover-worthy.
+		// On 429 or 5xx, try next fallback. Some providers also wrap their own
+		// backend outage as a generic 400, which is not a bad client request and
+		// should use the configured backup route.
 		shouldFallback := resp.StatusCode == 429 || resp.StatusCode >= 500
-		var degradedBody []byte
+		var failureBody []byte
 		if !shouldFallback && resp.StatusCode == 400 {
-			degradedBody, _ = io.ReadAll(resp.Body)
+			failureBody, _ = io.ReadAll(resp.Body)
 			resp.Body.Close()
-			resp.Body = io.NopCloser(bytes.NewReader(degradedBody))
-			if bytes.Contains(degradedBody, []byte("DEGRADED")) || bytes.Contains(degradedBody, []byte("cannot be invoked")) {
+			resp.Body = io.NopCloser(bytes.NewReader(failureBody))
+			if recoverableProvider400(failureBody) {
 				shouldFallback = true
 			}
 		}
 		if shouldFallback && ri < len(routes)-1 {
 			status := resp.StatusCode
-			b := degradedBody
+			b := failureBody
 			if b == nil {
 				b, _ = io.ReadAll(resp.Body)
 			}
 			resp.Body.Close()
 			resp = nil
 			log.Printf("upstream %d on %s/%s, falling back: %s", status, currentRoute.Provider, currentRoute.Model, truncate(string(b), 200))
-			logit(currentRoute.Model, status, 0, 0, or.ReasoningEffort)
+			logit(currentRoute.Model, status, 0, 0, requestForRoute.ReasoningEffort)
 			continue
 		}
 
 		// Time-to-first-token guard (streaming only): a route that returns 200
 		// but emits no token within firstTokenTimeout is treated as stalled.
 		// Fall back if a route remains, otherwise fail — never hang.
-		if or.Stream && resp != nil && resp.StatusCode < 400 {
+		if requestForRoute.Stream && resp != nil && resp.StatusCode < 400 {
 			reader, timedOut := awaitFirstByte(resp.Body, firstTokenTimeout)
 			if timedOut {
 				resp.Body.Close()
 				resp = nil
 				log.Printf("no token from %s/%s within %s", currentRoute.Provider, currentRoute.Model, firstTokenTimeout)
-				logit(currentRoute.Model, 504, 0, 0, or.ReasoningEffort)
+				logit(currentRoute.Model, 504, 0, 0, requestForRoute.ReasoningEffort)
 				if ri < len(routes)-1 {
 					continue
 				}
-				httpErr(w, 504, fmt.Sprintf("⌛ %s and its fallback gave no response in time. Try again or switch models.", or.Model))
-				return nil, Route{}, fmt.Errorf("timeout on all routes")
+				httpErr(w, 504, fmt.Sprintf("%s and its configured fallback gave no response in time", target.ID))
+				return nil, resolvedModel{}, fmt.Errorf("timeout on all routes")
 			}
 			resp.Body = io.NopCloser(reader)
 		}
@@ -438,14 +477,18 @@ func (s *server) executeUpstream(
 	}
 
 	if resp == nil {
-		return nil, Route{}, fmt.Errorf("all routes failed")
+		return nil, resolvedModel{}, fmt.Errorf("all routes failed")
 	}
 
 	return resp, activeRoute, nil
 }
 
 // streamTranslateResponses rewrites OpenAI stream chunk payloads to Responses API SSE stream format.
-func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model string) (int, int) {
+func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model string, translations ...*responseToolTranslation) (int, int) {
+	translation := newResponseToolTranslation()
+	if len(translations) > 0 && translations[0] != nil {
+		translation = translations[0]
+	}
 	flusher, _ := w.(http.Flusher)
 	sequence := 0
 	send := func(event string, data any) {
@@ -487,6 +530,7 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 		toolCallIDs     = map[int]string{}
 		toolNames       = map[int]string{}
 		toolArgs        = map[int]string{}
+		toolCustom      = map[int]*customToolDefinition{}
 		toolOrder       []int
 		completedItems  []any
 		inputTokens     = 0
@@ -613,18 +657,27 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 				if tc.Function.Name != "" {
 					toolNames[tc.Index] = tc.Function.Name
 				}
+				if definition, ok := translation.customForBridge(toolNames[tc.Index]); ok {
+					copy := definition
+					toolCustom[tc.Index] = &copy
+				}
+				itemType := "function_call"
+				itemFields := map[string]any{
+					"id": toolItemID, "type": itemType, "status": "in_progress",
+					"call_id": toolCallIDs[tc.Index], "name": toolNames[tc.Index], "arguments": "",
+				}
+				if custom := toolCustom[tc.Index]; custom != nil {
+					itemType = "custom_tool_call"
+					itemFields = map[string]any{
+						"id": toolItemID, "type": itemType, "status": "in_progress",
+						"call_id": toolCallIDs[tc.Index], "name": custom.Name, "input": "",
+					}
+				}
 				send("response.output_item.added", map[string]any{
 					"type":         "response.output_item.added",
 					"response_id":  respID,
 					"output_index": toolIndexMap[tc.Index],
-					"item": map[string]any{
-						"id":        toolItemID,
-						"type":      "function_call",
-						"status":    "in_progress",
-						"call_id":   toolCallIDs[tc.Index],
-						"name":      toolNames[tc.Index],
-						"arguments": "",
-					},
+					"item":         itemFields,
 				})
 			}
 			if tc.ID != "" {
@@ -632,16 +685,22 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 			}
 			if tc.Function.Name != "" {
 				toolNames[tc.Index] = tc.Function.Name
+				if definition, ok := translation.customForBridge(tc.Function.Name); ok {
+					copy := definition
+					toolCustom[tc.Index] = &copy
+				}
 			}
 			if tc.Function.Arguments != "" {
 				toolArgs[tc.Index] += tc.Function.Arguments
-				send("response.function_call_arguments.delta", map[string]any{
-					"type":         "response.function_call_arguments.delta",
-					"response_id":  respID,
-					"output_index": toolIndexMap[tc.Index],
-					"item_id":      toolItemID,
-					"delta":        tc.Function.Arguments,
-				})
+				if toolCustom[tc.Index] == nil {
+					send("response.function_call_arguments.delta", map[string]any{
+						"type":         "response.function_call_arguments.delta",
+						"response_id":  respID,
+						"output_index": toolIndexMap[tc.Index],
+						"item_id":      toolItemID,
+						"delta":        tc.Function.Arguments,
+					})
+				}
 			}
 		}
 	}
@@ -654,6 +713,40 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 	// Done for tools
 	for _, idx := range toolOrder {
 		toolItemID := toolBlocks[idx]
+		if custom := toolCustom[idx]; custom != nil {
+			input, err := customToolInput(toolArgs[idx])
+			if err != nil {
+				log.Printf("responses custom stream restore for %s: %v", custom.Name, err)
+				input = ""
+			}
+			send("response.custom_tool_call_input.delta", map[string]any{
+				"type":         "response.custom_tool_call_input.delta",
+				"response_id":  respID,
+				"output_index": toolIndexMap[idx],
+				"item_id":      toolItemID,
+				"delta":        input,
+			})
+			send("response.custom_tool_call_input.done", map[string]any{
+				"type":         "response.custom_tool_call_input.done",
+				"response_id":  respID,
+				"output_index": toolIndexMap[idx],
+				"item_id":      toolItemID,
+				"name":         custom.Name,
+				"input":        input,
+			})
+			toolItem := map[string]any{
+				"id": toolItemID, "type": "custom_tool_call", "status": "completed",
+				"call_id": toolCallIDs[idx], "name": custom.Name, "input": input,
+			}
+			send("response.output_item.done", map[string]any{
+				"type":         "response.output_item.done",
+				"response_id":  respID,
+				"output_index": toolIndexMap[idx],
+				"item":         toolItem,
+			})
+			completedItems = append(completedItems, toolItem)
+			continue
+		}
 		send("response.function_call_arguments.done", map[string]any{
 			"type":         "response.function_call_arguments.done",
 			"response_id":  respID,
@@ -721,19 +814,39 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	route, err := s.routeFor(req.Model)
+	routes, err := s.responseModelChain(req.Model)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		logit("error", 400, 0, 0, "")
+		return
+	}
+	routes, err = selectResponseModelChain(&req, routes)
 	if err != nil {
 		httpErr(w, 400, err.Error())
 		logit("error", 400, 0, 0, "")
 		return
 	}
 
-	routes := append([]Route{route}, route.Fallbacks...)
+	primary := routes[0]
+	if err := validateResponseCapabilities(&req, primary); err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		logit(primary.Route.Model, http.StatusBadRequest, 0, 0, "")
+		return
+	}
+	requestedEffort := ""
+	if req.Reasoning != nil {
+		requestedEffort = req.Reasoning.Effort
+	}
+	if err := validateRequestedEffort(primary, requestedEffort); err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		logit(primary.Route.Model, http.StatusBadRequest, 0, 0, "")
+		return
+	}
 
-	or, err := translateFromResponses(&req, route, cfg)
+	or, translation, err := translateFromResponsesWithTools(&req, primary.Route, cfg)
 	if err != nil {
 		httpErr(w, 400, "translate: "+err.Error())
-		logit(route.Model, 400, 0, 0, "")
+		logit(primary.Route.Model, 400, 0, 0, "")
 		return
 	}
 
@@ -741,6 +854,8 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	setBackendHeaders(w, req.Model, activeRoute, requestedEffort)
+	log.Printf("responses: model=%s -> %s/%s effort=%s fallback=%t", req.Model, activeRoute.Route.Provider, activeRoute.Route.Model, backendEffort(activeRoute, requestedEffort), activeRoute.Fallback)
 	defer func() {
 		if resp != nil && resp.Body != nil {
 			resp.Body.Close()
@@ -749,16 +864,16 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
-		log.Printf("upstream %d for model=%s->%s/%s: %s", resp.StatusCode, req.Model, activeRoute.Provider, activeRoute.Model, truncate(string(b), 500))
-		msg := fmt.Sprintf("upstream %s/%s: %s", activeRoute.Provider, activeRoute.Model, truncate(string(b), 300))
+		log.Printf("upstream %d for model=%s->%s/%s: %s", resp.StatusCode, req.Model, activeRoute.Route.Provider, activeRoute.Route.Model, truncate(string(b), 500))
+		msg := fmt.Sprintf("upstream %s/%s: %s", activeRoute.Route.Provider, activeRoute.Route.Model, truncate(string(b), 300))
 		switch {
 		case resp.StatusCode == 429:
-			msg = fmt.Sprintf("🪫 You're out of free usage on %s right now (rate-limited / quota hit). Wait a bit, or switch to another model.", activeRoute.Model)
+			msg = fmt.Sprintf("You're out of free usage on %s right now", activeRoute.Route.Model)
 		case resp.StatusCode >= 500:
-			msg = fmt.Sprintf("⚠️ %s (provider %s) is down right now — server error %d. Try again in a moment or switch models.", activeRoute.Model, activeRoute.Provider, resp.StatusCode)
+			msg = fmt.Sprintf("%s (provider %s) returned server error %d", activeRoute.Route.Model, activeRoute.Route.Provider, resp.StatusCode)
 		}
 		httpErr(w, resp.StatusCode, msg)
-		logit(activeRoute.Model, resp.StatusCode, 0, 0, or.ReasoningEffort)
+		logit(activeRoute.Route.Model, resp.StatusCode, 0, 0, or.ReasoningEffort)
 		return
 	}
 
@@ -766,8 +881,8 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-		inTokens, outTokens := streamTranslateResponses(w, resp.Body, req.Model)
-		logit(activeRoute.Model, resp.StatusCode, inTokens, outTokens, or.ReasoningEffort)
+		inTokens, outTokens := streamTranslateResponses(w, resp.Body, req.Model, translation)
+		logit(activeRoute.Route.Model, resp.StatusCode, inTokens, outTokens, or.ReasoningEffort)
 		return
 	}
 
@@ -775,11 +890,16 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	b, _ := io.ReadAll(resp.Body)
 	if err := json.Unmarshal(b, &oresp); err != nil {
 		httpErr(w, 502, "parse upstream: "+err.Error())
-		logit(activeRoute.Model, 502, 0, 0, or.ReasoningEffort)
+		logit(activeRoute.Route.Model, 502, 0, 0, or.ReasoningEffort)
 		return
 	}
 
-	out := translateToResponses(&oresp, req.Model)
+	out, err := translateToResponsesWithTools(&oresp, req.Model, translation)
+	if err != nil {
+		httpErr(w, 502, "translate upstream response: "+err.Error())
+		logit(activeRoute.Route.Model, 502, 0, 0, or.ReasoningEffort)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(out)
 
@@ -788,5 +908,30 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		tokensIn = oresp.Usage.PromptTokens
 		tokensOut = oresp.Usage.CompletionTokens
 	}
-	logit(activeRoute.Model, resp.StatusCode, tokensIn, tokensOut, or.ReasoningEffort)
+	logit(activeRoute.Route.Model, resp.StatusCode, tokensIn, tokensOut, or.ReasoningEffort)
+}
+
+func setBackendHeaders(w http.ResponseWriter, requestedModel string, active resolvedModel, requestedEffort string) {
+	w.Header().Set("X-ACC-Requested-Model", requestedModel)
+	w.Header().Set("X-ACC-Backend-Provider", active.Route.Provider)
+	w.Header().Set("X-ACC-Backend-Model", active.Route.Model)
+	w.Header().Set("X-ACC-Fallback", fmt.Sprintf("%t", active.Fallback))
+	if requestedEffort != "" {
+		w.Header().Set("X-ACC-Requested-Effort", requestedEffort)
+	}
+	w.Header().Set("X-ACC-Backend-Effort", backendEffort(active, requestedEffort))
+}
+
+func backendEffort(active resolvedModel, requested string) string {
+	actual := active.Route.ReasoningEffort
+	if requested != "" {
+		actual = requested
+		if active.Capability.DisplayName != "" {
+			actual = active.Capability.Reasoning[requested].Effort
+		}
+	}
+	if actual == "" {
+		return "none"
+	}
+	return actual
 }

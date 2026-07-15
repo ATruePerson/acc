@@ -12,6 +12,8 @@ and failure history, read [`ACC.md`](ACC.md) before changing `acc codex`.
 | File | Responsibility | Key functions / types |
 | :--- | :--- | :--- |
 | `main.go` | HTTP server, routers, model listings, command lifecycle | `handleMessages`, `handleModels`, `routeFor` |
+| `model_registry.go` | Codex capabilities, exact effort validation, explicit fallback chain | `responseModelChain`, `applyReasoningTarget` |
+| `persona.go` | Single ACC-owned identity without replacing platform/project instructions | `accPersona`, `requestWithACCPersona` |
 | `translate.go` | Protocol translation (messages, tools, images) | `translateRequest`, `translateMessage`, `translateResponse`, `bucketForBudget` |
 | `stream.go` | Real-time SSE translator for streaming requests | `streamTranslate` (extracts usage from final chunks) |
 | `tui.go` | Live terminal dashboard + persistent logger | `AddTUILog` (writes `test_runs.jsonl`), `drawDashboard` |
@@ -40,7 +42,10 @@ The streaming SSE translator extracts `PromptTokens` and `CompletionTokens` in r
 ```
 
 ### 2. Effort & reasoning mapping
-Anthropic requests with a `thinking` block map to OpenAI's `reasoning_effort` via closest-budget matching (`bucketForBudget`). OpenAI supports `low`/`medium`/`high`. Custom mappings (`max`, `ultracode`) must be mapped or safely ignored by upstreams that don't support them.
+Anthropic requests with a `thinking` block map through `bucketForBudget` for
+legacy clients. Codex Responses requests use the selected model's exact
+`models.<id>.reasoning` entry. Unsupported values must return an error. Never
+silently lower, rename, or ignore a requested Codex effort.
 
 ### 3. Tool message sequence ordering
 Anthropic messages can hold both `tool_result` and `text` blocks. OpenAI requires any `role: "tool"` message to immediately follow the assistant message with matching `tool_calls`. Prepending user text before tool messages causes a 400 (`An assistant message with 'tool_calls' must be followed by tool messages...`).
@@ -61,13 +66,17 @@ A route's `extra_body` is **flat-merged to the top level** of the outgoing reque
 
 - **nemotron-ultra (550B) is slow.** `reasoning_budget` 32000 hangs 6+ min on a trivial prompt; at 8000 it answers in ~99s. Still the slowest tier — 550B is heavy regardless. Only a model swap fixes speed.
 - **Gemini 3.x multi-turn tools work now** — the proxy injects `skip_thought_signature_validator` (`translate.go`/`stream.go`/`responses_handler.go`). The old "never use 3.x for tools" rule is obsolete. Verified live: 2-turn tool round-trip on gemini-3.1-pro.
-- **Vision:** set `"vision": true` only on Gemini + minimax (vision-capable). NVIDIA reasoning models (nemotron/deepseek/glm) are text-only — forcing `vision:true` makes them answer images blind; leave it off so image requests auto-reroute via `vision_route`.
+- **Vision:** set `"vision": true` only on Gemini + minimax (vision-capable). NVIDIA reasoning models (nemotron/deepseek/glm) are text-only. Sol image or mixed text-image requests skip GLM-5.2 and start directly on its MiniMax M3 fallback route; never mark GLM image-capable or send it image content.
+- **MiniMax tools:** MiniMax M3 returns `DEGRADED function cannot be invoked` for function calls. Keep its Codex `tool_call_support` false and exclude it from any request carrying tools; never silently strip tools to make the fallback work.
 - **big-pickle** (opencode) is a codename for `deepseek-v4-flash` — a reasoning model that returns EMPTY content if `max_tokens` is too low (spends it all in `reasoning_content`).
 
-### 6. Routing: `routes` vs `aliases`
+### 6. Routing: `models`, `routes`, and `aliases`
 
-- `aliases` (`anthropic/Codex-*`) — exact-match, the explicit persona models.
-- `routes` (`opus`/`sonnet`/`haiku`) — substring fallback; this is what real Codex model strings (`Codex-opus-4-x`) hit. Keep them mirrored to the matching alias (model, params, budget, vision, fallbacks, `system_prepend`).
+- `models` is the Codex-visible capability registry and exact stable-ID route.
+- `routes` (`opus`/`sonnet`/`haiku`) remain reusable family definitions.
+- `aliases` remain for legacy Anthropic and OpenAI-compatible clients.
+- Route-level `system_prepend` is retired and cleared on load. Only ACC's
+  central persona plus user-owned global instructions may be injected.
 - Config is hot-reloaded per request (no restart needed for config-only edits); Go source changes need a rebuild.
 
 ## Dev cheat sheet

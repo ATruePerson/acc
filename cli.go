@@ -56,6 +56,8 @@ func dispatch(args []string) bool {
 		cmdClaude(args[2:])
 	case "codex":
 		cmdCodex(args[2:])
+	case "mcp":
+		cmdMCP(args[2:])
 	case "help", "--help", "-h":
 		printHelp()
 	default:
@@ -76,6 +78,8 @@ Usage:
   acc claude [args]   Start the proxy and launch Claude Code through it
   acc codex [path]    Switch Codex Desktop to ACC and launch it
   acc codex --restore Switch Codex Desktop back to your subscription
+  acc mcp install     Install ACC's bundled local tools for Claude Code
+  acc mcp doctor      Check bundled local tools
   acc help            Show this help
 
 First time? Run:  acc setup
@@ -275,6 +279,12 @@ func cmdModels() {
 			fmt.Printf("  anthropic/%-26s → %s (%s)\n", normalizeModelID(k), r.Model, r.Provider)
 		}
 	}
+	if cfg != nil && len(cfg.Models) > 0 {
+		fmt.Print("\n  Codex models (from config.json):\n\n")
+		for _, model := range codexNamedModels(cfg) {
+			fmt.Printf("  %-26s -> %s (%s)\n", model.ID, model.Route.Model, model.Route.Provider)
+		}
+	}
 	fmt.Print("\n  Or use the family names (opus / sonnet / haiku) — those follow config.json routes.\n\n")
 }
 
@@ -308,7 +318,17 @@ func cmdClaude(extra []string) {
 	}
 
 	fmt.Printf("  Launching Claude Code through acc (%s)...\n\n", base)
-	cmd := exec.Command(claude, extra...)
+	self, err := os.Executable()
+	if err != nil {
+		fmt.Printf("  Could not locate acc for MCP tools: %v\n", err)
+		return
+	}
+	mcpConfig, err := ensureMCPConfig(self)
+	if err != nil {
+		fmt.Printf("  Could not prepare ACC MCP tools: %v\n", err)
+		return
+	}
+	cmd := exec.Command(claude, claudeArgsWithMCP(extra, mcpConfig)...)
 	cmd.Env = append(os.Environ(), "ANTHROPIC_BASE_URL="+base)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.Run()
@@ -332,20 +352,27 @@ func cmdCodex(args []string) {
 		fmt.Println("  Usage: acc codex [--model MODEL] [path] | acc codex --restore")
 		return
 	}
+	var cfg *Config
 	if !restore {
+		var err error
+		cfg, err = loadConfig(defaultConfigPath())
+		if err != nil {
+			fmt.Printf("  No config found. Run `acc setup` first. (%v)\n", err)
+			return
+		}
 		if model == "" {
 			model = defaultCodexModel
-			if stdinIsTerminal() {
-				selected, err := chooseCodexModel(os.Stdin, os.Stdout)
-				if err != nil {
-					fmt.Printf("  Could not select a Codex model: %v\n", err)
+			if !isCodexModel(cfg, model) {
+				ids := enabledModelIDs(cfg)
+				if len(ids) == 0 {
+					fmt.Println("  No enabled ACC models are configured.")
 					return
 				}
-				model = selected
+				model = ids[0]
 			}
 		}
-		if !isCodexModel(model) {
-			fmt.Printf("  Unknown Codex model %q. Use %s, %s, or %s.\n", model, codexSolID, codexTerraID, codexLunaID)
+		if !isCodexModel(cfg, model) {
+			fmt.Printf("  Unknown or disabled ACC model %q. Run `acc models` to list enabled model IDs.\n", model)
 			return
 		}
 	}
@@ -372,11 +399,6 @@ func cmdCodex(args []string) {
 		return
 	}
 
-	cfg, err := loadConfig(defaultConfigPath())
-	if err != nil {
-		fmt.Printf("  No config found. Run `acc setup` first. (%v)\n", err)
-		return
-	}
 	loadDotenv(defaultEnvPath())
 
 	base := fmt.Sprintf("http://localhost:%d", cfg.Port)
@@ -398,7 +420,7 @@ func cmdCodex(args []string) {
 		return
 	}
 	apiBase := strings.TrimRight(base, "/") + "/v1"
-	if err := configureCodexApp(codexConfig, codexCatalog, restoreState, apiBase, model); err != nil {
+	if err := configureCodexApp(codexConfig, codexCatalog, restoreState, apiBase, model, cfg); err != nil {
 		fmt.Printf("  Could not configure Codex Desktop: %v\n", err)
 		return
 	}
@@ -414,33 +436,6 @@ func launchCodexDesktop(path string) {
 		return
 	}
 	launchCodexDesktopWith(app, path)
-}
-
-func stdinIsTerminal() bool {
-	info, err := os.Stdin.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
-}
-
-func chooseCodexModel(in io.Reader, out io.Writer) (string, error) {
-	fmt.Fprintln(out, "  Select an ACC model:")
-	fmt.Fprintln(out, "    1) Sol   (Opus route)")
-	fmt.Fprintln(out, "    2) Terra (Sonnet route)")
-	fmt.Fprintln(out, "    3) Luna  (Haiku route)")
-	fmt.Fprint(out, "  Choice [1]: ")
-	choice, err := bufio.NewReader(in).ReadString('\n')
-	if err != nil && len(choice) == 0 {
-		return "", err
-	}
-	switch strings.ToLower(strings.TrimSpace(choice)) {
-	case "", "1", "sol":
-		return codexSolID, nil
-	case "2", "terra":
-		return codexTerraID, nil
-	case "3", "luna":
-		return codexLunaID, nil
-	default:
-		return "", fmt.Errorf("enter 1, 2, 3, Sol, Terra, or Luna")
-	}
 }
 
 func findCodexDesktopApp() (string, error) {
@@ -558,11 +553,49 @@ const defaultConfigJSON = `{
     "nvidia":     { "base_url": "https://integrate.api.nvidia.com/v1", "api_key": "${NVIDIA_NIM_API_KEY}" },
     "gemini":     { "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "api_key": "${GEMINI_API_KEY}" },
     "openrouter": { "base_url": "https://openrouter.ai/api/v1", "api_key": "${OPENROUTER_API_KEY}" },
-    "zai":        { "base_url": "https://api.z.ai/api/paas/v4", "api_key": "${ZAI_API_KEY}" },
     "opencode":   { "base_url": "https://opencode.ai/zen/v1", "api_key": "${OPENCODE_API_KEY}" }
   },
+  "models": {
+    "gpt-5.6-sol": {
+      "display_name": "GPT-5.6 Sol", "route": "opus", "enabled": true,
+      "reasoning": { "minimal": {}, "low": { "effort": "low" }, "medium": { "effort": "medium" }, "high": { "effort": "high" } },
+      "tool_call_support": true, "streaming_support": true,
+      "image_input_support": false, "file_input_support": false,
+      "max_context": 131072, "max_output": 131072,
+      "fallback_model": "acc-minimax-m3"
+    },
+    "gpt-5.6-terra": {
+      "display_name": "GPT-5.6 Terra", "route": "sonnet", "enabled": true,
+      "reasoning": { "minimal": {}, "low": { "effort": "low" }, "medium": { "effort": "medium" }, "high": { "effort": "high" }, "xhigh": { "effort": "xhigh" }, "max": { "effort": "max" } },
+      "tool_call_support": true, "streaming_support": true,
+      "image_input_support": false, "file_input_support": false,
+      "max_context": 131072, "max_output": 48000,
+      "fallback_model": "acc-nemotron-super"
+    },
+    "gpt-5.6-luna": {
+      "display_name": "GPT-5.6 Luna", "route": "haiku", "enabled": true,
+      "reasoning": { "minimal": {} },
+      "tool_call_support": true, "streaming_support": true,
+      "image_input_support": false, "file_input_support": false,
+      "max_context": 131072, "max_output": 26000
+    },
+    "acc-minimax-m3": {
+      "display_name": "MiniMax M3 (NVIDIA)", "provider": "nvidia", "model": "minimaxai/minimax-m3", "enabled": true,
+      "reasoning": { "minimal": {} },
+      "tool_call_support": false, "streaming_support": true,
+      "image_input_support": true, "file_input_support": false,
+      "max_context": 131072, "max_output": 131072
+    },
+    "acc-nemotron-super": {
+      "display_name": "Nemotron Super 120B (NVIDIA)", "provider": "nvidia", "model": "nvidia/nemotron-3-super-120b-a12b", "enabled": true,
+      "reasoning": { "minimal": {}, "low": { "effort": "low" }, "medium": { "effort": "medium" }, "high": { "effort": "high" } },
+      "tool_call_support": true, "streaming_support": true,
+      "image_input_support": false, "file_input_support": false,
+      "max_context": 131072, "max_output": 48000
+    }
+  },
   "routes": {
-    "opus":   { "provider": "nvidia",   "model": "z-ai/glm-5.1" },
+    "opus":   { "provider": "nvidia",   "model": "z-ai/glm-5.2" },
     "sonnet": { "provider": "opencode", "model": "big-pickle" },
     "haiku":  { "provider": "nvidia",   "model": "stepfun-ai/step-3.7-flash" }
   },

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -35,31 +34,9 @@ func TestCodexOpenArgsOpenExistingAppWithoutInstaller(t *testing.T) {
 	}
 }
 
-func TestChooseCodexModel(t *testing.T) {
-	cases := []struct {
-		input string
-		want  string
-	}{
-		{"2\n", codexTerraID},
-		{"Sol\n", codexSolID},
-		{"terra\n", codexTerraID},
-		{"LUNA\n", codexLunaID},
-	}
-
-	for _, tc := range cases {
-		t.Run(strings.TrimSpace(tc.input), func(t *testing.T) {
-			var out bytes.Buffer
-			got, err := chooseCodexModel(strings.NewReader(tc.input), &out)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got != tc.want {
-				t.Fatalf("choice %q = %q, want %q", tc.input, got, tc.want)
-			}
-			if !strings.Contains(out.String(), "Terra") || !strings.Contains(out.String(), "Sonnet") {
-				t.Fatalf("picker does not explain family mapping:\n%s", out.String())
-			}
-		})
+func TestCodexDefaultsToOpus(t *testing.T) {
+	if defaultCodexModel != codexOpusID {
+		t.Fatalf("default Codex model = %q, want %q", defaultCodexModel, codexOpusID)
 	}
 }
 
@@ -92,13 +69,13 @@ func TestCodexModelCatalogHasNamedModels(t *testing.T) {
 			DisplayName string `json:"display_name"`
 		} `json:"models"`
 	}
-	if err := json.Unmarshal(codexModelCatalogJSON(), &catalog); err != nil {
+	if err := json.Unmarshal(codexModelCatalogJSON(codexTestConfig()), &catalog); err != nil {
 		t.Fatal(err)
 	}
 	want := []struct{ slug, display string }{
-		{"openai/codex-5.6-sol", "Codex 5.6 Sol"},
-		{"openai/codex-5.6-terra", "Codex 5.6 Terra"},
-		{"openai/codex-5.6-luna", "Codex 5.6 Luna"},
+		{"haiku", "Haiku"},
+		{"opus", "Opus"},
+		{"sonnet", "Sonnet"},
 	}
 	if len(catalog.Models) != len(want) {
 		t.Fatalf("got %d models, want %d", len(catalog.Models), len(want))
@@ -110,7 +87,25 @@ func TestCodexModelCatalogHasNamedModels(t *testing.T) {
 	}
 }
 
+func TestCodexCatalogDoesNotAdvertiseHostedWebSearch(t *testing.T) {
+	var catalog struct {
+		Models []map[string]json.RawMessage `json:"models"`
+	}
+	if err := json.Unmarshal(codexModelCatalogJSON(codexTestConfig()), &catalog); err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.Models) == 0 {
+		t.Fatal("catalog has no models")
+	}
+	for _, model := range catalog.Models {
+		if _, ok := model["web_search_tool_type"]; ok {
+			t.Fatalf("catalog must not advertise provider-hosted web search: %s", model["web_search_tool_type"])
+		}
+	}
+}
+
 func TestConfigureAndRestoreCodexApp(t *testing.T) {
+	cfg := codexTestConfig()
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	catalogPath := filepath.Join(dir, "acc-models.json")
@@ -120,7 +115,7 @@ func TestConfigureAndRestoreCodexApp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := configureCodexApp(configPath, catalogPath, restorePath, "http://localhost:9999/v1", "openai/codex-5.6-sol")
+	err := configureCodexApp(configPath, catalogPath, restorePath, "http://localhost:9999/v1", codexOpusID, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,9 +126,10 @@ func TestConfigureAndRestoreCodexApp(t *testing.T) {
 	text := string(configured)
 	for _, required := range []string{
 		`sandbox_mode = "workspace-write"`,
-		`model = "openai/codex-5.6-sol"`,
+		`model = "opus"`,
 		`model_provider = "acc"`,
 		`model_catalog_json = "` + catalogPath + `"`,
+		`web_search = "disabled"`,
 		`[features]`,
 		`plugins = true`,
 		`[model_providers.acc]`,
@@ -147,14 +143,14 @@ func TestConfigureAndRestoreCodexApp(t *testing.T) {
 	if strings.Contains(text, `model = "gpt-subscription"`) {
 		t.Fatalf("old root model was not replaced:\n%s", text)
 	}
-	if err := configureCodexApp(configPath, catalogPath, restorePath, "http://localhost:9999/v1", "openai/codex-5.6-terra"); err != nil {
+	if err := configureCodexApp(configPath, catalogPath, restorePath, "http://localhost:9999/v1", codexSonnetID, cfg); err != nil {
 		t.Fatal(err)
 	}
 	switched, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(switched), `model = "openai/codex-5.6-terra"`) {
+	if !strings.Contains(string(switched), `model = "sonnet"`) {
 		t.Fatalf("second launch did not switch models:\n%s", switched)
 	}
 
@@ -201,9 +197,47 @@ func TestDefaultConfigIsValidAndLoads(t *testing.T) {
 	if c.Port == 0 || len(c.Providers) == 0 || len(c.Routes) == 0 {
 		t.Fatalf("default config missing essentials: %+v", c)
 	}
+	if c.Models["acc-minimax-m3"].ToolCallSupport {
+		t.Fatal("default config must not claim MiniMax M3 supports Codex tool calls")
+	}
 	// every route must point at a defined provider
 	if err := validateConfig(&c); err != nil {
 		t.Fatalf("default config fails validation: %v", err)
+	}
+}
+
+func TestDefaultConfigUsesRequestedOpusSonnetHaikuAliases(t *testing.T) {
+	b, err := os.ReadFile("config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []string{"opus", "sonnet", "haiku"} {
+		capability, ok := cfg.Models[id]
+		if !ok || !capability.Enabled {
+			t.Errorf("required model alias %q is missing or disabled", id)
+		}
+		if capability.DisplayName != strings.ToUpper(id[:1])+id[1:] {
+			t.Errorf("alias %q display name = %q", id, capability.DisplayName)
+		}
+	}
+	for _, forbidden := range []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} {
+		if _, exists := cfg.Models[forbidden]; exists {
+			t.Errorf("retired Sol/Terra/Luna alias remains configured: %q", forbidden)
+		}
+	}
+	visible := codexNamedModels(&cfg)
+	if len(visible) != 3 {
+		t.Fatalf("user-facing catalog has %d models, want only Opus/Sonnet/Haiku", len(visible))
+	}
+	for _, entry := range codexModelCatalogEntries(&cfg) {
+		if entry["default_reasoning_level"] != "max" {
+			t.Errorf("%v default reasoning = %v, want maximum", entry["slug"], entry["default_reasoning_level"])
+		}
 	}
 }
 

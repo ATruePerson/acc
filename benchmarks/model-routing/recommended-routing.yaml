@@ -1,0 +1,18 @@
+reasoning:
+  mode: maximum
+
+status: provisional
+
+aliases:
+  opus:
+    primary: pending
+    fallback: pending
+  sonnet:
+    primary: pending
+    fallback: pending
+  haiku:
+    primary: pending
+    fallback: pending
+
+image_route:
+  primary: pending

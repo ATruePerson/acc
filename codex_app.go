@@ -10,55 +10,81 @@ import (
 )
 
 const (
-	codexSolID   = "openai/codex-5.6-sol"
-	codexTerraID = "openai/codex-5.6-terra"
-	codexLunaID  = "openai/codex-5.6-luna"
+	codexOpusID   = "opus"
+	codexSonnetID = "sonnet"
+	codexHaikuID  = "haiku"
 )
 
 type codexNamedModel struct {
-	ID      string
-	Display string
-	Family  string
+	ID         string
+	Display    string
+	Capability ModelCapability
+	Route      Route
 }
 
-func codexNamedModels() []codexNamedModel {
-	return []codexNamedModel{
-		{ID: codexSolID, Display: "Codex 5.6 Sol", Family: "opus"},
-		{ID: codexTerraID, Display: "Codex 5.6 Terra", Family: "sonnet"},
-		{ID: codexLunaID, Display: "Codex 5.6 Luna", Family: "haiku"},
+func codexNamedModels(cfg *Config) []codexNamedModel {
+	models := make([]codexNamedModel, 0, len(cfg.Models))
+	for _, id := range enabledModelIDs(cfg) {
+		capability := cfg.Models[id]
+		if capability.CatalogVisible != nil && !*capability.CatalogVisible {
+			continue
+		}
+		route, err := resolveCapabilityRoute(cfg, id, capability)
+		if err != nil {
+			continue
+		}
+		display := capability.DisplayName
+		if display == "" {
+			display = id
+		}
+		models = append(models, codexNamedModel{ID: id, Display: display, Capability: capability, Route: route})
 	}
+	return models
 }
 
-func codexModelCatalogEntries() []map[string]any {
-	levels := []map[string]any{
-		{"effort": "low", "description": "Fast responses with lighter reasoning"},
-		{"effort": "medium", "description": "Balanced speed and reasoning"},
-		{"effort": "high", "description": "More reasoning for difficult work"},
-		{"effort": "xhigh", "description": "Extra reasoning for complex work"},
-	}
-	models := codexNamedModels()
+func codexModelCatalogEntries(cfg *Config) []map[string]any {
+	models := codexNamedModels(cfg)
 	entries := make([]map[string]any, 0, len(models))
 	for i, model := range models {
+		levels := make([]map[string]any, 0, len(model.Capability.Reasoning))
+		for _, effort := range supportedEfforts(model.Capability) {
+			levels = append(levels, map[string]any{
+				"effort":      effort,
+				"description": reasoningDescription(effort),
+			})
+		}
+		defaultEffort := "minimal"
+		for _, candidate := range []string{"max", "xhigh", "high", "medium", "low", "minimal"} {
+			if _, ok := model.Capability.Reasoning[candidate]; ok {
+				defaultEffort = candidate
+				break
+			}
+		}
+		modalities := []string{"text"}
+		if model.Capability.ImageInputSupport {
+			modalities = append(modalities, "image")
+		}
 		entries = append(entries, map[string]any{
 			"slug": model.ID, "display_name": model.Display,
-			"description": "Routed through ACC", "default_reasoning_level": "high",
+			"description": fmt.Sprintf("Kabir's Second Brain via %s/%s", model.Route.Provider, model.Route.Model), "default_reasoning_level": defaultEffort,
 			"supported_reasoning_levels": levels, "shell_type": "shell_command",
 			"visibility": "list", "supported_in_api": true, "priority": i + 1,
 			"additional_speed_tiers": []string{}, "service_tiers": []any{},
 			"availability_nux": nil, "upgrade": nil,
-			"base_instructions": "You are Codex, a coding agent. Work in the user's repository, follow the supplied instructions, and use tools when needed.",
+			"base_instructions": accPersona(model.Route.Provider, model.Route.Model),
 			"model_messages": map[string]any{
 				"instructions_template": nil, "instructions_variables": nil, "approvals": nil,
 			},
 			"include_skills_usage_instructions": true,
 			"supports_reasoning_summaries":      false, "default_reasoning_summary": "none",
 			"support_verbosity": false, "default_verbosity": "low",
-			"apply_patch_tool_type": "freeform", "web_search_tool_type": "text_and_image",
+			"apply_patch_tool_type":        "freeform",
 			"truncation_policy":            map[string]any{"mode": "tokens", "limit": 10000},
-			"supports_parallel_tool_calls": true, "supports_image_detail_original": true,
-			"context_window": 131072, "max_context_window": 131072,
-			"comp_hash": "acc", "effective_context_window_percent": 95,
-			"experimental_supported_tools": []any{}, "input_modalities": []string{"text", "image"},
+			"supports_parallel_tool_calls": model.Capability.ToolCallSupport, "supports_image_detail_original": model.Capability.ImageInputSupport,
+			"context_window": model.Capability.MaxContext, "max_context_window": model.Capability.MaxContext,
+			"max_output_tokens": model.Capability.MaxOutput,
+			"comp_hash":         "acc", "effective_context_window_percent": 95,
+			"experimental_supported_tools": []any{}, "input_modalities": modalities,
 			"supports_search_tool": false, "use_responses_lite": false,
 			"tool_mode": "code_mode_only", "multi_agent_version": "v1",
 		})
@@ -66,8 +92,27 @@ func codexModelCatalogEntries() []map[string]any {
 	return entries
 }
 
-func codexModelCatalogJSON() []byte {
-	b, _ := json.MarshalIndent(map[string]any{"models": codexModelCatalogEntries()}, "", "  ")
+func reasoningDescription(effort string) string {
+	switch effort {
+	case "minimal":
+		return "No optional provider reasoning effort"
+	case "low":
+		return "Fast responses with lighter reasoning"
+	case "medium":
+		return "Balanced speed and reasoning"
+	case "high":
+		return "More reasoning for difficult work"
+	case "xhigh":
+		return "Extra reasoning for complex work"
+	case "max":
+		return "Maximum provider-supported reasoning"
+	default:
+		return effort
+	}
+}
+
+func codexModelCatalogJSON(cfg *Config) []byte {
+	b, _ := json.MarshalIndent(map[string]any{"models": codexModelCatalogEntries(cfg)}, "", "  ")
 	return append(b, '\n')
 }
 
@@ -78,8 +123,8 @@ type codexRestoreState struct {
 	Catalog        []byte `json:"catalog,omitempty"`
 }
 
-func configureCodexApp(configPath, catalogPath, restorePath, baseURL, model string) error {
-	if !isCodexModel(model) {
+func configureCodexApp(configPath, catalogPath, restorePath, baseURL, model string, cfg *Config) error {
+	if !isCodexModel(cfg, model) {
 		return fmt.Errorf("unknown Codex model %q", model)
 	}
 	if err := saveCodexRestoreState(configPath, catalogPath, restorePath); err != nil {
@@ -91,7 +136,7 @@ func configureCodexApp(configPath, catalogPath, restorePath, baseURL, model stri
 		return err
 	}
 	configured := renderCodexConfig(string(original), catalogPath, baseURL, model)
-	if err := atomicWriteFile(catalogPath, codexModelCatalogJSON(), 0600); err != nil {
+	if err := atomicWriteFile(catalogPath, codexModelCatalogJSON(cfg), 0600); err != nil {
 		return fmt.Errorf("write Codex model catalog: %w", err)
 	}
 	if err := atomicWriteFile(configPath, []byte(configured), 0600); err != nil {
@@ -176,7 +221,7 @@ func renderCodexConfig(original, catalogPath, baseURL, model string) string {
 			key, _, ok := strings.Cut(trimmed, "=")
 			if ok {
 				switch strings.TrimSpace(key) {
-				case "model", "model_provider", "model_catalog_json":
+				case "model", "model_provider", "model_catalog_json", "web_search":
 					continue
 				}
 			}
@@ -196,6 +241,7 @@ func renderCodexConfig(original, catalogPath, baseURL, model string) string {
 		"model = " + strconv.Quote(model),
 		`model_provider = "acc"`,
 		"model_catalog_json = " + strconv.Quote(catalogPath),
+		`web_search = "disabled"`,
 		"",
 	}
 	cleaned = append(cleaned[:insertAt], append(root, cleaned[insertAt:]...)...)
@@ -214,58 +260,13 @@ func renderCodexConfig(original, catalogPath, baseURL, model string) string {
 	return strings.Join(cleaned, "\n") + "\n"
 }
 
-func isCodexModel(model string) bool {
-	for _, candidate := range codexNamedModels() {
+func isCodexModel(cfg *Config, model string) bool {
+	for _, candidate := range codexNamedModels(cfg) {
 		if model == candidate.ID {
 			return true
 		}
 	}
 	return false
-}
-
-// activeCodexModel reads the route selected by `acc codex`. Desktop currently
-// sends its own gpt-5.4 IDs for Custom, so the proxy uses this as the source of
-// truth when it receives those IDs.
-func activeCodexModel() (string, bool) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", false
-	}
-	return activeCodexModelFromConfig(filepath.Join(home, ".codex", "config.toml"))
-}
-
-func activeCodexModelFromConfig(path string) (string, bool) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return "", false
-	}
-
-	var model, provider string
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.HasPrefix(line, "[") {
-			break // Only the root settings choose the desktop model.
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		value = strings.TrimSpace(value)
-		unquoted, err := strconv.Unquote(value)
-		if err != nil {
-			continue
-		}
-		switch strings.TrimSpace(key) {
-		case "model":
-			model = unquoted
-		case "model_provider":
-			provider = unquoted
-		}
-	}
-	return model, provider == "acc" && isCodexModel(model)
 }
 
 func atomicWriteFile(path string, data []byte, mode os.FileMode) error {

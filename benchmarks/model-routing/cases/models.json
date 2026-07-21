@@ -1,0 +1,12 @@
+[
+  {"id":"bench-nvidia-nemotron-ultra","provider":"nvidia","backend":"nvidia/nemotron-3-ultra-550b-a55b","tools":true,"custom_tools":true,"images":false,"reasoning":"reasoning_budget=32000;enable_thinking=true"},
+  {"id":"bench-nvidia-nemotron-super","provider":"nvidia","backend":"nvidia/nemotron-3-super-120b-a12b","tools":true,"custom_tools":true,"images":false,"reasoning":"reasoning_budget=32000;enable_thinking=true"},
+  {"id":"bench-nvidia-minimax-m3","provider":"nvidia","backend":"minimaxai/minimax-m3","tools":false,"custom_tools":false,"images":true,"reasoning":"native;no unsupported parameter"},
+  {"id":"bench-nvidia-glm-5.2","provider":"nvidia","backend":"z-ai/glm-5.2","tools":true,"custom_tools":true,"images":false,"reasoning":"reasoning_budget=32000;enable_thinking=true"},
+  {"id":"bench-openrouter-nemotron-ultra","provider":"openrouter","backend":"nvidia/nemotron-3-ultra-550b-a55b:free","tools":true,"custom_tools":true,"images":false,"reasoning":"reasoning_effort=high"},
+  {"id":"bench-openrouter-hy3","provider":"openrouter","backend":"tencent/hy3:free","tools":true,"custom_tools":true,"images":false,"reasoning":"reasoning_effort=high"},
+  {"id":"bench-openrouter-laguna","provider":"openrouter","backend":"poolside/laguna-m.1:free","tools":true,"custom_tools":true,"images":false,"reasoning":"reasoning.effort=high"},
+  {"id":"bench-opencode-big-pickle","provider":"opencode","backend":"big-pickle","tools":true,"custom_tools":true,"images":false,"reasoning":"reasoning_effort=max"},
+  {"id":"bench-opencode-deepseek-v4-flash","provider":"opencode","backend":"deepseek-v4-flash","tools":true,"custom_tools":true,"images":false,"reasoning":"reasoning_effort=max"},
+  {"id":"bench-opencode-deepseek-v4-flash-free","provider":"opencode","backend":"deepseek-v4-flash-free","tools":true,"custom_tools":true,"images":false,"reasoning":"reasoning_effort=max"}
+]

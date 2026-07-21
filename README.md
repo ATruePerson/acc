@@ -43,30 +43,90 @@ settings, switches it to ACC, and reopens the existing ChatGPT desktop app.
 | `acc claude [args]` | Start ACC and launch Claude Code through it. |
 | `acc codex [path]` | Switch Codex Desktop to ACC and open a workspace. |
 | `acc codex --restore` | Restore the previous Codex provider settings. |
+| `acc mcp install` | Install ACC's safe bundled MCP config. |
+| `acc mcp doctor` | Check bundled MCP tools and config. |
 | `acc` | Run the gateway directly. |
 | `acc -tui` | Run the gateway with the terminal dashboard. |
 | `acc -ui` | Run the gateway and open the web dashboard. |
 
+### Bundled local tools
+
+ACC includes two safe-by-default local MCP servers for Claude Code:
+
+- `acc-websearch`: keyless multi-source search plus guarded readable-page fetch.
+- `acc-mac-control`: Calendar, Reminders, notifications, and path-based Apple
+  Notes tools. Notes can be addressed as `Stillness/Sleep`; IDs are optional
+  when a folder path and exact title identify the note. `notes_recent` returns
+  the newest 1, 3, or 7 notes from a specific folder.
+
+`acc claude` creates `~/.config/acc/mcp.json` when missing and passes it through
+Claude Code's `--mcp-config` option in strict mode. That keeps older global MCP
+servers from shadowing ACC's tools without rewriting Claude's global config.
+Install or refresh it directly with:
+
+```bash
+acc mcp install
+acc mcp doctor
+```
+
+The separate Claude-3p desktop app reads its own config. Merge ACC into that
+config, remove only the three legacy custom servers, and preserve unrelated
+servers and preferences with:
+
+```bash
+acc mcp install --claude-3p
+```
+
+The unrestricted `acc-osascript` server is bundled but disabled by default.
+Enable it only when you need arbitrary AppleScript or JXA:
+
+```bash
+acc mcp install --include-raw-osascript
+# Claude-3p, including raw osascript:
+acc mcp install --claude-3p --include-raw-osascript
+```
+
+`web_fetch` accepts only public HTTP(S) destinations and rejects private/local
+network targets, error pages, oversized responses, unsupported binary content,
+redirect loops, and timeouts. Mac apps opened by `acc-mac-control` are closed
+after the call; apps already running before the call are left alone.
+
 ### Codex Desktop
 
-`acc codex` defaults to Sol and offers three model aliases:
+`acc codex` refreshes Codex's catalog from enabled entries in
+`config.json.models`, backs up the old connection, and reopens Codex without a
+terminal picker. Opus is the default only for new tasks; Codex keeps the model
+stored on existing tasks. The default config includes these five stable IDs:
 
-| Model | Alias | Uses your config's |
+| Model | Stable ID | Backend |
 | --- | --- | --- |
-| Sol | `openai/codex-5.6-sol` | `opus` route |
-| Terra | `openai/codex-5.6-terra` | `sonnet` route |
-| Luna | `openai/codex-5.6-luna` | `haiku` route |
+| Opus | `opus` | `routes.opus` |
+| Sonnet | `sonnet` | `routes.sonnet` |
+| Haiku | `haiku` | `routes.haiku` |
+| MiniMax M3 | `acc-minimax-m3` | NVIDIA direct |
+| Nemotron Super | `acc-nemotron-super` | NVIDIA direct |
 
 Choose one directly when scripting:
 
 ```bash
-acc codex --model openai/codex-5.6-luna /path/to/project
+acc codex --model haiku /path/to/project
 ```
 
-In an interactive terminal, `acc codex` shows a Sol/Terra/Luna picker. Codex
-Desktop may label these locally supplied models as `Custom`, so use `acc codex`
-or `--model` to choose one reliably. `acc codex --restore` puts your previous
-Codex connection back.
+The catalog contains only the efforts declared for each model. Unsupported
+choices are rejected before ACC contacts a provider. Model and effort arrive on
+every request, so separate Codex tasks stay independent. `acc codex --restore`
+puts your previous Codex connection back.
+
+Opus is one logical model: text uses NVIDIA GLM-5.2 first, with an explicit
+MiniMax M3 fallback. Image or mixed text-image requests go directly to MiniMax
+M3 because GLM-5.2 is text-only. ACC never quietly lowers the selected effort.
+
+Codex's free-form custom tools are bridged through Chat Completions without
+changing their native Responses call or streaming shape. Provider-hosted tools
+such as web search are not ACC capabilities and return a clear backend-specific
+error if Codex sends one. Codex 0.144.2 enables web search by default, so
+`acc codex` disables it only for the active ACC connection; `--restore` returns
+your previous setting.
 
 ## Configuration
 
@@ -103,7 +163,7 @@ Thinking budgets map to the closest `reasoning_effort` value in your config:
 ## What it handles
 
 - Anthropic Messages, OpenAI Responses, and OpenAI Chat Completions endpoints.
-- Streaming responses, tool calls, tool results, and images.
+- Streaming responses, parallel tool calls, tool results, images, and file parts.
 - Codex model discovery and multi-turn tool calls.
 - Per-provider rate limiting, retrying, and configured fallbacks.
 - Live terminal and web dashboards with request logs.

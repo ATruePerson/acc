@@ -1,0 +1,215 @@
+diff --git a/main.go b/main.go
+index 0909a73..0901178 100644
+--- a/main.go
++++ b/main.go
+@@ -335,18 +335,15 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
+ 			break
+ 		}
+ 
+-		// On 429 (rate limited) OR 5xx (provider crashed), try the next fallback
+-		// route if one is configured. Same backup list — more failure types trip it.
+-		// Also treat a NVIDIA NIM "DEGRADED" 400 as failover-worthy: the model node
+-		// is disabled upstream ("DEGRADED function cannot be invoked"), not a bad
+-		// request, so the next fallback can actually succeed.
++		// On provider failures, try the next configured fallback. This includes a
++		// provider's own generic 400, which is different from a bad client request.
+ 		shouldFallback := resp.StatusCode == 429 || resp.StatusCode >= 500
+ 		var degradedBody []byte
+ 		if !shouldFallback && resp.StatusCode == 400 {
+ 			degradedBody, _ = io.ReadAll(resp.Body)
+ 			resp.Body.Close()
+ 			resp.Body = io.NopCloser(bytes.NewReader(degradedBody))
+-			if bytes.Contains(degradedBody, []byte("DEGRADED")) || bytes.Contains(degradedBody, []byte("cannot be invoked")) {
++			if recoverableProvider400(degradedBody) {
+ 				shouldFallback = true
+ 			}
+ 		}
+@@ -568,7 +565,7 @@ func (s *server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+ 			degradedBody, _ = io.ReadAll(resp.Body)
+ 			resp.Body.Close()
+ 			resp.Body = io.NopCloser(bytes.NewReader(degradedBody))
+-			if bytes.Contains(degradedBody, []byte("DEGRADED")) || bytes.Contains(degradedBody, []byte("cannot be invoked")) {
++			if recoverableProvider400(degradedBody) {
+ 				shouldFallback = true
+ 			}
+ 		}
+@@ -792,6 +789,36 @@ func (s *server) routeFor(model string) (Route, error) {
+ 	return Route{}, fmt.Errorf("unrecognized model ID %q — did you mean anthropic/claude-kimi-k2 or a direct provider path like anthropic/nvidia/moonshotai/kimi-k2.6?", model)
+ }
+ 
++// mergeRouteExtraBody flat-merges a route's provider-specific request settings
++// into an already-encoded OpenAI request. NVIDIA expects these fields at the
++// request root, while Gemini can intentionally use an extra_body wrapper.
++func mergeRouteExtraBody(body []byte, extra map[string]any) []byte {
++	if len(extra) == 0 {
++		return body
++	}
++	var merged map[string]any
++	if err := json.Unmarshal(body, &merged); err != nil {
++		return body
++	}
++	for k, v := range extra {
++		merged[k] = v
++	}
++	if newBody, err := json.Marshal(merged); err == nil {
++		return newBody
++	}
++	return body
++}
++
++// recoverableProvider400 distinguishes a malformed client request from a
++// provider admitting that its own backend rejected the request. The latter can
++// safely try the next configured route.
++func recoverableProvider400(body []byte) bool {
++	lower := bytes.ToLower(body)
++	return bytes.Contains(lower, []byte("degraded")) ||
++		bytes.Contains(lower, []byte("cannot be invoked")) ||
++		bytes.Contains(lower, []byte("error from provider")) && bytes.Contains(lower, []byte("upstream request failed"))
++}
++
+ // ---------- Config ----------
+ 
+ func loadPrependFile(baseDir, path string) (string, error) {
+diff --git a/responses_handler.go b/responses_handler.go
+index 28bbc41..780c346 100644
+--- a/responses_handler.go
++++ b/responses_handler.go
+@@ -310,6 +310,7 @@ func (s *server) executeUpstream(
+ 		resp        *http.Response
+ 		activeRoute Route
+ 	)
++	requestedReasoningEffort := or.ReasoningEffort
+ 
+ 	for ri, currentRoute := range routes {
+ 		activeRoute = currentRoute
+@@ -324,15 +325,18 @@ func (s *server) executeUpstream(
+ 			continue
+ 		}
+ 
+-		// Update request with current route details
++		// Rebuild the request for each route. A fallback can need different
++		// reasoning values and route-level settings than the primary provider.
+ 		or.Model = currentRoute.Model
+-		if or.ReasoningEffort != "" {
+-			or.ReasoningEffort = sanitizeReasoningEffort(currentRoute.Provider, or.ReasoningEffort)
++		or.ReasoningEffort = requestedReasoningEffort
++		if requestedReasoningEffort != "" {
++			or.ReasoningEffort = sanitizeReasoningEffort(currentRoute.Provider, requestedReasoningEffort)
+ 		} else if currentRoute.ReasoningEffort != "" {
+ 			or.ReasoningEffort = sanitizeReasoningEffort(currentRoute.Provider, currentRoute.ReasoningEffort)
+ 		}
+ 
+ 		body, _ := json.Marshal(or)
++		body = mergeRouteExtraBody(body, currentRoute.ExtraBody)
+ 
+ 		for attempt := 1; attempt <= 10; attempt++ {
+ 			upstream, err := http.NewRequestWithContext(ctx, "POST", prov.BaseURL+"/chat/completions", bytes.NewReader(body))
+@@ -390,21 +394,22 @@ func (s *server) executeUpstream(
+ 			continue
+ 		}
+ 
+-		// On 429 or 5xx, try next fallback. Also treat a NVIDIA NIM "DEGRADED" 400
+-		// (model node disabled upstream, not a bad request) as failover-worthy.
++		// On 429 or 5xx, try next fallback. Some providers also wrap their own
++		// backend outage as a generic 400, which is not a bad client request and
++		// should use the configured backup route.
+ 		shouldFallback := resp.StatusCode == 429 || resp.StatusCode >= 500
+-		var degradedBody []byte
++		var failureBody []byte
+ 		if !shouldFallback && resp.StatusCode == 400 {
+-			degradedBody, _ = io.ReadAll(resp.Body)
++			failureBody, _ = io.ReadAll(resp.Body)
+ 			resp.Body.Close()
+-			resp.Body = io.NopCloser(bytes.NewReader(degradedBody))
+-			if bytes.Contains(degradedBody, []byte("DEGRADED")) || bytes.Contains(degradedBody, []byte("cannot be invoked")) {
++			resp.Body = io.NopCloser(bytes.NewReader(failureBody))
++			if recoverableProvider400(failureBody) {
+ 				shouldFallback = true
+ 			}
+ 		}
+ 		if shouldFallback && ri < len(routes)-1 {
+ 			status := resp.StatusCode
+-			b := degradedBody
++			b := failureBody
+ 			if b == nil {
+ 				b, _ = io.ReadAll(resp.Body)
+ 			}
+diff --git a/upstream_fallback_test.go b/upstream_fallback_test.go
+new file mode 100644
+index 0000000..2ebe9b7
+--- /dev/null
++++ b/upstream_fallback_test.go
+@@ -0,0 +1,73 @@
++package main
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++)
++
++func TestExecuteUpstreamFallsBackWhenProviderRejectsItsOwnRequest(t *testing.T) {
++	primary := Route{Provider: "opencode", Model: "big-pickle"}
++	fallback := Route{
++		Provider: "nvidia",
++		Model:    "nvidia/backup",
++		ExtraBody: map[string]any{
++			"chat_template_kwargs": map[string]any{"enable_thinking": true},
++		},
++	}
++	cfg := &Config{Providers: map[string]Provider{
++		"opencode": {BaseURL: "https://opencode.test", APIKey: "primary"},
++		"nvidia":   {BaseURL: "https://nvidia.test", APIKey: "fallback"},
++	}}
++	s := testServer(cfg)
++
++	calls := 0
++	s.http = &http.Client{Transport: &mockTripper{fn: func(req *http.Request) (*http.Response, error) {
++		calls++
++		if calls == 1 {
++			return &http.Response{
++				StatusCode: http.StatusBadRequest,
++				Header:     make(http.Header),
++				Body:       io.NopCloser(bytes.NewBufferString(`{"error":{"message":"Error from provider (Console): Upstream request failed"}}`)),
++			}, nil
++		}
++
++		var body map[string]any
++		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
++			t.Fatal(err)
++		}
++		if body["model"] != fallback.Model {
++			t.Fatalf("fallback model = %q, want %q", body["model"], fallback.Model)
++		}
++		if body["reasoning_effort"] != "high" {
++			t.Fatalf("fallback reasoning effort = %q, want high", body["reasoning_effort"])
++		}
++		if _, ok := body["chat_template_kwargs"]; !ok {
++			t.Fatal("fallback request is missing its route-level extra body")
++		}
++		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(`{"choices":[]}`))}, nil
++	}}}
++
++	resp, route, err := s.executeUpstream(
++		context.Background(),
++		&OpenAIRequest{Model: primary.Model, Messages: []OpenAIMessage{{Role: "user", Content: jsonString("hi")}}, ReasoningEffort: "max"},
++		[]Route{primary, fallback},
++		cfg,
++		func(string, int, int, int, string) {},
++		httptest.NewRecorder(),
++	)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK || route.Provider != fallback.Provider || route.Model != fallback.Model {
++		t.Fatalf("got status=%d route=%+v, want 200 fallback", resp.StatusCode, route)
++	}
++	if calls != 2 {
++		t.Fatalf("upstream calls = %d, want 2", calls)
++	}
++}

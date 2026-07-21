@@ -5,6 +5,8 @@ acc
 # Environment files (contain real API keys)
 .env
 .env.local
+auth.json
+*.auth.json
 
 # Go
 go.work
@@ -20,6 +22,11 @@ go.work.sum
 test_runs.jsonl
 bench_runs.jsonl
 bench_runs/
+
+# Local integration state and backups
+.opencodex/
+codex-restore.json
+*.codex-backup
 
 # Local project context (not for repo)
 CLAUDE.md

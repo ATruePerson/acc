@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -73,7 +72,7 @@ func TestSystemPromptBecomesFirstMessage(t *testing.T) {
 	}
 }
 
-func TestRouteSystemPrependOverridesGlobal(t *testing.T) {
+func TestLegacyRoutePersonaIsNotInjected(t *testing.T) {
 	ar := &AnthropicRequest{
 		Model:    "x",
 		System:   json.RawMessage(`"base"`),
@@ -85,14 +84,17 @@ func TestRouteSystemPrependOverridesGlobal(t *testing.T) {
 	or, _ := translateRequest(ar, route, cfg)
 
 	sys := string(or.Messages[0].Content)
-	if !strings.Contains(sys, "I am Claude Fable 5.") {
-		t.Fatalf("route prepend missing from system: %s", sys)
+	if strings.Contains(sys, "I am Claude Fable 5.") {
+		t.Fatalf("legacy route persona was injected: %s", sys)
 	}
-	if strings.Contains(sys, "GLOBAL") {
-		t.Fatalf("global prepend should be overridden, got: %s", sys)
+	if !strings.Contains(sys, "GLOBAL") {
+		t.Fatalf("global user instruction was dropped: %s", sys)
 	}
 	if !strings.Contains(sys, "base") {
 		t.Fatalf("original system text dropped: %s", sys)
+	}
+	if !strings.Contains(sys, "Kabir's Second Brain") {
+		t.Fatalf("ACC persona missing: %s", sys)
 	}
 }
 
@@ -177,32 +179,25 @@ func TestConfigAliasOverridesAndExtends(t *testing.T) {
 }
 
 func TestCodexAliasesFollowConfiguredFamilies(t *testing.T) {
-	cfg := &Config{Routes: map[string]Route{
-		"opus": {
-			Provider: "nvidia", Model: "z-ai/glm-5.2",
-			Fallbacks: []Route{{Provider: "nvidia", Model: "minimaxai/minimax-m3"}},
-		},
-		"sonnet": {
-			Provider: "opencode", Model: "big-pickle",
-			Fallbacks: []Route{{Provider: "nvidia", Model: "nvidia/nemotron-3-super-120b-a12b"}},
-		},
-		"haiku": {Provider: "nvidia", Model: "stepfun-ai/step-3.7-flash"},
-	}}
+	cfg := codexTestConfig()
 	s := testServer(cfg)
 	tests := []struct {
 		id, family string
 	}{
-		{"openai/codex-5.6-sol", "opus"},
-		{"openai/codex-5.6-terra", "sonnet"},
-		{"openai/codex-5.6-luna", "haiku"},
+		{codexOpusID, "opus"},
+		{codexSonnetID, "sonnet"},
+		{codexHaikuID, "haiku"},
 	}
 	for _, tc := range tests {
 		route, err := s.routeFor(tc.id)
 		if err != nil {
 			t.Fatalf("routeFor(%q): %v", tc.id, err)
 		}
-		if want := cfg.Routes[tc.family]; !reflect.DeepEqual(route, want) {
-			t.Errorf("routeFor(%q) = %+v, want full %s route %+v", tc.id, route, tc.family, want)
+		if want := cfg.Routes[tc.family]; route.Provider != want.Provider || route.Model != want.Model {
+			t.Errorf("routeFor(%q) = %s/%s, want %s/%s", tc.id, route.Provider, route.Model, want.Provider, want.Model)
+		}
+		if len(route.Reasoning) == 0 || route.MaxTokens == 0 {
+			t.Errorf("routeFor(%q) did not apply registry capabilities: %+v", tc.id, route)
 		}
 	}
 }
@@ -289,26 +284,31 @@ func TestRouteFor(t *testing.T) {
 	}
 }
 
-func TestSanitizeReasoningEffort(t *testing.T) {
+func TestExactProviderReasoningEffort(t *testing.T) {
 	testCases := []struct {
 		provider string
 		effort   string
 		expected string
+		wantErr  bool
 	}{
-		{"opencode", "ultracode", "max"},
-		{"opencode", "max", "max"},
-		{"opencode", "high", "high"},
-		{"nvidia", "ultracode", "high"},
-		{"nvidia", "max", "high"},
-		{"nvidia", "medium", "medium"},
-		{"gemini", "xhigh", "high"},
-		{"random", "ultracode", "ultracode"}, // unknown provider gets returned as is
+		{"opencode", "ultracode", "", true},
+		{"opencode", "max", "max", false},
+		{"opencode", "high", "high", false},
+		{"nvidia", "ultracode", "", true},
+		{"nvidia", "max", "", true},
+		{"nvidia", "medium", "medium", false},
+		{"gemini", "xhigh", "", true},
+		{"random", "ultracode", "ultracode", false},
 	}
 
 	for _, tc := range testCases {
-		got := sanitizeReasoningEffort(tc.provider, tc.effort)
+		got, err := exactProviderReasoningEffort(tc.provider, tc.effort)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("exactProviderReasoningEffort(%q, %q) error = %v, wantErr %v", tc.provider, tc.effort, err, tc.wantErr)
+			continue
+		}
 		if got != tc.expected {
-			t.Errorf("sanitizeReasoningEffort(%q, %q) = %q, want %q", tc.provider, tc.effort, got, tc.expected)
+			t.Errorf("exactProviderReasoningEffort(%q, %q) = %q, want %q", tc.provider, tc.effort, got, tc.expected)
 		}
 	}
 }

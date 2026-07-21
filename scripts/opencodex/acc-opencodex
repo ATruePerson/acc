@@ -1,0 +1,305 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Optional ACC/OpenCodex integration helper. It does not call ocx init, so it
+# cannot rewrite unrelated providers or Codex settings.
+script_dir="$(CDPATH= cd "$(dirname "$0")" && pwd)"
+repo_dir="$(CDPATH= cd "$script_dir/../.." && pwd)"
+acc_config="${ACC_CONFIG:-$HOME/.config/acc/config.json}"
+codex_home="${CODEX_HOME:-$HOME/.codex}"
+opencodex_home="${OPENCODEX_HOME:-$HOME/.opencodex}"
+opencodex_config="$opencodex_home/config.json"
+timeout_seconds="${ACC_OPENCODEX_TIMEOUT:-5}"
+
+die() { echo "FAIL: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "missing command: $1"; }
+need curl
+need python3
+
+acc_port() {
+  python3 - "$acc_config" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        port = json.load(f).get("port", 9999)
+except FileNotFoundError:
+    port = 9999
+if not isinstance(port, int) or not 1 <= port <= 65535:
+    raise SystemExit("ACC config port must be an integer from 1 to 65535")
+print(port)
+PY
+}
+ocx_port() {
+  if [[ -f "$opencodex_config" ]]; then
+    python3 - "$opencodex_config" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    port = json.load(f).get("port", 10100)
+if not isinstance(port, int) or not 1 <= port <= 65535:
+    raise SystemExit("OpenCodex config port must be an integer from 1 to 65535")
+print(port)
+PY
+  else
+    echo 10100
+  fi
+}
+acc_url() { echo "http://127.0.0.1:$(acc_port)"; }
+ocx_url() { echo "http://127.0.0.1:$(ocx_port)"; }
+stamp() { date +%Y%m%d-%H%M%S; }
+
+backup_file() {
+  local path="$1"
+  [[ -f "$path" ]] || return 0
+  local backup="${path}.opencodex-backup-$(stamp)"
+  cp "$path" "$backup"
+  chmod 600 "$backup" 2>/dev/null || true
+  echo "Backed up $path to $backup"
+}
+
+validate_no_proxy_loop() {
+  [[ -f "$acc_config" ]] || die "ACC config not found: $acc_config"
+  python3 - "$acc_config" "$(ocx_port)" <<'PY'
+import json, sys
+from urllib.parse import urlparse
+path, port = sys.argv[1], int(sys.argv[2])
+with open(path, encoding="utf-8") as f:
+    cfg = json.load(f)
+hits = []
+def walk(value, path=""):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            walk(child, f"{path}.{key}" if path else key)
+    elif isinstance(value, list):
+        for i, child in enumerate(value):
+            walk(child, f"{path}[{i}]")
+    elif isinstance(value, str) and ("url" in path.lower() or "endpoint" in path.lower()):
+        parsed = urlparse(value)
+        host = (parsed.hostname or "").lower()
+        if "opencodex" in value.lower() or (host in {"127.0.0.1", "localhost", "::1"} and parsed.port == port):
+            hits.append((path, value))
+if hits:
+    for key, value in hits:
+        print(f"ACC config points at OpenCodex: {key}={value}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+fetch_models() {
+  curl --fail --silent --show-error --max-time "$timeout_seconds" \
+    -H 'User-Agent: opencodex-acc-integration' "$(acc_url)/v1/models"
+}
+model_ids() {
+  fetch_models | python3 -c '
+import json, sys
+payload = json.load(sys.stdin)
+rows = payload.get("data", []) or payload.get("models", [])
+ids = [row.get("id") or row.get("slug") or row.get("model_id") for row in rows if isinstance(row, dict)]
+ids = [model_id for model_id in ids if model_id]
+if not ids:
+    raise SystemExit("ACC /v1/models returned no model IDs")
+print(json.dumps(list(dict.fromkeys(ids))))
+'
+}
+
+write_config() {
+  local models_json="$1"
+  mkdir -p "$opencodex_home"
+  chmod 700 "$opencodex_home"
+  backup_file "$opencodex_config"
+  python3 - "$opencodex_config" "$(acc_url)/v1" "$models_json" <<'PY'
+import json, os, sys, tempfile
+path, base_url, models_json = sys.argv[1:]
+models = json.loads(models_json)
+if not models:
+    raise SystemExit("cannot configure OpenCodex without ACC model IDs")
+def default_model(items):
+    for name in ("gpt-5.6-sol", "openai/codex-5.6-sol"):
+        if name in items:
+            return name
+    return items[0]
+if os.path.exists(path):
+    with open(path, encoding="utf-8") as f:
+        cfg = json.load(f)
+else:
+    cfg = {}
+if not isinstance(cfg, dict):
+    raise SystemExit("OpenCodex config must contain a JSON object")
+providers = cfg.setdefault("providers", {})
+if not isinstance(providers, dict):
+    raise SystemExit("OpenCodex providers must be a JSON object")
+providers["acc"] = {
+    "adapter": "openai-chat",
+    "baseUrl": base_url,
+    "allowPrivateNetwork": True,
+    "defaultModel": default_model(models),
+    "models": models,
+    "selectedModels": models,
+    "liveModels": True,
+}
+cfg["defaultProvider"] = "acc"
+cfg["hostname"] = "127.0.0.1"
+cfg.setdefault("port", 10100)
+cfg["syncResumeHistory"] = False
+cfg["codexAutoStart"] = False
+cfg["websockets"] = False
+directory = os.path.dirname(path) or "."
+fd, temporary = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+PY
+  chmod 600 "$opencodex_config"
+}
+
+setup() {
+  validate_no_proxy_loop
+  local models
+  models="$(model_ids)" || die "ACC is not reachable at $(acc_url). Start ACC first."
+  write_config "$models"
+  echo "PASS: OpenCodex provider acc configured for $(acc_url)/v1"
+  printf '%s\n' "$models" | python3 -c 'import json,sys; [print("  "+x) for x in json.load(sys.stdin)]'
+}
+
+start() {
+  [[ -f "$opencodex_config" ]] || setup
+  validate_no_proxy_loop
+  if ! curl --fail --silent --show-error --max-time "$timeout_seconds" "$(acc_url)/health" >/dev/null 2>&1; then
+    command -v acc-start >/dev/null 2>&1 || die "ACC is not running and acc-start is unavailable"
+    echo "ACC is not running; starting it with acc-start."
+    acc-start
+  fi
+  curl --fail --silent --show-error --max-time "$timeout_seconds" "$(acc_url)/health" >/dev/null || die "ACC is not reachable at $(acc_url)"
+  need ocx
+  nohup ocx start >"$opencodex_home/start.log" 2>&1 </dev/null &
+  local deadline=$((SECONDS + 20))
+  while (( SECONDS < deadline )); do
+    if curl --fail --silent --show-error --max-time 1 "$(ocx_url)/healthz" >/dev/null 2>&1; then
+      echo "PASS: OpenCodex is running at $(ocx_url)"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "FAIL: OpenCodex did not become healthy. See $opencodex_home/start.log" >&2
+  return 1
+}
+
+status() { need ocx; ocx status --json; }
+
+result() { printf '%-28s %-7s %s\n' "$1" "$2" "$3"; }
+
+doctor() {
+  local failed=0
+  local acc="$(acc_url)" ocx="$(ocx_url)"
+  echo "ACC/OpenCodex doctor"
+  echo "ACC: $acc"
+  echo "OpenCodex: $ocx"
+  echo
+  if [[ -f "$acc_config" ]]; then result "ACC config" PASS "$acc_config"; else result "ACC config" FAIL "missing"; failed=1; fi
+  if curl --fail --silent --show-error --max-time "$timeout_seconds" "$acc/health" >/dev/null 2>&1; then result "ACC running" PASS "health endpoint"; else result "ACC running" FAIL "start ACC first"; failed=1; fi
+  if curl --fail --silent --show-error --max-time "$timeout_seconds" "$ocx/healthz" >/dev/null 2>&1; then result "OpenCodex running" PASS "health endpoint"; else result "OpenCodex running" FAIL "run start"; failed=1; fi
+  if validate_no_proxy_loop >/dev/null 2>&1; then result "Proxy loop" PASS "ACC upstreams are external"; else result "Proxy loop" FAIL "ACC points at OpenCodex"; failed=1; fi
+  if [[ -f "$opencodex_config" ]] && python3 - "$opencodex_config" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    cfg = json.load(f)
+provider = cfg.get("providers", {}).get("acc", {})
+assert cfg.get("hostname", "127.0.0.1") in ("127.0.0.1", "localhost", "::1")
+assert provider.get("adapter") == "openai-chat"
+assert provider.get("baseUrl", "").startswith("http://127.0.0.1:")
+assert provider.get("allowPrivateNetwork") is True
+assert cfg.get("syncResumeHistory") is False
+PY
+  then result "OpenCodex config" PASS "loopback, chat adapter, history-safe"; else result "OpenCodex config" FAIL "missing or unsafe"; failed=1; fi
+  local catalog
+  if catalog="$(fetch_models 2>/dev/null)" && python3 - "$catalog" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1])
+rows = payload.get("data", []) or payload.get("models", [])
+assert any(isinstance(row, dict) and (row.get("id") or row.get("slug") or row.get("model_id")) for row in rows)
+PY
+  then result "ACC model discovery" PASS "live IDs"; else result "ACC model discovery" FAIL "empty or unavailable"; failed=1; fi
+  if curl --fail --silent --show-error --max-time "$timeout_seconds" "$ocx/v1/models" >/dev/null 2>&1; then result "OpenCodex model discovery" PASS "proxy catalog"; else result "OpenCodex model discovery" FAIL "unavailable"; failed=1; fi
+  if command -v lsof >/dev/null 2>&1; then
+    local acc_listener="$(lsof -nP -iTCP:$(acc_port) -sTCP:LISTEN 2>/dev/null || true)"
+    local ocx_listener="$(lsof -nP -iTCP:$(ocx_port) -sTCP:LISTEN 2>/dev/null || true)"
+    if [[ "$acc_listener" == *"127.0.0.1:$(acc_port)"* || "$acc_listener" == *"[::1]:$(acc_port)"* ]]; then result "ACC loopback bind" PASS "listener is local"; else result "ACC loopback bind" FAIL "listener is not loopback"; failed=1; fi
+    if [[ "$ocx_listener" == *"127.0.0.1:$(ocx_port)"* || "$ocx_listener" == *"[::1]:$(ocx_port)"* ]]; then result "OpenCodex loopback bind" PASS "listener is local"; else result "OpenCodex loopback bind" FAIL "listener is not loopback"; failed=1; fi
+  else
+    result "Loopback binds" SKIPPED "lsof is unavailable"
+  fi
+  local backup_root="$HOME/.config/acc/backups"
+  if compgen -G "$backup_root/opencodex-*" >/dev/null 2>&1 || compgen -G "$opencodex_config.opencodex-backup-*" >/dev/null 2>&1; then result "Config backups" PASS "timestamped backup"; else result "Config backups" FAIL "none found"; failed=1; fi
+  if git -C "$repo_dir" check-ignore -q .env && git -C "$repo_dir" check-ignore -q auth.json; then result "Secret ignore rules" PASS ".env and auth.json"; else result "Secret ignore rules" FAIL "patterns missing"; failed=1; fi
+  result "Streaming" SKIPPED "needs live model request"
+  result "Tool calls" SKIPPED "needs non-destructive Codex smoke test"
+  result "Multi-turn tools" SKIPPED "needs live tool round-trip"
+  result "Responses events" SKIPPED "needs Codex CLI/App run"
+  result "Fallback" SKIPPED "needs controlled provider failure"
+  result "Vision" SKIPPED "route dependent"
+  return "$failed"
+}
+
+restore() {
+  need ocx
+  ocx restore
+  echo "PASS: native Codex restored; this integration does not modify history."
+}
+
+remove() {
+  restore
+  [[ -f "$opencodex_config" ]] || { echo "Nothing to remove from $opencodex_config"; return 0; }
+  backup_file "$opencodex_config"
+  python3 - "$opencodex_config" <<'PY'
+import json, os, sys, tempfile
+path = sys.argv[1]
+with open(path, encoding="utf-8") as f:
+    cfg = json.load(f)
+providers = cfg.get("providers", {})
+if isinstance(providers, dict):
+    providers.pop("acc", None)
+if cfg.get("defaultProvider") == "acc":
+    cfg["defaultProvider"] = "openai"
+fd, temporary = tempfile.mkstemp(prefix=".config.", suffix=".tmp", dir=os.path.dirname(path))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+PY
+  echo "PASS: ACC provider removed; other OpenCodex providers were preserved."
+}
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/opencodex/acc-opencodex <setup|start|status|doctor|restore|remove>
+
+setup    Discover live ACC model IDs and configure OpenCodex's acc provider.
+start    Start ACC if needed, then start OpenCodex.
+status   Show OpenCodex's sanitized JSON status.
+doctor   Report deterministic PASS, FAIL, or SKIPPED checks.
+restore  Restore native Codex configuration through OpenCodex.
+remove   Restore native Codex and remove only ACC's OpenCodex provider.
+EOF
+}
+
+case "${1:-}" in
+  setup) setup ;;
+  start) start ;;
+  status) status ;;
+  doctor) doctor ;;
+  restore) restore ;;
+  remove) remove ;;
+  *) usage; exit 2 ;;
+esac

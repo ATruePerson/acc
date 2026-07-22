@@ -1,6 +1,12 @@
 # Binaries
 acc
+/acc-proxy
 *.exe
+
+# Local checkpoints and generated benchmark output
+.checkpoints/
+benchmarks/model-routing/raw-results/*.json
+benchmarks/model-routing/results.json
 
 # Environment files (contain real API keys)
 .env

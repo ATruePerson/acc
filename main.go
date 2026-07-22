@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -89,7 +90,9 @@ func main() {
 		http.NotFound(w, r)
 	})
 
-	addr := fmt.Sprintf(":%d", cfg.Port)
+	// ACC is a local gateway. Binding explicitly to loopback prevents its
+	// configured provider credentials from becoming reachable on the LAN.
+	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
 
 	srv := &http.Server{Addr: addr, Handler: corsMiddleware(mux)}
 
@@ -143,11 +146,13 @@ func newUpstreamHTTPClient() *http.Client {
 type server struct {
 	// cfg is hot-swappable: reloadIfChanged replaces the whole pointer when
 	// config.json changes on disk, so model edits take effect without a restart.
-	cfg        atomic.Pointer[Config]
-	cfgPath    string
-	cfgModNano atomic.Int64
-	http       *http.Client
-	limiter    *providerRateLimiter
+	cfg         atomic.Pointer[Config]
+	cfgPath     string
+	cfgModNano  atomic.Int64
+	http        *http.Client
+	limiter     *providerRateLimiter
+	responsesMu sync.RWMutex
+	responses   map[string]*ResponsesResponse
 }
 
 // reloadIfChanged re-reads the config file when its modtime has advanced, so
@@ -303,9 +308,13 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 			resp, err = s.http.Do(upstream)
 			if err != nil {
-				httpErr(w, 502, "upstream: "+err.Error())
-				logit(currentRoute.Model, 502, 0, 0, 0, or.ReasoningEffort)
-				return
+				if ri == len(routes)-1 {
+					httpErr(w, 502, "upstream: "+err.Error())
+					logit(currentRoute.Model, 502, 0, 0, 0, or.ReasoningEffort)
+					return
+				}
+				log.Printf("upstream connection failed for %s/%s, trying fallback: %v", currentRoute.Provider, currentRoute.Model, err)
+				break
 			}
 
 			if resp.StatusCode == 503 && attempt < maxAttempts {
@@ -332,6 +341,9 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			break
+		}
+		if resp == nil {
+			continue
 		}
 
 		// On provider failures, try the next configured fallback. This includes a
@@ -659,15 +671,14 @@ func (s *server) handleModels(w http.ResponseWriter, r *http.Request) {
 	isAnthropic := r.Header.Get("anthropic-version") != ""
 	isCodex := strings.Contains(strings.ToLower(r.UserAgent()), "codex")
 
-	allow := []string{"claude-opus", "claude-sonnet", "claude-haiku", "claude-fable", "claude-mythos"}
+	allow := publicLegacyModelIDs(s.cfg.Load())
 
 	w.Header().Set("Content-Type", "application/json")
 	if isCodex {
 		json.NewEncoder(w).Encode(map[string]any{"models": codexModelCatalogEntries(s.cfg.Load())})
 	} else if isAnthropic {
 		var data []map[string]any
-		for _, name := range allow {
-			id := "anthropic/" + name
+		for _, id := range allow {
 			data = append(data, map[string]any{
 				"type": "model", "id": id, "display_name": id,
 				"created_at": "2025-01-01T00:00:00Z",
@@ -676,8 +687,7 @@ func (s *server) handleModels(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"data": data, "has_more": false})
 	} else {
 		var data []map[string]any
-		for _, name := range allow {
-			id := "anthropic/" + name
+		for _, id := range allow {
 			data = append(data, map[string]any{
 				"id": id, "object": "model",
 				"created": 1735689600, "owned_by": "acc-proxy",
@@ -687,11 +697,63 @@ func (s *server) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func publicLegacyModelIDs(cfg *Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	ids := make([]string, 0, len(cfg.AliasRoutes)+len(cfg.Aliases))
+	for _, family := range []string{"opus", "sonnet", "haiku"} {
+		if _, ok := aliasRouteForFamily(cfg, family); ok {
+			id := "anthropic/claude-" + family
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	for id := range cfg.Aliases {
+		publicID := "anthropic/" + normalizeModelID(id)
+		if !seen[publicID] {
+			seen[publicID] = true
+			ids = append(ids, publicID)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
 // normalizeModelID strips the "anthropic/" prefix and normalizes separators so
 // "anthropic/claude_K_2" and "claude-k-2" resolve to the same alias key.
 func normalizeModelID(model string) string {
-	clean := strings.TrimPrefix(model, "anthropic/")
-	return strings.ToLower(strings.ReplaceAll(clean, "_", "-"))
+	clean := strings.TrimPrefix(strings.ToLower(model), "anthropic/")
+	return strings.ReplaceAll(clean, "_", "-")
+}
+
+func aliasFamily(normalizedModel string) (string, bool) {
+	for _, family := range []string{"opus", "sonnet", "haiku"} {
+		base := "claude-" + family
+		if normalizedModel == family || normalizedModel == base {
+			return family, true
+		}
+		// Claude clients send versioned family IDs such as claude-sonnet-4-5
+		// and claude-opus-4-1-20250805. Require a numeric version so unrelated
+		// names like claude-opus-copy never become family aliases by accident.
+		if suffix, ok := strings.CutPrefix(normalizedModel, base+"-"); ok && suffix != "" && suffix[0] >= '0' && suffix[0] <= '9' {
+			return family, true
+		}
+	}
+	return "", false
+}
+
+func aliasRouteForFamily(cfg *Config, family string) (Route, bool) {
+	if cfg == nil {
+		return Route{}, false
+	}
+	if route, ok := cfg.AliasRoutes[family]; ok {
+		return route, true
+	}
+	// Backward compatibility for configs written before alias_routes existed.
+	route, ok := cfg.Routes[family]
+	return route, ok
 }
 
 // modelDef is one catalog entry: a canonical ID, accepted aliases, and the
@@ -749,6 +811,12 @@ func (s *server) effectiveAliases() map[string]Route {
 func (s *server) routeFor(model string) (Route, error) {
 	cfg := s.cfg.Load()
 	normalizedModel := normalizeModelID(model)
+	if family, ok := aliasFamily(normalizedModel); ok {
+		if route, configured := aliasRouteForFamily(cfg, family); configured {
+			return route, nil
+		}
+		return Route{}, fmt.Errorf("model alias %q has no configured alias route", model)
+	}
 	aliases := s.effectiveAliases()
 
 	if r, ok := aliases[normalizedModel]; ok {
@@ -769,14 +837,6 @@ func (s *server) routeFor(model string) (Route, error) {
 	if parts := strings.SplitN(model, "/", 3); len(parts) == 3 {
 		if _, ok := cfg.Providers[parts[1]]; ok {
 			return Route{Provider: parts[1], Model: parts[2]}, nil
-		}
-	}
-
-	for _, fam := range []string{"opus", "sonnet", "haiku"} {
-		if strings.Contains(normalizedModel, fam) {
-			if r, ok := cfg.Routes[fam]; ok {
-				return r, nil
-			}
 		}
 	}
 
@@ -868,6 +928,13 @@ func loadConfig(path string) (*Config, error) {
 		}
 		c.Routes[k] = r
 	}
+	for k, r := range c.AliasRoutes {
+		r.SystemPrepend = ""
+		for i := range r.Fallbacks {
+			r.Fallbacks[i].SystemPrepend = ""
+		}
+		c.AliasRoutes[k] = r
+	}
 
 	for k, r := range c.Aliases {
 		r.SystemPrepend = ""
@@ -884,6 +951,15 @@ func validateConfig(cfg *Config) error {
 	for slot, route := range cfg.Routes {
 		if _, ok := cfg.Providers[route.Provider]; !ok {
 			return fmt.Errorf("route %q: provider %q not defined", slot, route.Provider)
+		}
+	}
+	for family, route := range cfg.AliasRoutes {
+		canonical, ok := aliasFamily(family)
+		if !ok || canonical != family {
+			return fmt.Errorf("alias route %q: expected opus, sonnet, or haiku", family)
+		}
+		if err := validateRouteProviders("alias route "+strconv.Quote(family), route, cfg.Providers); err != nil {
+			return err
 		}
 	}
 	for name, e := range cfg.Effort {
@@ -919,6 +995,18 @@ func validateConfig(cfg *Config) error {
 			default:
 				return fmt.Errorf("model %q: unsupported catalog reasoning effort %q", id, effort)
 			}
+		}
+	}
+	return nil
+}
+
+func validateRouteProviders(label string, route Route, providers map[string]Provider) error {
+	if _, ok := providers[route.Provider]; !ok {
+		return fmt.Errorf("%s: provider %q not defined", label, route.Provider)
+	}
+	for i, fallback := range route.Fallbacks {
+		if err := validateRouteProviders(fmt.Sprintf("%s fallback %d", label, i+1), fallback, providers); err != nil {
+			return err
 		}
 	}
 	return nil

@@ -15,6 +15,35 @@ type resolvedModel struct {
 	ImageOnly         bool
 }
 
+// legacyCodexModelID keeps tasks created by older ACC catalogs working. Only
+// Sol/Terra/Luna are advertised; family and old provider-flavoured IDs remain
+// accepted without cluttering the picker.
+func legacyCodexModelID(modelID string) string {
+	switch normalizeModelID(modelID) {
+	case "opus", "openai/codex-5.6-sol":
+		return codexOpusID
+	case "sonnet", "openai/codex-5.6-terra":
+		return codexSonnetID
+	case "haiku", "openai/codex-5.6-luna":
+		return codexHaikuID
+	default:
+		return modelID
+	}
+}
+
+// normalizeLegacyResponsesRequest upgrades old IDs and the retired High effort
+// name. Current public models expose only Max, including resumed older tasks.
+func normalizeLegacyResponsesRequest(req *ResponsesRequest) {
+	if req == nil {
+		return
+	}
+	req.Model = legacyCodexModelID(req.Model)
+	if req.Reasoning != nil && req.Reasoning.Effort == "high" &&
+		(req.Model == codexOpusID || req.Model == codexSonnetID || req.Model == codexHaikuID) {
+		req.Reasoning.Effort = "max"
+	}
+}
+
 func enabledModelIDs(cfg *Config) []string {
 	ids := make([]string, 0, len(cfg.Models))
 	for id, capability := range cfg.Models {
@@ -54,20 +83,21 @@ func resolveCapabilityRoute(cfg *Config, id string, capability ModelCapability) 
 
 func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
 	cfg := s.cfg.Load()
-	if capability, ok := cfg.Models[modelID]; ok {
+	resolvedID := legacyCodexModelID(modelID)
+	if capability, ok := cfg.Models[resolvedID]; ok {
 		if !capability.Enabled {
 			return nil, fmt.Errorf("selected model %q is disabled", modelID)
 		}
-		route, err := resolveCapabilityRoute(cfg, modelID, capability)
+		route, err := resolveCapabilityRoute(cfg, resolvedID, capability)
 		if err != nil {
 			return nil, err
 		}
-		chain := []resolvedModel{{ID: modelID, Capability: capability, Route: route}}
-		seen := map[string]bool{modelID: true}
+		chain := []resolvedModel{{ID: resolvedID, Capability: capability, Route: route}}
+		seen := map[string]bool{resolvedID: true}
 		for _, fallbackID := range configuredFallbackModels(capability) {
 			fallback, ok := cfg.Models[fallbackID]
 			if !ok || !fallback.Enabled {
-				return nil, fmt.Errorf("model %q configures unavailable fallback model %q", modelID, fallbackID)
+				return nil, fmt.Errorf("model %q configures unavailable fallback model %q", resolvedID, fallbackID)
 			}
 			fallbackRoute, err := resolveCapabilityRoute(cfg, fallbackID, fallback)
 			if err != nil {
@@ -79,13 +109,29 @@ func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
 		if capability.ImageModel != "" && !seen[capability.ImageModel] {
 			imageCapability, ok := cfg.Models[capability.ImageModel]
 			if !ok || !imageCapability.Enabled {
-				return nil, fmt.Errorf("model %q configures unavailable image model %q", modelID, capability.ImageModel)
+				return nil, fmt.Errorf("model %q configures unavailable image model %q", resolvedID, capability.ImageModel)
 			}
 			imageRoute, err := resolveCapabilityRoute(cfg, capability.ImageModel, imageCapability)
 			if err != nil {
 				return nil, err
 			}
 			chain = append(chain, resolvedModel{ID: capability.ImageModel, Capability: imageCapability, Route: imageRoute, Fallback: true, ImageOnly: true})
+			seen[capability.ImageModel] = true
+		}
+		for _, imageFallbackID := range capability.ImageFallbackModels {
+			if imageFallbackID == "" || seen[imageFallbackID] {
+				continue
+			}
+			imageFallback, ok := cfg.Models[imageFallbackID]
+			if !ok || !imageFallback.Enabled {
+				return nil, fmt.Errorf("model %q configures unavailable image fallback model %q", resolvedID, imageFallbackID)
+			}
+			imageFallbackRoute, err := resolveCapabilityRoute(cfg, imageFallbackID, imageFallback)
+			if err != nil {
+				return nil, err
+			}
+			chain = append(chain, resolvedModel{ID: imageFallbackID, Capability: imageFallback, Route: imageFallbackRoute, Fallback: true, ImageOnly: true})
+			seen[imageFallbackID] = true
 		}
 		return chain, nil
 	}
@@ -242,13 +288,23 @@ func responseInputRequirements(req *ResponsesRequest) (responseInputRequirement,
 // Opus image input this skips text-only GLM and begins on MiniMax. It never
 // reintroduces a text-only route later in the fallback chain.
 func selectResponseModelChain(req *ResponsesRequest, routes []resolvedModel) ([]resolvedModel, error) {
+	return selectResponseModelChainForInput(req, routes, 0)
+}
+
+func selectResponseModelChainForInput(req *ResponsesRequest, routes []resolvedModel, estimatedInputTokens int) ([]resolvedModel, error) {
 	requirements, err := responseInputRequirements(req)
 	if err != nil {
 		return nil, err
 	}
 	needsTools := len(req.Tools) > 0
 	needsStreaming := req.Stream
+	terraTools := legacyCodexModelID(req.Model) == codexSonnetID && needsTools
+	publicContext := 0
+	if len(routes) > 0 {
+		publicContext = routes[0].Capability.MaxContext
+	}
 	eligible := make([]resolvedModel, 0, len(routes))
+	skippedForContext := false
 	for _, target := range routes {
 		capability := target.Capability
 		if target.ImageOnly && !requirements.Image {
@@ -270,10 +326,27 @@ func selectResponseModelChain(req *ResponsesRequest, routes []resolvedModel) ([]
 		if needsStreaming && !capability.StreamingSupport {
 			continue
 		}
+		maxContext := target.Route.MaxContext
+		if maxContext == 0 {
+			maxContext = capability.MaxContext
+		}
+		if terraTools && publicContext > 0 && maxContext > 0 && maxContext < publicContext {
+			skippedForContext = true
+			continue
+		}
+		if legacyCodexModelID(req.Model) == codexSonnetID && estimatedInputTokens > 0 {
+			maxOutput := responseOutputBudget(req, target)
+			if maxContext > 0 && estimatedInputTokens+maxOutput > maxContext {
+				skippedForContext = true
+				continue
+			}
+		}
 		eligible = append(eligible, target)
 	}
 	if len(eligible) == 0 {
 		switch {
+		case skippedForContext:
+			return nil, fmt.Errorf("model %q request is too large for every configured route; use 5.6 Sol or 5.6 Luna, or start a fresh thread", req.Model)
 		case requirements.Image && needsTools:
 			return nil, fmt.Errorf("model %q has no configured route that supports both image input and tool calls", req.Model)
 		case requirements.File && needsTools:
@@ -300,4 +373,25 @@ func selectResponseModelChain(req *ResponsesRequest, routes []resolvedModel) ([]
 		eligible[i].Fallback = true
 	}
 	return eligible, nil
+}
+
+// responseOutputBudget returns the output space this request can actually use
+// on one route. A smaller client limit must not be replaced by the route's
+// configured ceiling when deciding whether the request fits.
+func responseOutputBudget(req *ResponsesRequest, target resolvedModel) int {
+	requested := req.MaxOutputTokens
+	if requested == 0 {
+		requested = req.MaxTokens
+	}
+	routeLimit := target.Route.MaxTokens
+	if routeLimit == 0 {
+		routeLimit = target.Capability.MaxOutput
+	}
+	if requested == 0 {
+		return routeLimit
+	}
+	if routeLimit > 0 && requested > routeLimit {
+		return routeLimit
+	}
+	return requested
 }

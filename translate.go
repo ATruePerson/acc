@@ -78,7 +78,9 @@ func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRe
 	// the route's own effort when no bucket matches (or no effort block is
 	// configured). Without this fallback an empty effort map would silently
 	// downgrade every thinking request to "low".
-	if ar.Thinking != nil && ar.Thinking.BudgetTokens > 0 {
+	if route.ReasoningLocked {
+		or.ReasoningEffort = route.ReasoningEffort
+	} else if ar.Thinking != nil && ar.Thinking.BudgetTokens > 0 {
 		or.ReasoningEffort = bucketForBudget(ar.Thinking.BudgetTokens, cfg)
 	}
 	if or.ReasoningEffort == "" && route.ReasoningEffort != "" {
@@ -114,7 +116,7 @@ func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRe
 		}
 	}
 
-	return requestWithACCPersona(or, route)
+	return requestWithACCPersona(or, route, personaRuntimeClaudeCode)
 }
 
 // translateMessage turns one Anthropic message into one or more OpenAI

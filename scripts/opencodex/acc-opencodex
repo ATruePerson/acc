@@ -4,7 +4,7 @@ set -euo pipefail
 # Optional ACC/OpenCodex integration helper. It does not call ocx init, so it
 # cannot rewrite unrelated providers or Codex settings.
 script_dir="$(CDPATH= cd "$(dirname "$0")" && pwd)"
-repo_dir="$(CDPATH= cd "$script_dir/../.." && pwd)"
+repo_dir="${ACC_REPO_DIR:-$(CDPATH= cd "$script_dir/../.." && pwd)}"
 acc_config="${ACC_CONFIG:-$HOME/.config/acc/config.json}"
 codex_home="${CODEX_HOME:-$HOME/.codex}"
 opencodex_home="${OPENCODEX_HOME:-$HOME/.opencodex}"
@@ -86,7 +86,7 @@ PY
 
 fetch_models() {
   curl --fail --silent --show-error --max-time "$timeout_seconds" \
-    -H 'User-Agent: opencodex-acc-integration' "$(acc_url)/v1/models"
+    -H 'User-Agent: codex_cli_rs/0.144.2' "$(acc_url)/v1/models"
 }
 model_ids() {
   fetch_models | python3 -c '
@@ -191,6 +191,15 @@ start() {
   return 1
 }
 
+stop() {
+  if ! command -v ocx >/dev/null 2>&1; then
+    echo "SKIPPED: ocx is not installed"
+    return 0
+  fi
+  ocx stop >/dev/null 2>&1 || true
+  echo "PASS: OpenCodex stopped safely"
+}
+
 status() { need ocx; ocx status --json; }
 
 result() { printf '%-28s %-7s %s\n' "$1" "$2" "$3"; }
@@ -283,10 +292,11 @@ PY
 
 usage() {
   cat <<'EOF'
-Usage: scripts/opencodex/acc-opencodex <setup|start|status|doctor|restore|remove>
+Usage: scripts/opencodex/acc-opencodex <setup|start|stop|status|doctor|restore|remove>
 
 setup    Discover live ACC model IDs and configure OpenCodex's acc provider.
 start    Start ACC if needed, then start OpenCodex.
+stop     Stop OpenCodex and leave local configuration recoverable.
 status   Show OpenCodex's sanitized JSON status.
 doctor   Report deterministic PASS, FAIL, or SKIPPED checks.
 restore  Restore native Codex configuration through OpenCodex.
@@ -297,6 +307,7 @@ EOF
 case "${1:-}" in
   setup) setup ;;
   start) start ;;
+  stop) stop ;;
   status) status ;;
   doctor) doctor ;;
   restore) restore ;;

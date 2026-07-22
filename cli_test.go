@@ -9,6 +9,14 @@ import (
 	"testing"
 )
 
+func TestCodexExperimentalNoticeIsExplicit(t *testing.T) {
+	for _, word := range []string{"experimental", "work in progress", "restore"} {
+		if !strings.Contains(strings.ToLower(codexExperimentalNotice), word) {
+			t.Fatalf("Codex warning is missing %q: %s", word, codexExperimentalNotice)
+		}
+	}
+}
+
 func TestFindCodexDesktopAppUsesExistingChatGPTApp(t *testing.T) {
 	home := t.TempDir()
 	app := filepath.Join(home, "Applications", "ChatGPT.app")
@@ -73,9 +81,9 @@ func TestCodexModelCatalogHasNamedModels(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []struct{ slug, display string }{
-		{"haiku", "Haiku"},
-		{"opus", "Opus"},
-		{"sonnet", "Sonnet"},
+		{codexOpusID, "5.6 Sol"},
+		{codexSonnetID, "5.6 Terra"},
+		{codexHaikuID, "5.6 Luna"},
 	}
 	if len(catalog.Models) != len(want) {
 		t.Fatalf("got %d models, want %d", len(catalog.Models), len(want))
@@ -126,7 +134,7 @@ func TestConfigureAndRestoreCodexApp(t *testing.T) {
 	text := string(configured)
 	for _, required := range []string{
 		`sandbox_mode = "workspace-write"`,
-		`model = "opus"`,
+		`model = "gpt-5.6-sol"`,
 		`model_provider = "acc"`,
 		`model_catalog_json = "` + catalogPath + `"`,
 		`web_search = "disabled"`,
@@ -150,7 +158,7 @@ func TestConfigureAndRestoreCodexApp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(switched), `model = "sonnet"`) {
+	if !strings.Contains(string(switched), `model = "gpt-5.6-terra"`) {
 		t.Fatalf("second launch did not switch models:\n%s", switched)
 	}
 
@@ -206,7 +214,7 @@ func TestDefaultConfigIsValidAndLoads(t *testing.T) {
 	}
 }
 
-func TestDefaultConfigUsesRequestedOpusSonnetHaikuAliases(t *testing.T) {
+func TestDefaultConfigExposesOnlySolTerraLunaInOrder(t *testing.T) {
 	b, err := os.ReadFile("config.json")
 	if err != nil {
 		t.Fatal(err)
@@ -216,23 +224,29 @@ func TestDefaultConfigUsesRequestedOpusSonnetHaikuAliases(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, id := range []string{"opus", "sonnet", "haiku"} {
+	want := []struct{ id, display string }{
+		{"gpt-5.6-sol", "5.6 Sol"},
+		{"gpt-5.6-terra", "5.6 Terra"},
+		{"gpt-5.6-luna", "5.6 Luna"},
+	}
+	for _, expected := range want {
+		id := expected.id
 		capability, ok := cfg.Models[id]
 		if !ok || !capability.Enabled {
-			t.Errorf("required model alias %q is missing or disabled", id)
+			t.Errorf("required Codex model %q is missing or disabled", id)
 		}
-		if capability.DisplayName != strings.ToUpper(id[:1])+id[1:] {
+		if capability.DisplayName != expected.display {
 			t.Errorf("alias %q display name = %q", id, capability.DisplayName)
-		}
-	}
-	for _, forbidden := range []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} {
-		if _, exists := cfg.Models[forbidden]; exists {
-			t.Errorf("retired Sol/Terra/Luna alias remains configured: %q", forbidden)
 		}
 	}
 	visible := codexNamedModels(&cfg)
 	if len(visible) != 3 {
-		t.Fatalf("user-facing catalog has %d models, want only Opus/Sonnet/Haiku", len(visible))
+		t.Fatalf("user-facing catalog has %d models, want only Sol/Terra/Luna", len(visible))
+	}
+	for i, model := range visible {
+		if model.ID != want[i].id || model.Display != want[i].display {
+			t.Fatalf("catalog position %d = %s/%s, want %s/%s", i, model.ID, model.Display, want[i].id, want[i].display)
+		}
 	}
 	for _, entry := range codexModelCatalogEntries(&cfg) {
 		if entry["default_reasoning_level"] != "max" {

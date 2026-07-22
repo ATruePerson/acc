@@ -105,6 +105,26 @@ func translateFromResponsesWithTools(req *ResponsesRequest, route Route, cfg *Co
 						Role:    item.Role,
 						Content: content,
 					})
+				case "reasoning":
+					if len(item.Summary) == 0 {
+						continue
+					}
+					var summary strings.Builder
+					for _, part := range item.Summary {
+						if part.Text == "" {
+							continue
+						}
+						if summary.Len() > 0 {
+							summary.WriteString("\n")
+						}
+						summary.WriteString(part.Text)
+					}
+					if summary.Len() > 0 {
+						or.Messages = append(or.Messages, OpenAIMessage{
+							Role:             "assistant",
+							ReasoningContent: jsonString(summary.String()),
+						})
+					}
 				case "function_call":
 					id := item.CallID
 					if id == "" {
@@ -115,11 +135,19 @@ func translateFromResponsesWithTools(req *ResponsesRequest, route Route, cfg *Co
 						id = parts[0]
 						thoughtSig = parts[1]
 					}
+					functionName := item.Name
+					if item.Namespace != "" {
+						definition, ok := translation.namespaceForQualifiedName(item.Namespace, item.Name)
+						if !ok {
+							return nil, nil, fmt.Errorf("namespace tool call %q.%q has no matching definition", item.Namespace, item.Name)
+						}
+						functionName = definition.BridgeName
+					}
 					toolCall := OpenAIToolCall{
 						ID:   id,
 						Type: "function",
 						Function: OpenAIFuncCall{
-							Name:             item.Name,
+							Name:             functionName,
 							Arguments:        item.Arguments,
 							ThoughtSignature: thoughtSig,
 						},
@@ -267,6 +295,12 @@ func translateToResponsesWithTools(or *OpenAIResponse, model string, translation
 	if len(or.Choices) > 0 {
 		ch := or.Choices[0]
 		if ch.Message != nil {
+			if reasoning := decodeStringContent(ch.Message.ReasoningContent); reasoning != "" {
+				resp.Output = append(resp.Output, ResponsesItem{
+					ID: "rs_" + randID(), Type: "reasoning", Status: "completed",
+					Summary: []ResponsesSummary{{Type: "summary_text", Text: reasoning}},
+				})
+			}
 			// If there's content, add message item
 			txt := decodeStringContent(ch.Message.Content)
 			if txt != "" {
@@ -284,17 +318,6 @@ func translateToResponsesWithTools(or *OpenAIResponse, model string, translation
 			// Restore native custom calls from ACC's single-string bridge while
 			// leaving ordinary function/MCP calls untouched.
 			for _, tc := range ch.Message.ToolCalls {
-				if definition, ok := translation.customForBridge(tc.Function.Name); ok {
-					input, err := customToolInput(tc.Function.Arguments)
-					if err != nil {
-						return nil, fmt.Errorf("restore custom tool %q: %w", definition.Name, err)
-					}
-					resp.Output = append(resp.Output, ResponsesItem{
-						ID: "ctc_" + randID(), Type: "custom_tool_call", Status: "completed",
-						CallID: tc.ID, Name: definition.Name, Input: input,
-					})
-					continue
-				}
 				callID := tc.ID
 				thoughtSig := tc.Function.ThoughtSignature
 				if tc.ExtraContent != nil && tc.ExtraContent.Google != nil && tc.ExtraContent.Google.ThoughtSignature != "" {
@@ -302,6 +325,24 @@ func translateToResponsesWithTools(or *OpenAIResponse, model string, translation
 				}
 				if thoughtSig != "" {
 					callID += "__thought__" + thoughtSig
+				}
+				if definition, ok := translation.customForBridge(tc.Function.Name); ok {
+					input, err := customToolInput(tc.Function.Arguments)
+					if err != nil {
+						return nil, fmt.Errorf("restore custom tool %q: %w", definition.Name, err)
+					}
+					resp.Output = append(resp.Output, ResponsesItem{
+						ID: "ctc_" + randID(), Type: "custom_tool_call", Status: "completed",
+						CallID: callID, Name: definition.Name, Input: input,
+					})
+					continue
+				}
+				if definition, ok := translation.namespaceForBridge(tc.Function.Name); ok {
+					resp.Output = append(resp.Output, ResponsesItem{
+						ID: "fc_" + randID(), Type: "function_call", Status: "completed",
+						CallID: callID, Namespace: definition.Namespace, Name: definition.Name, Arguments: tc.Function.Arguments,
+					})
+					continue
 				}
 				resp.Output = append(resp.Output, ResponsesItem{
 					ID:        "fc_" + randID(),
@@ -352,6 +393,13 @@ func (s *server) executeUpstream(
 			return nil, resolvedModel{}, err
 		}
 		requestForRoute.Model = currentRoute.Model
+		if currentRoute.Temperature != nil {
+			requestForRoute.Temperature = currentRoute.Temperature
+		}
+		if currentRoute.TopP != nil {
+			requestForRoute.TopP = currentRoute.TopP
+		}
+		requestForRoute.MaxTokens = boundedOutputTokens(or.MaxTokens, currentRoute.MaxTokens)
 		requestForRoute.ReasoningEffort = ""
 		effortExtra, err := applyReasoningTarget(requestForRoute, target, requestedReasoningEffort)
 		if err != nil {
@@ -485,6 +533,10 @@ func (s *server) executeUpstream(
 
 // streamTranslateResponses rewrites OpenAI stream chunk payloads to Responses API SSE stream format.
 func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model string, translations ...*responseToolTranslation) (int, int) {
+	return streamTranslateResponsesWithCompletion(w, body, model, nil, translations...)
+}
+
+func streamTranslateResponsesWithCompletion(w http.ResponseWriter, body io.Reader, model string, onCompletion func(*ResponsesResponse), translations ...*responseToolTranslation) (int, int) {
 	translation := newResponseToolTranslation()
 	if len(translations) > 0 && translations[0] != nil {
 		translation = translations[0]
@@ -523,6 +575,10 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 		itemID          string
 		textOpen        = false
 		accumulatedText string
+		reasoningOpen   = false
+		reasoningID     string
+		reasoningText   string
+		reasoningIndex  = -1
 		nextIndex       = 0
 		textIndex       = -1
 		toolBlocks      = map[int]string{} // map tc.Index -> toolItemID
@@ -531,13 +587,52 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 		toolNames       = map[int]string{}
 		toolArgs        = map[int]string{}
 		toolCustom      = map[int]*customToolDefinition{}
+		toolNamespace   = map[int]*namespaceToolDefinition{}
 		toolOrder       []int
 		completedItems  []any
 		inputTokens     = 0
 		outputTokens    = 0
+		sawDone         = false
 	)
 
+	ensureReasoningCreated := func() {
+		if reasoningOpen {
+			return
+		}
+		reasoningID = "rs_" + randID()
+		reasoningIndex = nextIndex
+		nextIndex++
+		reasoningOpen = true
+		send("response.output_item.added", map[string]any{
+			"type": "response.output_item.added", "response_id": respID,
+			"output_index": reasoningIndex,
+			"item":         map[string]any{"id": reasoningID, "type": "reasoning", "status": "in_progress", "summary": []any{}},
+		})
+	}
+	closeReasoning := func() {
+		if !reasoningOpen {
+			return
+		}
+		item := map[string]any{
+			"id": reasoningID, "type": "reasoning", "status": "completed",
+			"summary": []any{map[string]any{"type": "summary_text", "text": reasoningText}},
+		}
+		send("response.reasoning_summary_text.done", map[string]any{
+			"type": "response.reasoning_summary_text.done", "response_id": respID,
+			"output_index": reasoningIndex, "item_id": reasoningID, "text": reasoningText,
+		})
+		send("response.output_item.done", map[string]any{
+			"type": "response.output_item.done", "response_id": respID,
+			"output_index": reasoningIndex, "item": item,
+		})
+		completedItems = append(completedItems, item)
+		reasoningOpen = false
+		reasoningID = ""
+		reasoningText = ""
+	}
+
 	ensureMessageCreated := func() {
+		closeReasoning()
 		if !textOpen && itemID == "" {
 			itemID = "item_" + randID()
 			textIndex = nextIndex
@@ -606,6 +701,7 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 		}
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if payload == "[DONE]" {
+			sawDone = true
 			break
 		}
 
@@ -642,11 +738,20 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 				"delta":         txt,
 			})
 		}
+		if reasoning := decodeStringContent(ch.Delta.ReasoningContent); reasoning != "" {
+			ensureReasoningCreated()
+			reasoningText += reasoning
+			send("response.reasoning_summary_text.delta", map[string]any{
+				"type": "response.reasoning_summary_text.delta", "response_id": respID,
+				"output_index": reasoningIndex, "item_id": reasoningID, "delta": reasoning,
+			})
+		}
 
 		// Tool call deltas
 		for _, tc := range ch.Delta.ToolCalls {
 			toolItemID, exists := toolBlocks[tc.Index]
 			if !exists {
+				closeReasoning()
 				closeMessage()
 				toolItemID = "fc_" + randID()
 				toolBlocks[tc.Index] = toolItemID
@@ -661,6 +766,10 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 					copy := definition
 					toolCustom[tc.Index] = &copy
 				}
+				if definition, ok := translation.namespaceForBridge(toolNames[tc.Index]); ok {
+					copy := definition
+					toolNamespace[tc.Index] = &copy
+				}
 				itemType := "function_call"
 				itemFields := map[string]any{
 					"id": toolItemID, "type": itemType, "status": "in_progress",
@@ -672,6 +781,10 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 						"id": toolItemID, "type": itemType, "status": "in_progress",
 						"call_id": toolCallIDs[tc.Index], "name": custom.Name, "input": "",
 					}
+				}
+				if namespace := toolNamespace[tc.Index]; namespace != nil {
+					itemFields["namespace"] = namespace.Namespace
+					itemFields["name"] = namespace.Name
 				}
 				send("response.output_item.added", map[string]any{
 					"type":         "response.output_item.added",
@@ -689,6 +802,10 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 					copy := definition
 					toolCustom[tc.Index] = &copy
 				}
+				if definition, ok := translation.namespaceForBridge(tc.Function.Name); ok {
+					copy := definition
+					toolNamespace[tc.Index] = &copy
+				}
 			}
 			if tc.Function.Arguments != "" {
 				toolArgs[tc.Index] += tc.Function.Arguments
@@ -704,11 +821,13 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		log.Printf("responses streaming scan: %v", err)
+	scanErr := scanner.Err()
+	if scanErr != nil {
+		log.Printf("responses streaming scan: %v", scanErr)
 	}
 
 	closeMessage()
+	closeReasoning()
 
 	// Done for tools
 	for _, idx := range toolOrder {
@@ -747,18 +866,29 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 			completedItems = append(completedItems, toolItem)
 			continue
 		}
-		send("response.function_call_arguments.done", map[string]any{
+		name := toolNames[idx]
+		namespace := ""
+		if definition := toolNamespace[idx]; definition != nil {
+			name = definition.Name
+			namespace = definition.Namespace
+		}
+		argumentsDone := map[string]any{
 			"type":         "response.function_call_arguments.done",
 			"response_id":  respID,
 			"output_index": toolIndexMap[idx],
 			"item_id":      toolItemID,
-			"name":         toolNames[idx],
+			"name":         name,
 			"arguments":    toolArgs[idx],
-		})
+		}
 		toolItem := map[string]any{
 			"id": toolItemID, "type": "function_call", "status": "completed",
-			"call_id": toolCallIDs[idx], "name": toolNames[idx], "arguments": toolArgs[idx],
+			"call_id": toolCallIDs[idx], "name": name, "arguments": toolArgs[idx],
 		}
+		if namespace != "" {
+			argumentsDone["namespace"] = namespace
+			toolItem["namespace"] = namespace
+		}
+		send("response.function_call_arguments.done", argumentsDone)
 		send("response.output_item.done", map[string]any{
 			"type":         "response.output_item.done",
 			"response_id":  respID,
@@ -768,17 +898,37 @@ func streamTranslateResponses(w http.ResponseWriter, body io.Reader, model strin
 		completedItems = append(completedItems, toolItem)
 	}
 
-	send("response.completed", map[string]any{
-		"type": "response.completed",
+	status := "completed"
+	event := "response.completed"
+	if scanErr != nil || !sawDone {
+		status = "incomplete"
+		event = "response.incomplete"
+	}
+	completedResponse := &ResponsesResponse{
+		ID: "", Object: "response", CreatedAt: time.Now().Unix(), Model: model,
+		Status: status, Output: make([]ResponsesItem, 0),
+		Usage: &ResponsesUsage{InputTokens: inputTokens, OutputTokens: outputTokens, TotalTokens: inputTokens + outputTokens},
+	}
+	responseOutput, _ := json.Marshal(completedItems)
+	_ = json.Unmarshal(responseOutput, &completedResponse.Output)
+	if status == "incomplete" {
+		completedResponse.IncompleteDetails = map[string]any{"reason": "upstream_stream_ended"}
+	}
+	send(event, map[string]any{
+		"type": event,
 		"response": map[string]any{
 			"id": respID, "object": "response", "model": model,
-			"status": "completed", "output": completedItems,
+			"status": status, "output": completedItems,
 			"usage": map[string]any{
 				"input_tokens": inputTokens, "output_tokens": outputTokens,
 				"total_tokens": inputTokens + outputTokens,
 			},
 		},
 	})
+	completedResponse.ID = respID
+	if onCompletion != nil {
+		onCompletion(completedResponse)
+	}
 
 	return inputTokens, outputTokens
 }
@@ -799,6 +949,7 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "parse request: "+err.Error())
 		return
 	}
+	normalizeLegacyResponsesRequest(&req)
 
 	logit := func(routeModel string, status, in, out int, effort string) {
 		AddTUILog(LogEntry{
@@ -813,6 +964,12 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 			CostUSD:   costFor(routeModel, in, out, cfg),
 		})
 	}
+	if err := s.applyPreviousResponse(&req); err != nil {
+		httpErr(w, http.StatusNotFound, err.Error())
+		logit("error", http.StatusNotFound, 0, 0, "")
+		return
+	}
+	requestForSizing, _ := json.Marshal(req)
 
 	routes, err := s.responseModelChain(req.Model)
 	if err != nil {
@@ -820,7 +977,7 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		logit("error", 400, 0, 0, "")
 		return
 	}
-	routes, err = selectResponseModelChain(&req, routes)
+	routes, err = selectResponseModelChainForInput(&req, routes, estimateResponsesInputTokens(requestForSizing))
 	if err != nil {
 		httpErr(w, 400, err.Error())
 		logit("error", 400, 0, 0, "")
@@ -848,6 +1005,14 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "translate: "+err.Error())
 		logit(primary.Route.Model, 400, 0, 0, "")
 		return
+	}
+	// executeUpstream applies each concrete route's overrides. Restore the
+	// client controls here so a fallback cannot inherit primary-only settings.
+	or.Temperature = req.Temperature
+	or.TopP = req.TopP
+	or.MaxTokens = req.MaxOutputTokens
+	if or.MaxTokens == 0 {
+		or.MaxTokens = req.MaxTokens
 	}
 
 	resp, activeRoute, err := s.executeUpstream(r.Context(), or, routes, cfg, logit, w)
@@ -881,7 +1046,11 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-		inTokens, outTokens := streamTranslateResponses(w, resp.Body, req.Model, translation)
+		inTokens, outTokens := streamTranslateResponsesWithCompletion(w, resp.Body, req.Model, func(response *ResponsesResponse) {
+			if responsesShouldStore(&req) {
+				s.rememberResponse(response)
+			}
+		}, translation)
 		logit(activeRoute.Route.Model, resp.StatusCode, inTokens, outTokens, or.ReasoningEffort)
 		return
 	}
@@ -900,6 +1069,9 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		logit(activeRoute.Route.Model, 502, 0, 0, or.ReasoningEffort)
 		return
 	}
+	if responsesShouldStore(&req) {
+		s.rememberResponse(out)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(out)
 
@@ -911,11 +1083,36 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	logit(activeRoute.Route.Model, resp.StatusCode, tokensIn, tokensOut, or.ReasoningEffort)
 }
 
+func responsesShouldStore(req *ResponsesRequest) bool {
+	return req == nil || req.Store == nil || *req.Store
+}
+
+// estimateResponsesInputTokens uses three payload bytes per token. This keeps a
+// safety margin for dense JSON, code, and three-byte UTF-8 text without the
+// false 2x overcount that rejected valid compacted Codex threads.
+func estimateResponsesInputTokens(raw []byte) int {
+	return (len(raw) + 2) / 3
+}
+
+// boundedOutputTokens preserves a client's smaller output request while still
+// enforcing the concrete route's maximum. A zero means "use the other value".
+func boundedOutputTokens(requested, routeLimit int) int {
+	switch {
+	case requested <= 0:
+		return routeLimit
+	case routeLimit <= 0 || requested <= routeLimit:
+		return requested
+	default:
+		return routeLimit
+	}
+}
+
 func setBackendHeaders(w http.ResponseWriter, requestedModel string, active resolvedModel, requestedEffort string) {
 	w.Header().Set("X-ACC-Requested-Model", requestedModel)
 	w.Header().Set("X-ACC-Backend-Provider", active.Route.Provider)
 	w.Header().Set("X-ACC-Backend-Model", active.Route.Model)
 	w.Header().Set("X-ACC-Fallback", fmt.Sprintf("%t", active.Fallback))
+	w.Header().Set("X-ACC-Capability-Reroute", fmt.Sprintf("%t", active.CapabilityReroute))
 	if requestedEffort != "" {
 		w.Header().Set("X-ACC-Requested-Effort", requestedEffort)
 	}

@@ -5,14 +5,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
 
 const (
-	codexOpusID   = "opus"
-	codexSonnetID = "sonnet"
-	codexHaikuID  = "haiku"
+	codexOpusID   = "gpt-5.6-sol"
+	codexSonnetID = "gpt-5.6-terra"
+	codexHaikuID  = "gpt-5.6-luna"
 )
 
 type codexNamedModel struct {
@@ -39,6 +40,19 @@ func codexNamedModels(cfg *Config) []codexNamedModel {
 		}
 		models = append(models, codexNamedModel{ID: id, Display: display, Capability: capability, Route: route})
 	}
+	sort.SliceStable(models, func(i, j int) bool {
+		left, right := models[i].Capability.CatalogPriority, models[j].Capability.CatalogPriority
+		if left == 0 {
+			left = int(^uint(0) >> 1)
+		}
+		if right == 0 {
+			right = int(^uint(0) >> 1)
+		}
+		if left != right {
+			return left < right
+		}
+		return models[i].ID < models[j].ID
+	})
 	return models
 }
 
@@ -61,17 +75,26 @@ func codexModelCatalogEntries(cfg *Config) []map[string]any {
 			}
 		}
 		modalities := []string{"text"}
-		if model.Capability.ImageInputSupport {
+		supportsImages := model.Capability.ImageInputSupport || model.Capability.ImageModel != "" || len(model.Capability.ImageFallbackModels) > 0
+		if supportsImages {
 			modalities = append(modalities, "image")
+		}
+		description := model.Capability.Description
+		if description == "" {
+			description = fmt.Sprintf("Kabir's Second Brain via %s/%s", model.Route.Provider, model.Route.Model)
+		}
+		effectiveContextPercent := 95
+		if model.ID == codexSonnetID && model.Capability.MaxContext > 0 && model.Capability.MaxOutput < model.Capability.MaxContext {
+			effectiveContextPercent = (model.Capability.MaxContext - model.Capability.MaxOutput) * 100 / model.Capability.MaxContext
 		}
 		entries = append(entries, map[string]any{
 			"slug": model.ID, "display_name": model.Display,
-			"description": fmt.Sprintf("Kabir's Second Brain via %s/%s", model.Route.Provider, model.Route.Model), "default_reasoning_level": defaultEffort,
+			"description": description, "default_reasoning_level": defaultEffort,
 			"supported_reasoning_levels": levels, "shell_type": "shell_command",
 			"visibility": "list", "supported_in_api": true, "priority": i + 1,
 			"additional_speed_tiers": []string{}, "service_tiers": []any{},
 			"availability_nux": nil, "upgrade": nil,
-			"base_instructions": accPersona(model.Route.Provider, model.Route.Model),
+			"base_instructions": accPersonaForRuntime(model.Route.Provider, model.Route.Model, personaRuntimeCodex),
 			"model_messages": map[string]any{
 				"instructions_template": nil, "instructions_variables": nil, "approvals": nil,
 			},
@@ -80,10 +103,10 @@ func codexModelCatalogEntries(cfg *Config) []map[string]any {
 			"support_verbosity": false, "default_verbosity": "low",
 			"apply_patch_tool_type":        "freeform",
 			"truncation_policy":            map[string]any{"mode": "tokens", "limit": 10000},
-			"supports_parallel_tool_calls": model.Capability.ToolCallSupport, "supports_image_detail_original": model.Capability.ImageInputSupport,
+			"supports_parallel_tool_calls": model.Capability.ToolCallSupport, "supports_image_detail_original": supportsImages,
 			"context_window": model.Capability.MaxContext, "max_context_window": model.Capability.MaxContext,
 			"max_output_tokens": model.Capability.MaxOutput,
-			"comp_hash":         "acc", "effective_context_window_percent": 95,
+			"comp_hash":         "acc", "effective_context_window_percent": effectiveContextPercent,
 			"experimental_supported_tools": []any{}, "input_modalities": modalities,
 			"supports_search_tool": false, "use_responses_lite": false,
 			"tool_mode": "code_mode_only", "multi_agent_version": "v1",

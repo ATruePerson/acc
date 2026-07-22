@@ -15,17 +15,23 @@ func boolPtr(v bool) *bool { return &v }
 func codexTestConfig() *Config {
 	return &Config{
 		Providers: map[string]Provider{
-			"nvidia":   {BaseURL: "https://nvidia.test", APIKey: "nvidia-key"},
-			"opencode": {BaseURL: "https://opencode.test", APIKey: "opencode-key"},
+			"nvidia":     {BaseURL: "https://nvidia.test", APIKey: "nvidia-key"},
+			"opencode":   {BaseURL: "https://opencode.test", APIKey: "opencode-key"},
+			"openrouter": {BaseURL: "https://openrouter.test", APIKey: "openrouter-key"},
 		},
 		Routes: map[string]Route{
+			"sol":   {Provider: "nvidia", Model: "z-ai/glm-5.2", Toolcalling: boolPtr(true)},
+			"terra": {Provider: "opencode", Model: "big-pickle", MaxContext: 131072, MaxTokens: 48000, Toolcalling: boolPtr(true)},
+			"luna":  {Provider: "nvidia", Model: "stepfun-ai/step-3.7-flash", Toolcalling: boolPtr(true)},
+		},
+		AliasRoutes: map[string]Route{
 			"opus":   {Provider: "nvidia", Model: "z-ai/glm-5.2", Toolcalling: boolPtr(true)},
 			"sonnet": {Provider: "opencode", Model: "big-pickle", Toolcalling: boolPtr(true)},
 			"haiku":  {Provider: "nvidia", Model: "stepfun-ai/step-3.7-flash", Toolcalling: boolPtr(true)},
 		},
 		Models: map[string]ModelCapability{
-			"opus": {
-				DisplayName: "Opus", Route: "opus", Enabled: true,
+			codexOpusID: {
+				DisplayName: "5.6 Sol", CatalogPriority: 1, Route: "sol", Enabled: true,
 				Reasoning: map[string]ReasoningTarget{
 					"minimal": {}, "low": {Effort: "low"}, "medium": {Effort: "medium"},
 					"high": {Effort: "high"}, "xhigh": {Effort: "xhigh"},
@@ -33,17 +39,17 @@ func codexTestConfig() *Config {
 				ToolCallSupport: true, StreamingSupport: true, ImageInputSupport: true,
 				MaxContext: 131072, MaxOutput: 131072,
 			},
-			"sonnet": {
-				DisplayName: "Sonnet", Route: "sonnet", Enabled: true,
+			codexSonnetID: {
+				DisplayName: "5.6 Terra", CatalogPriority: 2, Route: "terra", Enabled: true,
 				Reasoning: map[string]ReasoningTarget{
 					"minimal": {}, "low": {Effort: "low"}, "medium": {Effort: "medium"},
 					"high": {Effort: "high"}, "xhigh": {Effort: "xhigh"}, "max": {Effort: "max"},
 				},
 				ToolCallSupport: true, StreamingSupport: true, FileInputSupport: true,
-				MaxContext: 131072, MaxOutput: 48000,
+				MaxContext: 262144, MaxOutput: 65536,
 			},
-			"haiku": {
-				DisplayName: "Haiku", Route: "haiku", Enabled: true,
+			codexHaikuID: {
+				DisplayName: "5.6 Luna", CatalogPriority: 3, Route: "luna", Enabled: true,
 				Reasoning:        map[string]ReasoningTarget{"minimal": {}, "low": {Effort: "low"}},
 				StreamingSupport: true, ImageInputSupport: true,
 				MaxContext: 131072, MaxOutput: 26000,
@@ -55,32 +61,42 @@ func codexTestConfig() *Config {
 	}
 }
 
-func TestACCPersonaHasOneIdentityAndTruthfulBackendDisclosure(t *testing.T) {
-	prompt := accPersona("nvidia", "z-ai/glm-5.2")
-	for _, want := range []string{
-		"Core behavior",
-		"Claude Code runtime/tool adapter",
-		"Kabir's personal instructions",
-		"Your identity is Kabir's Second Brain.",
-		`Normal identity answer: “I’m Kabir’s Second Brain.”`,
-		`This task is currently being powered by nvidia/z-ai/glm-5.2.`,
-		"Only disclose the backend when Kabir explicitly asks",
-		"Tool results are authoritative",
-		"Inspect files before modifying them",
-		"Never claim a tool succeeded",
-		"Do not repeat a destructive call",
-		"Follow repository instructions such as AGENTS.md",
-	} {
-		if !strings.Contains(prompt, want) {
-			t.Fatalf("persona missing %q:\n%s", want, prompt)
+func TestACCPersonaSeparatesCodexAndClaudeRuntimeAdapters(t *testing.T) {
+	codexPrompt := accPersonaForRuntime("nvidia", "z-ai/glm-5.2", personaRuntimeCodex)
+	claudePrompt := accPersonaForRuntime("nvidia", "z-ai/glm-5.2", personaRuntimeClaudeCode)
+	for _, prompt := range []string{codexPrompt, claudePrompt} {
+		for _, want := range []string{
+			"Core behavior",
+			"Kabir's personal instructions",
+			"Your identity is Kabir's Second Brain.",
+			`Normal identity answer: “I’m Kabir’s Second Brain.”`,
+			`This task is currently being powered by nvidia/z-ai/glm-5.2.`,
+			"Only disclose the backend when Kabir explicitly asks",
+			"Tool results are authoritative",
+			"Inspect files before modifying them",
+			"Never claim a tool succeeded",
+			"Do not repeat a destructive call",
+			"Follow repository instructions such as AGENTS.md",
+		} {
+			if !strings.Contains(prompt, want) {
+				t.Fatalf("persona missing %q:\n%s", want, prompt)
+			}
 		}
 	}
-	for _, forbidden := range []string{"You are Claude", "You are Codex", "You are ChatGPT"} {
-		if strings.Contains(prompt, forbidden) {
-			t.Fatalf("persona contains forbidden identity %q", forbidden)
+	if !strings.Contains(codexPrompt, "Codex runtime/tool adapter") || strings.Contains(codexPrompt, "Claude Code runtime/tool adapter") {
+		t.Fatalf("Codex prompt leaked the Claude adapter:\n%s", codexPrompt)
+	}
+	if !strings.Contains(claudePrompt, "Claude Code runtime/tool adapter") || strings.Contains(claudePrompt, "Codex runtime/tool adapter") {
+		t.Fatalf("Claude prompt leaked the Codex adapter:\n%s", claudePrompt)
+	}
+	for _, prompt := range []string{codexPrompt, claudePrompt} {
+		for _, forbidden := range []string{"You are Claude", "You are Codex", "You are ChatGPT"} {
+			if strings.Contains(prompt, forbidden) {
+				t.Fatalf("persona contains forbidden identity %q", forbidden)
+			}
 		}
 	}
-	namespaced := accPersona("nvidia", "nvidia/nemotron-3-super-120b-a12b")
+	namespaced := accPersonaForRuntime("nvidia", "nvidia/nemotron-3-super-120b-a12b", personaRuntimeCodex)
 	if strings.Contains(namespaced, "nvidia/nvidia/nemotron") || !strings.Contains(namespaced, "nvidia/nemotron-3-super-120b-a12b") {
 		t.Fatalf("persona has an inaccurate namespaced backend label:\n%s", namespaced)
 	}
@@ -92,6 +108,7 @@ func TestCodexCatalogComesFromEnabledCapabilityRegistry(t *testing.T) {
 			Slug             string `json:"slug"`
 			DisplayName      string `json:"display_name"`
 			BaseInstructions string `json:"base_instructions"`
+			EffectiveContext int    `json:"effective_context_window_percent"`
 			Levels           []struct {
 				Effort string `json:"effort"`
 			} `json:"supported_reasoning_levels"`
@@ -104,22 +121,28 @@ func TestCodexCatalogComesFromEnabledCapabilityRegistry(t *testing.T) {
 	if len(catalog.Models) != 3 {
 		t.Fatalf("catalog has %d models, want 3 enabled models", len(catalog.Models))
 	}
-	if catalog.Models[0].Slug != "haiku" || catalog.Models[1].Slug != "opus" || catalog.Models[2].Slug != "sonnet" {
-		t.Fatalf("catalog slugs are not stable and sorted: %+v", catalog.Models)
+	if catalog.Models[0].Slug != codexOpusID || catalog.Models[1].Slug != codexSonnetID || catalog.Models[2].Slug != codexHaikuID {
+		t.Fatalf("catalog slugs are not in Sol/Terra/Luna order: %+v", catalog.Models)
 	}
 	if !strings.Contains(catalog.Models[1].BaseInstructions, "Kabir's Second Brain") || strings.Contains(catalog.Models[1].BaseInstructions, "You are Codex") {
 		t.Fatalf("catalog has the wrong identity: %q", catalog.Models[1].BaseInstructions)
 	}
-	if catalog.Models[1].Context != 131072 {
-		t.Fatalf("context window = %d, want 131072", catalog.Models[1].Context)
+	if !strings.Contains(catalog.Models[1].BaseInstructions, "Codex runtime/tool adapter") || strings.Contains(catalog.Models[1].BaseInstructions, "Claude Code runtime/tool adapter") {
+		t.Fatalf("catalog has the wrong runtime adapter: %q", catalog.Models[1].BaseInstructions)
+	}
+	if catalog.Models[1].Context != 262144 {
+		t.Fatalf("context window = %d, want 262144", catalog.Models[1].Context)
+	}
+	if catalog.Models[1].EffectiveContext != 75 {
+		t.Fatalf("effective context = %d%%, want 75%% with output reserved", catalog.Models[1].EffectiveContext)
 	}
 	var opus, sonnet []string
 	for _, model := range catalog.Models {
 		for _, level := range model.Levels {
-			if model.Slug == "opus" {
+			if model.Slug == codexOpusID {
 				opus = append(opus, level.Effort)
 			}
-			if model.Slug == "sonnet" {
+			if model.Slug == codexSonnetID {
 				sonnet = append(sonnet, level.Effort)
 			}
 		}
@@ -129,6 +152,132 @@ func TestCodexCatalogComesFromEnabledCapabilityRegistry(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(sonnet, ","), "max") {
 		t.Fatalf("Sonnet should expose provider-supported Max: %v", sonnet)
+	}
+}
+
+func TestOversizedTerraRequestSkipsSmallContextRoute(t *testing.T) {
+	cfg := codexTestConfig()
+	terra := cfg.Models[codexSonnetID]
+	terra.MaxContext = 262144
+	terra.FallbackModels = []string{"acc-openrouter-hy3"}
+	cfg.Models[codexSonnetID] = terra
+	terraRoute := cfg.Routes["terra"]
+	terraRoute.MaxContext = 131072
+	cfg.Routes["terra"] = terraRoute
+	cfg.Models["acc-openrouter-hy3"] = ModelCapability{
+		DisplayName: "HY3", Provider: "openrouter", Model: "tencent/hy3:free", Enabled: true,
+		Reasoning:       map[string]ReasoningTarget{"max": {Effort: "high"}},
+		ToolCallSupport: true, StreamingSupport: true, MaxContext: 262144, MaxOutput: 65536,
+	}
+
+	s := testServer(cfg)
+	calledProvider := ""
+	s.http = &http.Client{Transport: &mockTripper{fn: func(req *http.Request) (*http.Response, error) {
+		calledProvider = req.URL.Host
+		return chatSuccess("ok"), nil
+	}}}
+
+	body, err := json.Marshal(map[string]any{
+		"model":     codexSonnetID,
+		"reasoning": map[string]any{"effort": "max"},
+		"input":     strings.Repeat("x", 150000),
+		"tools": []map[string]any{{
+			"type": "function", "name": "computer", "parameters": map[string]any{"type": "object"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if calledProvider != "openrouter.test" {
+		t.Fatalf("oversized Terra request reached %q, want context-capable openrouter fallback", calledProvider)
+	}
+	if w.Header().Get("X-ACC-Capability-Reroute") != "true" {
+		t.Fatalf("context reroute was not reported: %+v", w.Header())
+	}
+}
+
+func TestResponsesTokenEstimateUsesDenseInputSafetyMargin(t *testing.T) {
+	if got := estimateResponsesInputTokens(make([]byte, 200000)); got != 66667 {
+		t.Fatalf("200 KB estimate = %d, want 66667", got)
+	}
+	if got := estimateResponsesInputTokens(make([]byte, 200001)); got != 66667 {
+		t.Fatalf("odd-byte estimate = %d, want 66667", got)
+	}
+}
+
+func TestTerraContextSelectionUsesRequestedOutputBudget(t *testing.T) {
+	req := &ResponsesRequest{Model: codexSonnetID, MaxOutputTokens: 1000}
+	routes := []resolvedModel{{
+		ID: codexSonnetID,
+		Capability: ModelCapability{
+			DisplayName: "5.6 Terra", MaxContext: 131072, MaxOutput: 65536,
+			StreamingSupport: true,
+		},
+		Route: Route{Provider: "opencode", Model: "big-pickle", MaxContext: 131072, MaxTokens: 48000},
+	}}
+	selected, err := selectResponseModelChainForInput(req, routes, 130000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selected) != 1 || selected[0].Route.Model != "big-pickle" {
+		t.Fatalf("selected routes = %+v, want the primary route", selected)
+	}
+}
+
+func TestTerraLargeContextSelectsMillionTokenFallback(t *testing.T) {
+	req := &ResponsesRequest{Model: codexSonnetID, MaxOutputTokens: 8000}
+	routes := []resolvedModel{
+		{
+			ID:         codexSonnetID,
+			Capability: ModelCapability{DisplayName: "5.6 Terra", MaxContext: 262144, MaxOutput: 65536, StreamingSupport: true},
+			Route:      Route{Provider: "opencode", Model: "big-pickle", MaxContext: 131072, MaxTokens: 48000},
+		},
+		{
+			ID: "acc-openrouter-hy3", Fallback: true,
+			Capability: ModelCapability{DisplayName: "HY3", MaxContext: 262144, MaxOutput: 65536, StreamingSupport: true},
+			Route:      Route{Provider: "openrouter", Model: "tencent/hy3:free", MaxContext: 262144, MaxTokens: 65536},
+		},
+		{
+			ID: "acc-gemini-3.5-flash", Fallback: true,
+			Capability: ModelCapability{DisplayName: "Gemini 3.5 Flash", MaxContext: 1048576, MaxOutput: 65536, StreamingSupport: true},
+			Route:      Route{Provider: "gemini", Model: "gemini-3.5-flash", MaxContext: 1048576, MaxTokens: 65536},
+		},
+	}
+	selected, err := selectResponseModelChainForInput(req, routes, 300000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selected) != 1 || selected[0].Route.Model != "gemini-3.5-flash" {
+		t.Fatalf("selected routes = %+v, want Gemini long-context fallback", selected)
+	}
+}
+
+func TestResponsesRespectSmallerRequestedOutputLimit(t *testing.T) {
+	cfg := codexTestConfig()
+	s := testServer(cfg)
+	gotMaxTokens := 0
+	s.http = &http.Client{Transport: &mockTripper{fn: func(req *http.Request) (*http.Response, error) {
+		var body map[string]any
+		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		gotMaxTokens = int(body["max_tokens"].(float64))
+		return chatSuccess("ok"), nil
+	}}}
+
+	body := []byte(`{"model":"gpt-5.6-terra","input":"hello","max_output_tokens":1000,"reasoning":{"effort":"max"}}`)
+	w := httptest.NewRecorder()
+	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if gotMaxTokens != 1000 {
+		t.Fatalf("upstream max_tokens = %d, want 1000", gotMaxTokens)
 	}
 }
 
@@ -284,7 +433,11 @@ func TestEveryCodexEffortProducesItsExactProviderValue(t *testing.T) {
 			}
 			continue
 		}
-		if actual != effort {
+		want := effort
+		if effort == "high" {
+			want = "max"
+		}
+		if actual != want {
 			t.Fatalf("%s sent reasoning_effort=%v", effort, actual)
 		}
 	}
@@ -386,6 +539,14 @@ func TestUnsupportedToolTypeIsRejectedInsteadOfDropped(t *testing.T) {
 
 func TestResponsesMCPToolLoopEndToEnd(t *testing.T) {
 	cfg := codexTestConfig()
+	terra := cfg.Models[codexSonnetID]
+	terra.FallbackModels = []string{"acc-openrouter-hy3"}
+	cfg.Models[codexSonnetID] = terra
+	cfg.Models["acc-openrouter-hy3"] = ModelCapability{
+		DisplayName: "HY3", Provider: "openrouter", Model: "tencent/hy3:free", Enabled: true,
+		Reasoning:       map[string]ReasoningTarget{"max": {Effort: "high"}},
+		ToolCallSupport: true, StreamingSupport: true, MaxContext: 262144, MaxOutput: 65536,
+	}
 	s := testServer(cfg)
 	calls := 0
 	s.http = &http.Client{Transport: &mockTripper{fn: func(req *http.Request) (*http.Response, error) {
@@ -394,8 +555,8 @@ func TestResponsesMCPToolLoopEndToEnd(t *testing.T) {
 		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		if body["model"] != "big-pickle" {
-			t.Fatalf("tool loop backend = %v, want big-pickle", body["model"])
+		if body["model"] != "tencent/hy3:free" {
+			t.Fatalf("tool loop backend = %v, want context-capable HY3", body["model"])
 		}
 		if calls == 1 {
 			if body["parallel_tool_calls"] != true || body["tool_choice"] != "auto" {
@@ -504,15 +665,23 @@ func TestChatCompletionsInjectsOnlyACCPersonaAndPreservesUnknownFields(t *testin
 	if !strings.Contains(system, "Kabir's Second Brain") || !strings.Contains(system, "opencode/big-pickle") || !strings.Contains(system, "Private platform instruction that ACC must preserve.") {
 		t.Fatalf("system instructions were replaced or persona is missing: %s", system)
 	}
+	if strings.Contains(system, "Codex runtime/tool adapter") || strings.Contains(system, "Claude Code runtime/tool adapter") {
+		t.Fatalf("generic Chat Completions request received a client-specific adapter: %s", system)
+	}
 }
 
 func TestFallbackIsReportedInHeadersAndUsesFallbackPersona(t *testing.T) {
 	cfg := codexTestConfig()
-	cfg.Models["opus"] = ModelCapability{
-		DisplayName: "Opus", Route: "opus", Enabled: true,
-		FallbackModel: "sonnet",
-		Reasoning:     map[string]ReasoningTarget{"high": {Effort: "high"}},
-	}
+	primary := cfg.Models[codexOpusID]
+	primary.FallbackModel = codexSonnetID
+	primary.Reasoning = map[string]ReasoningTarget{"max": {Effort: "high"}}
+	cfg.Models[codexOpusID] = primary
+	primaryTemperature := 0.2
+	primaryTopP := 0.3
+	primaryRoute := cfg.Routes["sol"]
+	primaryRoute.Temperature = &primaryTemperature
+	primaryRoute.TopP = &primaryTopP
+	cfg.Routes["sol"] = primaryRoute
 	s := testServer(cfg)
 	calls := 0
 	s.http = &http.Client{Transport: &mockTripper{fn: func(req *http.Request) (*http.Response, error) {
@@ -529,16 +698,22 @@ func TestFallbackIsReportedInHeadersAndUsesFallbackPersona(t *testing.T) {
 		if !strings.Contains(system, "opencode/big-pickle") || strings.Contains(system, "nvidia/z-ai/glm-5.2") {
 			t.Fatalf("fallback persona is stale: %s", system)
 		}
+		if body["max_tokens"] != float64(48000) {
+			t.Fatalf("fallback max_tokens = %v, want Terra route limit 48000", body["max_tokens"])
+		}
+		if body["temperature"] != 0.9 || body["top_p"] != 0.8 {
+			t.Fatalf("fallback inherited primary controls: temperature=%v top_p=%v", body["temperature"], body["top_p"])
+		}
 		return chatSuccess("fallback ok"), nil
 	}}}
 
 	w := httptest.NewRecorder()
-	request := `{"model":"opus","input":"hello","reasoning":{"effort":"high"}}`
+	request := `{"model":"opus","input":"hello","temperature":0.9,"top_p":0.8,"reasoning":{"effort":"high"}}`
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	if w.Header().Get("X-ACC-Fallback") != "true" || w.Header().Get("X-ACC-Backend-Provider") != "opencode" || w.Header().Get("X-ACC-Backend-Model") != "big-pickle" || w.Header().Get("X-ACC-Backend-Effort") != "high" {
+	if w.Header().Get("X-ACC-Fallback") != "true" || w.Header().Get("X-ACC-Backend-Provider") != "opencode" || w.Header().Get("X-ACC-Backend-Model") != "big-pickle" || w.Header().Get("X-ACC-Backend-Effort") != "max" {
 		t.Fatalf("fallback headers missing: %+v", w.Header())
 	}
 }
@@ -778,7 +953,7 @@ func TestOpusImageDoesNotSilentlyDowngradeRequestedEffort(t *testing.T) {
 	request := `{"model":"opus","reasoning":{"effort":"high"},"input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`
 	w := httptest.NewRecorder()
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
-	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `does not support reasoning effort`) || !strings.Contains(w.Body.String(), `high`) {
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `does not support reasoning effort`) || !strings.Contains(w.Body.String(), `max`) {
 		t.Fatalf("effort error is unclear: status=%d body=%s", w.Code, w.Body.String())
 	}
 	if called {

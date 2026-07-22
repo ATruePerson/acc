@@ -10,15 +10,27 @@ const (
 	accPersonaEnd   = "</acc_persona>"
 )
 
+type personaRuntime string
+
+const (
+	personaRuntimeCodex      personaRuntime = "codex"
+	personaRuntimeClaudeCode personaRuntime = "claude-code"
+	personaRuntimeGeneric    personaRuntime = "generic"
+)
+
 // accPersona assembles ACC's three small prompt sections. Provider, platform,
 // project, safety, tool, and user instructions remain separate and keep their
 // normal priority.
 func accPersona(provider, model string) string {
+	return accPersonaForRuntime(provider, model, personaRuntimeCodex)
+}
+
+func accPersonaForRuntime(provider, model string, runtime personaRuntime) string {
 	backend := backendLabel(provider, model)
 	if backend == "" {
 		backend = "the backend selected by ACC for this request"
 	}
-	return accPersonaStart + "\n" + accCoreBehavior(backend) + "\n\n" + accClaudeCodeRuntime() + "\n\n" + accPersonalInstructions() + "\n" + accPersonaEnd
+	return accPersonaStart + "\n" + accCoreBehavior(backend) + "\n\n" + accRuntimeAdapter(runtime) + "\n\n" + accPersonalInstructions() + "\n" + accPersonaEnd
 }
 
 func accCoreBehavior(backend string) string {
@@ -46,6 +58,31 @@ You are operating inside Claude Code through ACC. You are not the Anthropic Clau
 Use only the tools supplied with the current request and format every call exactly to its declared schema. Tool results are authoritative. Inspect files before modifying them. Never claim a tool succeeded without receiving a successful result. Continue through multi-step tool workflows until the task is complete or genuinely blocked.
 
 Avoid destructive actions unless clearly requested. Do not repeat a destructive call after execution may have started. Follow repository instructions such as AGENTS.md.`
+}
+
+func accCodexRuntime() string {
+	return `Codex runtime/tool adapter
+
+The current client is Codex operating through ACC. The underlying language model is still only the backend selected by ACC.
+
+Use only the tools supplied with the current request and format every call exactly to its declared schema. Tool results are authoritative. Inspect files before modifying them. Never claim a tool succeeded without receiving a successful result. Continue through multi-step tool workflows until the task is complete or genuinely blocked.
+
+Avoid destructive actions unless clearly requested. Do not repeat a destructive call after execution may have started. Follow repository instructions such as AGENTS.md.`
+}
+
+func accRuntimeAdapter(runtime personaRuntime) string {
+	switch runtime {
+	case personaRuntimeClaudeCode:
+		return accClaudeCodeRuntime()
+	case personaRuntimeGeneric:
+		return `OpenAI-compatible runtime/tool adapter
+
+The current client is using ACC's OpenAI-compatible API. Do not claim it is Codex or Claude Code.
+
+Use only the tools supplied with the current request and format every call exactly to its declared schema. Tool results are authoritative.`
+	default:
+		return accCodexRuntime()
+	}
 }
 
 func accPersonalInstructions() string {
@@ -88,7 +125,7 @@ func stripACCPersona(s string) string {
 	}
 }
 
-func requestWithACCPersona(base *OpenAIRequest, route Route) (*OpenAIRequest, error) {
+func requestWithACCPersona(base *OpenAIRequest, route Route, runtimes ...personaRuntime) (*OpenAIRequest, error) {
 	b, err := json.Marshal(base)
 	if err != nil {
 		return nil, err
@@ -98,7 +135,11 @@ func requestWithACCPersona(base *OpenAIRequest, route Route) (*OpenAIRequest, er
 		return nil, err
 	}
 
-	persona := accPersona(route.Provider, route.Model)
+	runtime := personaRuntimeCodex
+	if len(runtimes) > 0 {
+		runtime = runtimes[0]
+	}
+	persona := accPersonaForRuntime(route.Provider, route.Model, runtime)
 	if len(out.Messages) > 0 && out.Messages[0].Role == "system" {
 		original := stripACCPersona(decodeStringContent(out.Messages[0].Content))
 		if strings.TrimSpace(original) != "" {
@@ -119,7 +160,7 @@ func chatJSONWithACCPersona(raw []byte, route Route) ([]byte, error) {
 		return nil, err
 	}
 	request["model"] = route.Model
-	persona := accPersona(route.Provider, route.Model)
+	persona := accPersonaForRuntime(route.Provider, route.Model, personaRuntimeGeneric)
 
 	messages, _ := request["messages"].([]any)
 	if len(messages) > 0 {

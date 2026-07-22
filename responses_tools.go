@@ -10,8 +10,10 @@ import (
 // custom tool and the single-string function wrapper used by Chat Completions
 // upstreams. The original definition remains available for the response path.
 type responseToolTranslation struct {
-	customByBridge map[string]customToolDefinition
-	customByName   map[string]customToolDefinition
+	customByBridge       map[string]customToolDefinition
+	customByName         map[string]customToolDefinition
+	namespaceByBridge    map[string]namespaceToolDefinition
+	namespaceByQualified map[string]namespaceToolDefinition
 }
 
 type customToolDefinition struct {
@@ -23,10 +25,18 @@ type customToolDefinition struct {
 	BridgeName  string
 }
 
+type namespaceToolDefinition struct {
+	Namespace  string
+	Name       string
+	BridgeName string
+}
+
 func newResponseToolTranslation() *responseToolTranslation {
 	return &responseToolTranslation{
-		customByBridge: map[string]customToolDefinition{},
-		customByName:   map[string]customToolDefinition{},
+		customByBridge:       map[string]customToolDefinition{},
+		customByName:         map[string]customToolDefinition{},
+		namespaceByBridge:    map[string]namespaceToolDefinition{},
+		namespaceByQualified: map[string]namespaceToolDefinition{},
 	}
 }
 
@@ -79,6 +89,26 @@ func translateResponseTools(req *ResponsesRequest, route Route) (*responseToolTr
 					Strict:      &strict,
 				},
 			})
+		case "namespace":
+			if tool.Name == "" {
+				return nil, nil, fmt.Errorf("backend %s/%s cannot bridge unnamed namespace", route.Provider, route.Model)
+			}
+			for _, child := range tool.Tools {
+				definition, fn, err := namespaceToolDefinitionFor(tool, child, route)
+				if err != nil {
+					return nil, nil, err
+				}
+				qualified := namespaceQualifiedName(definition.Namespace, definition.Name)
+				if _, exists := translation.namespaceByQualified[qualified]; exists {
+					return nil, nil, fmt.Errorf("duplicate namespace tool %q.%q", definition.Namespace, definition.Name)
+				}
+				if _, exists := translation.namespaceByBridge[definition.BridgeName]; exists {
+					return nil, nil, fmt.Errorf("namespace bridge collision for %q.%q", definition.Namespace, definition.Name)
+				}
+				translation.namespaceByQualified[qualified] = definition
+				translation.namespaceByBridge[definition.BridgeName] = definition
+				tools = append(tools, OpenAITool{Type: "function", Function: fn})
+			}
 		default:
 			if isHostedResponsesTool(tool.Type) {
 				return nil, nil, fmt.Errorf("backend %s/%s does not support hosted tool %q through Chat Completions", route.Provider, route.Model, tool.Type)
@@ -87,6 +117,41 @@ func translateResponseTools(req *ResponsesRequest, route Route) (*responseToolTr
 		}
 	}
 	return translation, tools, nil
+}
+
+func namespaceToolDefinitionFor(namespace, child ResponsesTool, route Route) (namespaceToolDefinition, OpenAIFunction, error) {
+	if child.Type != "" && child.Type != "function" {
+		return namespaceToolDefinition{}, OpenAIFunction{}, fmt.Errorf("backend %s/%s cannot bridge namespace tool %q.%q with type %q", route.Provider, route.Model, namespace.Name, child.Name, child.Type)
+	}
+	fn := child.Function
+	if child.Name != "" {
+		fn = ResponsesFunction{Name: child.Name, Description: child.Description, Parameters: child.Parameters}
+	}
+	if fn.Name == "" {
+		return namespaceToolDefinition{}, OpenAIFunction{}, fmt.Errorf("backend %s/%s cannot bridge unnamed tool in namespace %q", route.Provider, route.Model, namespace.Name)
+	}
+	raw := child.Raw
+	if len(raw) == 0 {
+		raw, _ = json.Marshal(child)
+	}
+	hash := sha256.Sum256([]byte(namespace.Name + "\x00" + string(raw)))
+	definition := namespaceToolDefinition{
+		Namespace:  namespace.Name,
+		Name:       fn.Name,
+		BridgeName: fmt.Sprintf("acc_ns_%x", hash[:10]),
+	}
+	description := fn.Description
+	if namespace.Description != "" {
+		description = namespace.Description + "\n\n" + description
+	}
+	description += fmt.Sprintf("\n\nACC namespace bridge for %q.%q.", namespace.Name, fn.Name)
+	return definition, OpenAIFunction{
+		Name: definition.BridgeName, Description: description, Parameters: fn.Parameters, Strict: child.Strict,
+	}, nil
+}
+
+func namespaceQualifiedName(namespace, name string) string {
+	return namespace + "\x00" + name
 }
 
 func isHostedResponsesTool(toolType string) bool {
@@ -139,6 +204,16 @@ func (t *responseToolTranslation) customForBridge(name string) (customToolDefini
 
 func (t *responseToolTranslation) customForName(name string) (customToolDefinition, bool) {
 	definition, ok := t.customByName[name]
+	return definition, ok
+}
+
+func (t *responseToolTranslation) namespaceForBridge(name string) (namespaceToolDefinition, bool) {
+	definition, ok := t.namespaceByBridge[name]
+	return definition, ok
+}
+
+func (t *responseToolTranslation) namespaceForQualifiedName(namespace, name string) (namespaceToolDefinition, bool) {
+	definition, ok := t.namespaceByQualified[namespaceQualifiedName(namespace, name)]
 	return definition, ok
 }
 

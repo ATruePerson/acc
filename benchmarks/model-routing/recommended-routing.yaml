@@ -2,17 +2,49 @@ reasoning:
   mode: maximum
 
 status: provisional
+provisional_reason: free endpoints can change availability, quotas, or behavior
+selection_policy: strongest Opus plus provider-diverse Sonnet and Haiku escape paths
 
 aliases:
   opus:
-    primary: pending
-    fallback: pending
+    primary:
+      provider: openrouter
+      model: tencent/hy3:free
+      reasoning_effort: high
+    fallback:
+      provider: openrouter
+      model: nvidia/nemotron-3-ultra-550b-a55b:free
+      reasoning_effort: high
   sonnet:
-    primary: pending
-    fallback: pending
+    primary:
+      provider: opencode
+      model: big-pickle
+      reasoning_effort: max
+    fallback:
+      provider: nvidia
+      model: nvidia/nemotron-3-super-120b-a12b
+      reasoning_effort: high
+      reasoning_budget: 32000
   haiku:
-    primary: pending
-    fallback: pending
+    primary:
+      provider: nvidia
+      model: nvidia/nemotron-3-super-120b-a12b
+      reasoning_effort: high
+      reasoning_budget: 32000
+    fallback:
+      provider: opencode
+      model: deepseek-v4-flash-free
+      reasoning_effort: max
 
 image_route:
-  primary: pending
+  primary:
+    provider: nvidia
+    model: minimaxai/minimax-m3
+    reasoning: native
+  tools: unsupported
+  image_plus_tools: clear_error
+
+capability_rules:
+  tool_fallbacks_must_support_tools: true
+  never_strip_tools: true
+  never_send_images_to_text_only_routes: true

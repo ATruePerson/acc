@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -265,7 +266,42 @@ func TestHandleModelsCodexShape(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.Models) != 3 || body.Models[0].Slug != "haiku" || body.Models[0].BaseInstructions == "" {
+	if len(body.Models) != 3 || body.Models[0].Slug != codexOpusID || body.Models[0].BaseInstructions == "" {
 		t.Fatalf("unexpected Codex models response: %s", w.Body.String())
+	}
+}
+
+func TestHandleModelsLegacyShapeUsesConfiguredPublicAliases(t *testing.T) {
+	cfg := &Config{
+		AliasRoutes: map[string]Route{
+			"opus":   {Provider: "openrouter", Model: "tencent/hy3:free"},
+			"sonnet": {Provider: "opencode", Model: "big-pickle"},
+			"haiku":  {Provider: "nvidia", Model: "nvidia/nemotron-3-super-120b-a12b"},
+		},
+	}
+	cfg.Aliases = map[string]Route{
+		"anthropic/claude-fast": {Provider: "nvidia", Model: "fast"},
+	}
+	s := testServer(cfg)
+	req := httptest.NewRequest("GET", "/v1/models", nil)
+	w := httptest.NewRecorder()
+
+	s.handleModels(w, req)
+
+	var body struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(body.Data))
+	for _, model := range body.Data {
+		got = append(got, model.ID)
+	}
+	want := []string{"anthropic/claude-fast", "anthropic/claude-haiku", "anthropic/claude-opus", "anthropic/claude-sonnet"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("legacy model IDs = %v, want configured aliases %v", got, want)
 	}
 }

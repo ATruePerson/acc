@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	_ "embed"
 	"flag"
 	"fmt"
 	"io"
@@ -76,9 +77,16 @@ Usage:
   acc models          List the model names you can use
   acc bench           Benchmark every persona + fallback, judged for quality
   acc claude [args]   Start the proxy and launch Claude Code through it
-  acc codex [path]    Switch Codex Desktop to ACC and launch it
-  acc codex --restore Switch Codex Desktop back to your subscription
+	acc codex setup      Prepare the OpenCodex bridge and back up Codex settings
+	acc codex start      Start ACC + OpenCodex and switch Codex to the bridge
+	acc codex stop       Stop OpenCodex and restore Codex settings
+	acc codex status     Show ACC/OpenCodex health and selected route
+	acc codex doctor     Run deterministic integration checks
+	acc codex restore    Restore the previous Codex settings
+	acc codex remove     Remove the ACC OpenCodex provider and restore settings
+	acc codex [path]     Legacy direct ACC launcher
   acc mcp install     Install ACC's bundled local tools for Claude Code
+                      (use --claude-3p --include-obsidian for Obsidian)
   acc mcp doctor      Check bundled local tools
   acc help            Show this help
 
@@ -336,7 +344,26 @@ func cmdClaude(extra []string) {
 
 const defaultCodexModel = codexOpusID
 
+const codexExperimentalNotice = "EXPERIMENTAL: Codex integration is a work in progress and can still break. Run `acc codex restore` to return to your normal subscription."
+
 func cmdCodex(args []string) {
+	if len(args) > 0 {
+		switch args[0] {
+		case "setup", "start", "stop", "status", "doctor", "restore", "remove":
+			cmdCodexLifecycle(args)
+			return
+		}
+	}
+	for _, arg := range args {
+		if arg == "--restore" {
+			cmdCodexLifecycle([]string{"restore"})
+			return
+		}
+	}
+	cmdCodexLegacy(args)
+}
+
+func cmdCodexLegacy(args []string) {
 	flags := flag.NewFlagSet("acc codex", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	model := ""
@@ -345,11 +372,11 @@ func cmdCodex(args []string) {
 	flags.StringVar(&model, "m", "", "ACC model alias to use")
 	flags.BoolVar(&restore, "restore", false, "restore the previous Codex subscription settings")
 	if err := flags.Parse(args); err != nil {
-		fmt.Println("  Usage: acc codex [--model MODEL] [path] | acc codex --restore")
+		fmt.Println("  Usage: acc codex [--model MODEL] [path] | acc codex restore")
 		return
 	}
 	if len(flags.Args()) > 1 {
-		fmt.Println("  Usage: acc codex [--model MODEL] [path] | acc codex --restore")
+		fmt.Println("  Usage: acc codex [--model MODEL] [path] | acc codex restore")
 		return
 	}
 	var cfg *Config
@@ -398,6 +425,8 @@ func cmdCodex(args []string) {
 		launchCodexDesktop(path)
 		return
 	}
+
+	fmt.Printf("\n  %s\n", codexExperimentalNotice)
 
 	loadDotenv(defaultEnvPath())
 
@@ -544,69 +573,8 @@ func proxyExecutable(commandPath string) string {
 	return commandPath
 }
 
-// defaultConfigJSON is the config written by `acc setup`. Providers reference
-// ${ENV_VAR} placeholders resolved at load time from the .env file.
-const defaultConfigJSON = `{
-  "port": 9999,
-  "system_prepend": "Always respond in English unless the user explicitly writes in another language.",
-  "providers": {
-    "nvidia":     { "base_url": "https://integrate.api.nvidia.com/v1", "api_key": "${NVIDIA_NIM_API_KEY}" },
-    "gemini":     { "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "api_key": "${GEMINI_API_KEY}" },
-    "openrouter": { "base_url": "https://openrouter.ai/api/v1", "api_key": "${OPENROUTER_API_KEY}" },
-    "opencode":   { "base_url": "https://opencode.ai/zen/v1", "api_key": "${OPENCODE_API_KEY}" }
-  },
-  "models": {
-    "opus": {
-      "display_name": "Opus", "route": "opus", "enabled": true,
-      "reasoning": { "max": { "effort": "high" } },
-      "tool_call_support": true, "streaming_support": true,
-      "image_input_support": false, "file_input_support": false,
-      "max_context": 262144, "max_output": 65536,
-      "fallback_models": ["acc-openrouter-nemotron-ultra"], "image_model": "acc-minimax-m3"
-    },
-    "sonnet": {
-      "display_name": "Sonnet", "route": "sonnet", "enabled": true,
-      "reasoning": { "max": { "effort": "high" } },
-      "tool_call_support": true, "streaming_support": true,
-      "image_input_support": false, "file_input_support": false,
-      "max_context": 262144, "max_output": 65536,
-      "fallback_models": ["acc-openrouter-nemotron-ultra"], "image_model": "acc-minimax-m3"
-    },
-    "haiku": {
-      "display_name": "Haiku", "route": "haiku", "enabled": true,
-      "reasoning": { "max": { "effort": "high" } },
-      "tool_call_support": true, "streaming_support": true,
-      "image_input_support": false, "file_input_support": false,
-      "max_context": 262144, "max_output": 65536,
-      "fallback_models": ["acc-openrouter-nemotron-ultra"], "image_model": "acc-minimax-m3"
-    },
-    "acc-minimax-m3": {
-      "display_name": "MiniMax M3 (NVIDIA)", "catalog_visible": false, "provider": "nvidia", "model": "minimaxai/minimax-m3", "enabled": true,
-      "reasoning": { "max": {} },
-      "tool_call_support": false, "streaming_support": true,
-      "image_input_support": true, "file_input_support": false,
-      "max_context": 131072, "max_output": 131072
-    },
-    "acc-openrouter-nemotron-ultra": {
-      "display_name": "OpenRouter Nemotron 3 Ultra Free", "catalog_visible": false, "provider": "openrouter", "model": "nvidia/nemotron-3-ultra-550b-a55b:free", "enabled": true,
-      "reasoning": { "max": { "effort": "high" } },
-      "tool_call_support": true, "streaming_support": true,
-      "image_input_support": false, "file_input_support": false,
-      "max_context": 1000000, "max_output": 65536
-    }
-  },
-  "routes": {
-    "opus":   { "provider": "openrouter", "model": "tencent/hy3:free", "reasoning_effort": "high", "max_tokens": 65536, "toolcalling": true, "stream": true },
-    "sonnet": { "provider": "openrouter", "model": "tencent/hy3:free", "reasoning_effort": "high", "max_tokens": 65536, "toolcalling": true, "stream": true },
-    "haiku":  { "provider": "openrouter", "model": "tencent/hy3:free", "reasoning_effort": "high", "max_tokens": 65536, "toolcalling": true, "stream": true }
-  },
-  "effort": {
-    "low":       { "budget": 2000,  "reasoning": "low" },
-    "medium":    { "budget": 6000,  "reasoning": "low" },
-    "high":      { "budget": 16000, "reasoning": "medium" },
-    "xhigh":     { "budget": 24000, "reasoning": "high" },
-    "max":       { "budget": 32000, "reasoning": "high" },
-    "ultracode": { "budget": 48000, "reasoning": "high" }
-  }
-}
-`
+// defaultConfigJSON is the config written by `acc setup`. Keeping it embedded
+// from config.json prevents setup and the live template from drifting apart.
+//
+//go:embed config.json
+var defaultConfigJSON string

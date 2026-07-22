@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -70,6 +72,47 @@ func TestExecuteUpstreamFallsBackWhenProviderRejectsItsOwnRequest(t *testing.T) 
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || route.Route.Provider != fallback.Provider || route.Route.Model != fallback.Model {
 		t.Fatalf("got status=%d route=%+v, want 200 fallback", resp.StatusCode, route)
+	}
+	if calls != 2 {
+		t.Fatalf("upstream calls = %d, want 2", calls)
+	}
+}
+
+func TestHandleMessagesFallsBackOnUpstreamConnectionFailure(t *testing.T) {
+	primary := Route{Provider: "nvidia", Model: "z-ai/glm-5.2", ReasoningEffort: "high", ReasoningLocked: true}
+	fallback := Route{Provider: "openrouter", Model: "nvidia/nemotron-3-ultra-550b-a55b:free", ReasoningEffort: "high", ReasoningLocked: true}
+	cfg := &Config{
+		Providers: map[string]Provider{
+			"nvidia":     {BaseURL: "https://nvidia.test", APIKey: "primary"},
+			"openrouter": {BaseURL: "https://openrouter.test", APIKey: "fallback"},
+		},
+		AliasRoutes: map[string]Route{"opus": {Provider: primary.Provider, Model: primary.Model, ReasoningEffort: primary.ReasoningEffort, ReasoningLocked: true, Fallbacks: []Route{fallback}}},
+	}
+	s := testServer(cfg)
+	calls := 0
+	s.http = &http.Client{Transport: &mockTripper{fn: func(req *http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("primary timed out")
+		}
+		if req.URL.Host != "openrouter.test" {
+			t.Fatalf("fallback request host = %q", req.URL.Host)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"OPUS_OK"}}]}`)),
+		}, nil
+	}}}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"opus","max_tokens":64,"messages":[{"role":"user","content":"Reply exactly OPUS_OK"}]}`))
+	resp := httptest.NewRecorder()
+	s.handleMessages(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "OPUS_OK") {
+		t.Fatalf("fallback response missing expected text: %s", resp.Body.String())
 	}
 	if calls != 2 {
 		t.Fatalf("upstream calls = %d, want 2", calls)

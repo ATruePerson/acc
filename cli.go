@@ -57,6 +57,8 @@ func dispatch(args []string) bool {
 		cmdClaude(args[2:])
 	case "codex":
 		cmdCodex(args[2:])
+	case "auth":
+		cmdAuth(args[2:])
 	case "mcp":
 		cmdMCP(args[2:])
 	case "help", "--help", "-h":
@@ -77,14 +79,18 @@ Usage:
   acc models          List the model names you can use
   acc bench           Benchmark every persona + fallback, judged for quality
   acc claude [args]   Start the proxy and launch Claude Code through it
-	acc codex setup      Prepare the OpenCodex bridge and back up Codex settings
-	acc codex start      Start ACC + OpenCodex and switch Codex to the bridge
-	acc codex stop       Stop OpenCodex and restore Codex settings
-	acc codex status     Show ACC/OpenCodex health and selected route
+	acc codex setup      Back up Codex and point it directly at ACC
+	acc codex start      Start an owned ACC service and verify Responses
+	acc codex stop       Stop only the ACC process started by this command
+	acc codex status     Show direct config, catalog, process, and auth state
 	acc codex doctor     Run deterministic integration checks
 	acc codex restore    Restore the previous Codex settings
-	acc codex remove     Remove the ACC OpenCodex provider and restore settings
-	acc codex [path]     Legacy direct ACC launcher
+	acc codex remove     Remove only ACC-owned Codex settings
+		acc codex [path]     Legacy direct ACC launcher
+	  acc auth list       List native authentication methods
+	  acc auth login      Log in to kimi, xai/grok, or anthropic
+	  acc auth status     Show safe provider login status
+	  acc auth logout     Remove only one provider's ACC credential
   acc mcp install     Install ACC's bundled local tools for Claude Code
                       (use --claude-3p --include-obsidian for Obsidian)
   acc mcp doctor      Check bundled local tools
@@ -342,9 +348,11 @@ func cmdClaude(extra []string) {
 	cmd.Run()
 }
 
-const defaultCodexModel = codexOpusID
-
 const codexExperimentalNotice = "EXPERIMENTAL: Codex integration is a work in progress and can still break. Run `acc codex restore` to return to your normal subscription."
+
+// Kept as a stable offline seed for callers that need a constant. Runtime
+// commands choose the first available real model from the generated catalog.
+const defaultCodexModel = "nvidia/z-ai/glm-5.2"
 
 func cmdCodex(args []string) {
 	if len(args) > 0 {
@@ -388,14 +396,10 @@ func cmdCodexLegacy(args []string) {
 			return
 		}
 		if model == "" {
-			model = defaultCodexModel
-			if !isCodexModel(cfg, model) {
-				ids := enabledModelIDs(cfg)
-				if len(ids) == 0 {
-					fmt.Println("  No enabled ACC models are configured.")
-					return
-				}
-				model = ids[0]
+			model, err = defaultCodexModelFor(cfg, nil)
+			if err != nil {
+				fmt.Printf("  %v\n", err)
+				return
 			}
 		}
 		if !isCodexModel(cfg, model) {
@@ -535,29 +539,39 @@ func waitForProxy(base string, timeout time.Duration) bool {
 
 // startProxyDetached launches this same binary as a background proxy.
 func startProxyDetached() error {
+	_, _, err := startProxyDetachedWithPID()
+	return err
+}
+
+func startProxyDetachedWithPID() (int, string, error) {
 	self, err := os.Executable()
 	if err != nil {
-		return err
+		return 0, "", err
 	}
 	if err := os.MkdirAll(accDir(), 0700); err != nil {
-		return err
+		return 0, "", err
 	}
 	logFile, err := os.OpenFile(filepath.Join(accDir(), "proxy.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
-		return err
+		return 0, "", err
 	}
 	defer logFile.Close()
 
-	cmd := detachedProxyCommand(proxyExecutable(self))
+	executable := proxyExecutable(self)
+	cmd := detachedProxyCommand(executable, "-config", defaultConfigPath(), "-env", defaultEnvPath())
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	if err := cmd.Start(); err != nil {
-		return err
+		return 0, "", err
 	}
-	return cmd.Process.Release()
+	pid := cmd.Process.Pid
+	if err := cmd.Process.Release(); err != nil {
+		return 0, "", err
+	}
+	return pid, executable, nil
 }
 
-func detachedProxyCommand(proxy string) *exec.Cmd {
-	cmd := exec.Command("nohup", proxy)
+func detachedProxyCommand(proxy string, args ...string) *exec.Cmd {
+	cmd := exec.Command("nohup", append([]string{proxy}, args...)...)
 	cmd.Stdin = nil
 	// `acc codex` exits as soon as it reopens Desktop. A new session plus nohup
 	// keeps the proxy alive after the launching terminal command is gone.

@@ -1,4 +1,7 @@
-# OpenCodex integration plan
+# OpenCodex integration plan (historical)
+
+> Superseded by the native direct integration. Kept only as historical design
+> evidence; none of these commands or dependencies are current ACC behavior.
 
 Status: implementation in progress on `feat/opencodex-codex-integration`.
 

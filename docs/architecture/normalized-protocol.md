@@ -35,4 +35,4 @@ The implementation is deliberately incremental. It does not attempt to duplicate
 
 ## State and security
 
-The response store is process-local and guarded by a mutex. It is not a durable transcript database, and restarting ACC invalidates old response IDs. The gateway remains bound to `127.0.0.1`; the OpenCodex bridge is also configured for loopback and private-network access only.
+The response store is process-local and guarded by a mutex. It is not a durable transcript database, and restarting ACC invalidates old response IDs. The direct Codex gateway remains bound to `127.0.0.1`; no second compatibility proxy is required.

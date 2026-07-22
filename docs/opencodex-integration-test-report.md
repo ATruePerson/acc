@@ -1,4 +1,7 @@
-# OpenCodex integration test report
+# OpenCodex integration test report (historical)
+
+> Superseded by the native direct integration. These results describe the
+> removed temporary bridge and are not current verification evidence.
 
 Date: 2026-07-21
 Branch: `feat/opencodex-codex-integration`

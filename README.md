@@ -41,12 +41,13 @@ settings, switches it to ACC, and reopens the existing ChatGPT desktop app.
 | `acc models` | List built-in model aliases and your config aliases. |
 | `acc bench` | Benchmark configured personas and fallbacks. |
 | `acc claude [args]` | Start ACC and launch Claude Code through it. |
-| `acc codex [path]` | Experimental: switch Codex Desktop to ACC and open a workspace. |
-| `acc codex --restore` | Restore the previous Codex provider settings. |
-| `scripts/opencodex/acc-opencodex setup` | Configure OpenCodex to use ACC's live model catalog. |
-| `scripts/opencodex/acc-opencodex start` | Start ACC if needed, then OpenCodex. |
-| `scripts/opencodex/acc-opencodex doctor` | Check the local two-proxy path. |
-| `scripts/opencodex/acc-opencodex restore` | Restore native Codex configuration. |
+| `acc codex setup` | Back up Codex and point it directly at ACC. |
+| `acc codex start` | Start an owned ACC process and verify Responses readiness. |
+| `acc codex status` | Show safe config, catalog, process, and provider status. |
+| `acc codex doctor` | Run non-destructive direct-integration checks. |
+| `acc codex restore` | Restore the exact previous Codex settings. |
+| `acc codex remove` | Remove only ACC-owned Codex settings. |
+| `acc auth login/status/logout` | Manage native provider login without printing secrets. |
 | `acc mcp install` | Install ACC's safe bundled MCP config. |
 | `acc mcp doctor` | Check bundled MCP tools and config. |
 | `acc` | Run the gateway directly. |
@@ -114,21 +115,17 @@ This integration is a work in progress and can still break on app or protocol
 changes. Keep `acc codex --restore` as the escape hatch back to the normal
 subscription connection.
 
-`acc codex` refreshes Codex's catalog from enabled entries in
-`config.json.models`, backs up the old connection, and reopens Codex without a
-terminal picker. 5.6 Sol is the default only for new tasks; Codex keeps the model
-stored on existing tasks. The default catalog includes three stable IDs:
-
-| Model | Stable ID | Primary backend |
-| --- | --- | --- |
-| 5.6 Sol | `gpt-5.6-sol` | HY3; Gemini 3.5 Flash for images |
-| 5.6 Terra | `gpt-5.6-terra` | Big Pickle, HY3, then Gemini for long context |
-| 5.6 Luna | `gpt-5.6-luna` | Gemini 3.5 Flash |
+`acc codex setup` generates a deterministic catalog of real, provider-prefixed
+IDs such as `nvidia/z-ai/glm-5.2`, `opencode/big-pickle`, or an authenticated
+provider's discovered IDs. Codex connects directly to ACC's `/v1/responses`
+endpoint. The Codex catalog never advertises the Claude aliases `opus`,
+`sonnet`, or `haiku`; those remain available only to Claude Code.
 
 Choose one directly when scripting:
 
 ```bash
-acc codex --model haiku /path/to/project
+acc codex setup --model nvidia/z-ai/glm-5.2
+acc codex start
 ```
 
 The catalog contains only the efforts declared for each model. Unsupported
@@ -136,11 +133,9 @@ choices are rejected before ACC contacts a provider. Model and effort arrive on
 every request, so separate Codex tasks stay independent. `acc codex --restore`
 puts your previous Codex connection back.
 
-All three aliases use the benchmark winner, with OpenRouter Nemotron 3 Ultra
-free as their explicit tool-capable fallback. Image or mixed text-image requests
-use the separate hidden NVIDIA MiniMax M3 route. Image-plus-tool requests fail
-clearly because MiniMax rejects function tools. ACC never quietly lowers effort
-or removes tools to force a fallback.
+Codex real-model IDs route to that exact provider and model. They never inherit
+Claude alias fallback chains. Explicit real-model fallback configuration still
+works, and ACC never quietly lowers effort or removes tools to force a fallback.
 
 Codex's free-form custom tools are bridged through Chat Completions without
 changing their native Responses call or streaming shape. Provider-hosted tools
@@ -149,40 +144,28 @@ error if Codex sends one. Codex 0.144.2 enables web search by default, so
 `acc codex` disables it only for the active ACC connection; `--restore` returns
 your previous setting.
 
-### OpenCodex compatibility layer (optional)
+### Native provider login
 
-[OpenCodex](https://github.com/lidge-jun/opencodex) is an independent MIT-
-licensed local proxy. It handles Codex's compatibility surface, while ACC
-continues to own provider keys, routes, fallbacks, rate limits, and Claude
-Code. The supported path is:
-
-```text
-Codex -> OpenCodex (127.0.0.1:10100) -> ACC (127.0.0.1:9999) -> provider
-```
-
-Install the current stable package as a user-owned npm install, then start ACC
-before running setup:
+Kimi uses device authorization. xAI/Grok browser OAuth is experimental because
+an endorsed third-party flow could not be confirmed; `XAI_API_KEY` remains the
+stable alternative. Anthropic uses `ANTHROPIC_API_KEY` as the stable inference
+path. `--import-claude-code` makes an explicit, read-only ACC copy but is not
+advertised for inference, and unsupported subscription impersonation is not
+implemented.
 
 ```bash
-npm install -g @bitkyc08/opencodex
-scripts/opencodex/acc-opencodex setup
-scripts/opencodex/acc-opencodex start
-scripts/opencodex/acc-opencodex doctor
+acc auth login kimi
+acc auth login xai
+acc auth login anthropic
+acc auth status
 ```
 
-Setup queries ACC's live `/v1/models` endpoint and writes only the `acc`
-provider to `~/.opencodex/config.json`. It uses the documented `openai-chat`
-adapter, explicitly allows this intentional loopback destination, and stores
-no provider key because ACC is local and unauthenticated.
-The helper forces both services to loopback and sets `syncResumeHistory` to
-false, so OpenCodex does not remap native Codex history. `ocx restore` is used
-by the restore command; `remove` also deletes only the ACC provider from
-OpenCodex's config and preserves unrelated providers.
-
-Do not point an ACC upstream at OpenCodex. That creates a loop:
-`Codex -> OpenCodex -> ACC -> OpenCodex`. The setup and doctor commands reject
-that shape. Keep `~/.opencodex/config.json`, `auth.json`, Codex config backups,
-and provider environment files local and never commit them.
+OAuth credentials are stored in macOS Keychain. A private file store is used
+only when explicitly enabled with `ACC_AUTH_STORE=file` and an absolute
+`ACC_AUTH_FILE_DIR`. OpenCodex is no longer installed, started, configured, or
+required by ACC. Existing user-installed OpenCodex files are left untouched.
+`acc codex setup` safely migrates an active port-10100 connection while
+preserving unrelated Codex providers; it does not read or move OpenCodex auth.
 
 ## Configuration
 
@@ -272,6 +255,10 @@ Existing environment variables win over values from that file.
 ```bash
 make test
 ```
+
+### Development
+
+ACC is maintained by Kabir and developed with assistance from OpenAI Codex.
 
 ## License
 

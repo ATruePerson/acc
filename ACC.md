@@ -26,10 +26,8 @@ catalog, request shape, or desktop behavior. Preserve the reversible
 - When a command needs to start the background gateway, it prefers the sibling
   `acc-proxy` binary. This keeps `acc-stop` and `acc-restart` able to find and
   manage the process; do not regress to launching the `acc` command itself.
-- ACC backs up the existing Codex config once, writes the ACC provider and 5.6 Sol
-  as the new-task default, closes the running app, then reopens ChatGPT at the
-  requested workspace. It never prompts in the terminal; Codex owns per-task
-  model selection.
+- ACC backs up the existing Codex config, writes an ownership-marked direct ACC
+  Responses provider, and preserves unrelated projects, MCPs, and preferences.
 - Codex 0.144.2 enables hosted web search by default even when a model catalog
   does not advertise it. ACC therefore writes `web_search = "disabled"` only
   while its provider is active; `acc codex --restore` restores the exact prior
@@ -45,22 +43,11 @@ catalog, request shape, or desktop behavior. Preserve the reversible
 
 ## Codex model registry
 
-`config.json.models` is the source of truth for the Codex menu. Every enabled
-entry has a stable request ID, display name, concrete route, capabilities,
-exact effort mappings, limits, and an optional explicit fallback model.
-
-| Codex name | Stable ID | Current primary | Explicit fallback | Efforts exposed |
-| --- | --- | --- | --- | --- |
-| 5.6 Sol | `gpt-5.6-sol` | OpenRouter `tencent/hy3:free` | Nemotron Ultra; Gemini 3.5 Flash for images | max |
-| 5.6 Terra | `gpt-5.6-terra` | OpenCode `big-pickle` | HY3, Gemini 3.5 Flash, then Nemotron Super | max |
-| 5.6 Luna | `gpt-5.6-luna` | Google `gemini-3.5-flash` | Nemotron Super; MiniMax for image-only fallback | max |
-
-Only those three models appear in the Codex picker, in Sol/Terra/Luna order.
-Old task IDs (`opus`, `sonnet`, `haiku`, and `openai/codex-5.6-*`) remain
-accepted but are not advertised. Claude family aliases remain separate:
-Opus maps to Sol, Sonnet to Terra, and Haiku to Luna. All tool requests retain
-their tools on fallback. Terra is text-only; Sol and Luna advertise images
-because each has an explicit image route.
+The Codex menu uses deterministic `provider/upstream-model` IDs generated from
+enabled ACC capabilities plus authenticated native-provider discovery. The
+Claude family aliases `opus`, `sonnet`, and `haiku` stay in the separate Claude
+Code registry and never appear in Codex. A direct Codex ID routes exactly to its
+named provider/model and gets no implicit Claude alias fallback.
 
 Unsupported efforts return 400 before a provider call. A fallback is used only
 through the capability registry's explicit fallback lists, and
@@ -172,50 +159,16 @@ For a live model check, send a tiny `/v1/responses` request and verify the
 `X-ACC-*` response headers plus the final JSONL row. Use a temporary Codex home
 for catalog parser tests. Do not change global Codex settings just to test.
 
-## Optional OpenCodex layer
+## Native Codex lifecycle and auth
 
-OpenCodex is an optional compatibility proxy in front of ACC. It owns the
-Codex wire compatibility and model catalog injection; ACC remains the provider
-router for Claude routes, free-model selection, fallbacks, rate limits, and
-credentials.
+The supported path is `Codex -> ACC loopback -> exact provider/model`.
+`acc codex setup/start/stop/status/doctor/restore/remove` do not execute or
+configure OpenCodex. Process ownership is recorded only when `start` launches
+ACC, so `stop` refuses to kill an unrelated process. Config changes are atomic,
+timestamp-backed up, ownership-marked, and exactly restorable.
 
-```text
-Codex -> OpenCodex 127.0.0.1:10100 -> ACC 127.0.0.1:9999 -> configured provider
-```
-
-The current stable package is installed with:
-
-```bash
-npm install -g @bitkyc08/opencodex
-```
-
-From this repository, use the wrapper rather than `ocx init`:
-
-```bash
-scripts/opencodex/acc-opencodex setup
-scripts/opencodex/acc-opencodex start
-scripts/opencodex/acc-opencodex status
-scripts/opencodex/acc-opencodex doctor
-scripts/opencodex/acc-opencodex restore
-scripts/opencodex/acc-opencodex remove
-```
-
-`setup` queries the running ACC `/v1/models` endpoint and uses the exact
-returned IDs. It creates an OpenCodex provider named `acc` with the documented
-`openai-chat` adapter and ACC's `/v1` base URL. Because OpenCodex blocks private
-destinations by default, the generated provider explicitly allows this known
-loopback destination. It writes no provider key.
-Before writing local state it makes timestamped backups. The generated config
-sets `hostname` to `127.0.0.1`, disables OpenCodex history remapping, and does
-not install an autostart shim.
-
-The wrapper rejects an ACC config whose upstream points at OpenCodex. ACC must
-continue to point at NVIDIA, OpenRouter, OpenCode, Gemini, or another real
-provider. Both services are local and unauthenticated, so never expose either
-port to the LAN or internet.
-
-`doctor` reports deterministic checks as `PASS`, `FAIL`, or `SKIPPED`. A PASS
-for health or model discovery does not claim that streaming, tools, fallback,
-vision, or a real Codex run succeeded. Those checks require a harmless live
-smoke test and are reported separately in
-[`docs/opencodex-integration-test-report.md`](docs/opencodex-integration-test-report.md).
+Native Kimi and xAI credentials live in macOS Keychain and refresh lazily with
+single-flight locking, rotation, expiry skew, and one replay after a 401.
+Anthropic API keys remain the stable path. Existing official Claude/Grok
+credentials are read only after an explicit import command; normal startup does
+not inspect or migrate them.

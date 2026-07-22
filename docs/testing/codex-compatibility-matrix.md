@@ -1,24 +1,22 @@
 # Codex compatibility matrix
 
-Status reflects the implementation and automated tests in this checkout. `Verified` means covered by local tests. `Live required` means the behavior depends on a running Codex client/provider and must be checked with `acc codex doctor` or a controlled smoke test.
+`Verified` means mocked or deterministic local tests pass. `Live required`
+means a real provider or Codex client is still needed.
 
-| Capability | Status | Evidence / boundary |
+| Capability | Status | Boundary |
 | --- | --- | --- |
-| Native `acc codex setup/start/stop/status/doctor/restore/remove` commands | Verified | CLI dispatch and lifecycle wrapper |
-| Loopback-only ACC listener | Verified | Go server binds `127.0.0.1`; doctor checks listeners |
-| OpenCodex loopback adapter | Verified | Helper writes `hostname=127.0.0.1`, `allowPrivateNetwork=true` |
-| Live model catalog with Codex slugs | Verified | `/v1/models` uses the Codex user-agent and accepts `models` or legacy `data` |
-| Text Responses unary translation | Verified | `responses_handler_test.go`, `codex_integration_test.go` |
-| Text Responses SSE event translation | Verified | `TestStreamTranslateResponsesUsesCodexEvents` |
-| Reasoning summary preservation | Verified | `TestResponsesReasoningSurvivesTranslation` and stream reasoning events |
-| Function tools | Verified | namespace/custom/stream tests |
-| Custom and namespaced tools | Verified | `responses_namespace_test.go` |
-| `previous_response_id` continuity | Verified, process-local | `TestPreviousResponseIDExpandsLocalConversation`; restart invalidates IDs |
-| Unknown field preservation | Verified | `TestResponsesRequestPreservesUnknownFields` |
-| Truncated stream terminal state | Verified | `TestResponsesStreamWithoutDoneIsIncomplete` |
-| Provider fallback and capability reroute | Verified | existing routing/fallback test suite |
-| Exact provider reasoning knobs | Verified | existing route translation tests and config traits |
-| Vision | Live required | route and provider dependent; doctor reports skipped |
-| Codex Desktop end-to-end tool round-trip | Live required | needs OpenCodex, Codex Desktop, and a safe live provider request |
-| Durable response history across ACC restart | Not implemented | current store is intentionally process-local |
-| Native direct ACC replacement for OpenCodex lifecycle/auth | Not implemented | OpenCodex remains the temporary front adapter |
+| Direct `setup/start/stop/status/doctor/restore/remove` | Verified | No OpenCodex execution or configuration |
+| Loopback ACC listener and OAuth callback | Verified | Explicit `127.0.0.1` binds |
+| Real provider-prefixed catalog | Verified | Unique IDs; no Claude aliases; auth refresh |
+| Secure provider isolation and rotation | Verified | Keychain abstraction, memory/file stores, single-flight |
+| Kimi device authorization | Verified | Polling, slow-down, denial, expiry, refresh |
+| xAI OIDC + PKCE | Verified, experimental | Discovery, endpoint validation, state, callback, retry |
+| Anthropic API-key transport | Verified | Native Messages conversion, stream/tools/images/usage |
+| Claude/Grok credential import | Verified, explicit only | Read-only detection; never automatic |
+| Responses unary and SSE | Verified | Text, reasoning, tools, usage, terminal states |
+| Custom, namespace, apply_patch, and MCP tools | Verified | Existing normalized Responses suite |
+| `previous_response_id` | Verified, process-local | Restart invalidates stored IDs |
+| Fallback and exact effort mapping | Verified | Explicit Codex chains only |
+| OAuth provider smoke requests | Live required | Requires user-approved login or existing secure credentials |
+| Codex Desktop end-to-end run | Live required | Requires temporary safe config and provider request |
+| Durable response history across restart | Not implemented | Store remains process-local |

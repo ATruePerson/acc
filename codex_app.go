@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -24,7 +25,11 @@ type codexNamedModel struct {
 }
 
 func codexNamedModels(cfg *Config) []codexNamedModel {
-	models := make([]codexNamedModel, 0, len(cfg.Models))
+	return codexNamedModelsWithAuth(cfg, nil)
+}
+
+func codexNamedModelsWithAuth(cfg *Config, auth *authManager) []codexNamedModel {
+	byID := make(map[string]codexNamedModel, len(cfg.Models))
 	for _, id := range enabledModelIDs(cfg) {
 		capability := cfg.Models[id]
 		if capability.CatalogVisible != nil && !*capability.CatalogVisible {
@@ -34,11 +39,25 @@ func codexNamedModels(cfg *Config) []codexNamedModel {
 		if err != nil {
 			continue
 		}
-		display := capability.DisplayName
-		if display == "" {
-			display = id
+		realID := route.Provider + "/" + strings.TrimPrefix(route.Model, "/")
+		candidate := codexNamedModel{
+			ID: realID, Display: route.Model + " (" + route.Provider + ")",
+			Capability: capability, Route: route,
 		}
-		models = append(models, codexNamedModel{ID: id, Display: display, Capability: capability, Route: route})
+		if existing, ok := byID[realID]; ok && existing.Capability.CatalogPriority > 0 &&
+			(candidate.Capability.CatalogPriority == 0 || existing.Capability.CatalogPriority <= candidate.Capability.CatalogPriority) {
+			continue
+		}
+		byID[realID] = candidate
+	}
+	for _, candidate := range nativeCodexModels(cfg, auth) {
+		if _, exists := byID[candidate.ID]; !exists {
+			byID[candidate.ID] = candidate
+		}
+	}
+	models := make([]codexNamedModel, 0, len(byID))
+	for _, model := range byID {
+		models = append(models, model)
 	}
 	sort.SliceStable(models, func(i, j int) bool {
 		left, right := models[i].Capability.CatalogPriority, models[j].Capability.CatalogPriority
@@ -57,7 +76,11 @@ func codexNamedModels(cfg *Config) []codexNamedModel {
 }
 
 func codexModelCatalogEntries(cfg *Config) []map[string]any {
-	models := codexNamedModels(cfg)
+	return codexModelCatalogEntriesWithAuth(cfg, nil)
+}
+
+func codexModelCatalogEntriesWithAuth(cfg *Config, auth *authManager) []map[string]any {
+	models := codexNamedModelsWithAuth(cfg, auth)
 	entries := make([]map[string]any, 0, len(models))
 	for i, model := range models {
 		levels := make([]map[string]any, 0, len(model.Capability.Reasoning))
@@ -84,7 +107,7 @@ func codexModelCatalogEntries(cfg *Config) []map[string]any {
 			description = fmt.Sprintf("Kabir's Second Brain via %s/%s", model.Route.Provider, model.Route.Model)
 		}
 		effectiveContextPercent := 95
-		if model.ID == codexSonnetID && model.Capability.MaxContext > 0 && model.Capability.MaxOutput < model.Capability.MaxContext {
+		if model.Capability.MaxContext > 0 && model.Capability.MaxOutput > 0 && model.Capability.MaxOutput < model.Capability.MaxContext {
 			effectiveContextPercent = (model.Capability.MaxContext - model.Capability.MaxOutput) * 100 / model.Capability.MaxContext
 		}
 		entries = append(entries, map[string]any{
@@ -135,7 +158,11 @@ func reasoningDescription(effort string) string {
 }
 
 func codexModelCatalogJSON(cfg *Config) []byte {
-	b, _ := json.MarshalIndent(map[string]any{"models": codexModelCatalogEntries(cfg)}, "", "  ")
+	return codexModelCatalogJSONWithAuth(cfg, nil)
+}
+
+func codexModelCatalogJSONWithAuth(cfg *Config, auth *authManager) []byte {
+	b, _ := json.MarshalIndent(map[string]any{"models": codexModelCatalogEntriesWithAuth(cfg, auth)}, "", "  ")
 	return append(b, '\n')
 }
 
@@ -146,8 +173,18 @@ type codexRestoreState struct {
 	Catalog        []byte `json:"catalog,omitempty"`
 }
 
+const (
+	accCodexRootBegin = "# BEGIN ACC CODEX OWNED"
+	accCodexRootEnd   = "# END ACC CODEX OWNED"
+	accCodexProvider  = "# ACC CODEX OWNED PROVIDER"
+)
+
 func configureCodexApp(configPath, catalogPath, restorePath, baseURL, model string, cfg *Config) error {
-	if !isCodexModel(cfg, model) {
+	return configureCodexAppWithAuth(configPath, catalogPath, restorePath, baseURL, model, cfg, nil)
+}
+
+func configureCodexAppWithAuth(configPath, catalogPath, restorePath, baseURL, model string, cfg *Config, auth *authManager) error {
+	if !isCodexModelWithAuth(cfg, auth, model) {
 		return fmt.Errorf("unknown Codex model %q", model)
 	}
 	if err := saveCodexRestoreState(configPath, catalogPath, restorePath); err != nil {
@@ -158,8 +195,16 @@ func configureCodexApp(configPath, catalogPath, restorePath, baseURL, model stri
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	if len(original) > 0 {
+		if _, err := writeTimestampedBackup(configPath, original); err != nil {
+			return fmt.Errorf("timestamp Codex config: %w", err)
+		}
+	}
 	configured := renderCodexConfig(string(original), catalogPath, baseURL, model)
-	if err := atomicWriteFile(catalogPath, codexModelCatalogJSON(cfg), 0600); err != nil {
+	if err := validateCodexConfigText(configured); err != nil {
+		return fmt.Errorf("generated Codex config is invalid: %w", err)
+	}
+	if err := atomicWriteFile(catalogPath, codexModelCatalogJSONWithAuth(cfg, auth), 0600); err != nil {
 		return fmt.Errorf("write Codex model catalog: %w", err)
 	}
 	if err := atomicWriteFile(configPath, []byte(configured), 0600); err != nil {
@@ -179,6 +224,16 @@ func restoreCodexApp(configPath, catalogPath, restorePath string) error {
 	var state codexRestoreState
 	if err := json.Unmarshal(b, &state); err != nil {
 		return fmt.Errorf("read restore state: %w", err)
+	}
+	if current, readErr := os.ReadFile(configPath); readErr == nil {
+		if _, err := writeTimestampedBackup(configPath, current); err != nil {
+			return fmt.Errorf("back up current Codex config: %w", err)
+		}
+	}
+	if state.ConfigExisted {
+		if err := validateCodexConfigText(string(state.Config)); err != nil {
+			return fmt.Errorf("saved Codex config is invalid: %w", err)
+		}
 	}
 	if state.ConfigExisted {
 		if err := atomicWriteFile(configPath, state.Config, 0600); err != nil {
@@ -228,9 +283,21 @@ func renderCodexConfig(original, catalogPath, baseURL, model string) string {
 	lines := strings.Split(strings.ReplaceAll(original, "\r\n", "\n"), "\n")
 	cleaned := make([]string, 0, len(lines)+10)
 	inACCProvider := false
+	inOwnedRoot := false
 	inRoot := true
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
+		if trimmed == accCodexRootBegin {
+			inOwnedRoot = true
+			continue
+		}
+		if trimmed == accCodexRootEnd {
+			inOwnedRoot = false
+			continue
+		}
+		if inOwnedRoot || trimmed == accCodexProvider {
+			continue
+		}
 		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
 			inRoot = false
 			inACCProvider = trimmed == "[model_providers.acc]"
@@ -246,6 +313,10 @@ func renderCodexConfig(original, catalogPath, baseURL, model string) string {
 				switch strings.TrimSpace(key) {
 				case "model", "model_provider", "model_catalog_json", "web_search":
 					continue
+				case "openai_base_url":
+					if legacyOpenCodexDetected(line) {
+						continue
+					}
 				}
 			}
 		}
@@ -261,10 +332,12 @@ func renderCodexConfig(original, catalogPath, baseURL, model string) string {
 		}
 	}
 	root := []string{
+		accCodexRootBegin,
 		"model = " + strconv.Quote(model),
 		`model_provider = "acc"`,
 		"model_catalog_json = " + strconv.Quote(catalogPath),
 		`web_search = "disabled"`,
+		accCodexRootEnd,
 		"",
 	}
 	cleaned = append(cleaned[:insertAt], append(root, cleaned[insertAt:]...)...)
@@ -273,6 +346,7 @@ func renderCodexConfig(original, catalogPath, baseURL, model string) string {
 	}
 	cleaned = append(cleaned,
 		"",
+		accCodexProvider,
 		"[model_providers.acc]",
 		`name = "ACC"`,
 		"base_url = "+strconv.Quote(strings.TrimRight(baseURL, "/")),
@@ -284,12 +358,89 @@ func renderCodexConfig(original, catalogPath, baseURL, model string) string {
 }
 
 func isCodexModel(cfg *Config, model string) bool {
-	for _, candidate := range codexNamedModels(cfg) {
+	return isCodexModelWithAuth(cfg, nil, model)
+}
+
+func isCodexModelWithAuth(cfg *Config, auth *authManager, model string) bool {
+	for _, candidate := range codexNamedModelsWithAuth(cfg, auth) {
 		if model == candidate.ID {
 			return true
 		}
 	}
 	return false
+}
+
+func validateCodexConfigText(text string) error {
+	seenTables := map[string]bool{}
+	for lineNumber, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "[") {
+			if !strings.HasSuffix(trimmed, "]") || strings.Count(trimmed, "[") != strings.Count(trimmed, "]") {
+				return fmt.Errorf("line %d has an invalid table header", lineNumber+1)
+			}
+			isArrayTable := strings.HasPrefix(trimmed, "[[")
+			if seenTables[trimmed] && !isArrayTable {
+				return fmt.Errorf("duplicate table %s", trimmed)
+			}
+			seenTables[trimmed] = true
+			continue
+		}
+	}
+	return nil
+}
+
+func writeTimestampedBackup(path string, data []byte) (string, error) {
+	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
+	backup := path + ".acc-backup-" + stamp
+	if err := atomicWriteFile(backup, data, 0600); err != nil {
+		return "", err
+	}
+	return backup, nil
+}
+
+func removeACCFromCodexConfig(original string) string {
+	lines := strings.Split(strings.ReplaceAll(original, "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(lines))
+	inOwnedRoot, inACCProvider := false, false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == accCodexRootBegin {
+			inOwnedRoot = true
+			continue
+		}
+		if trimmed == accCodexRootEnd {
+			inOwnedRoot = false
+			continue
+		}
+		if inOwnedRoot || trimmed == accCodexProvider {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			if trimmed == "[model_providers.acc]" {
+				inACCProvider = true
+				continue
+			}
+			inACCProvider = false
+		}
+		if !inACCProvider {
+			out = append(out, line)
+		}
+	}
+	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+		out = out[:len(out)-1]
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	return strings.Join(out, "\n") + "\n"
+}
+
+func legacyOpenCodexDetected(config string) bool {
+	lower := strings.ToLower(config)
+	return strings.Contains(lower, "127.0.0.1:10100") || strings.Contains(lower, "localhost:10100") || strings.Contains(lower, "opencodex")
 }
 
 func atomicWriteFile(path string, data []byte, mode os.FileMode) error {

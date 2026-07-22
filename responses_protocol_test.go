@@ -21,6 +21,17 @@ func TestResponsesRequestPreservesUnknownFields(t *testing.T) {
 	}
 }
 
+func TestResponseToolOutputNormalizesNativeTextPartsForChatProviders(t *testing.T) {
+	output := json.RawMessage(`[{"type":"input_text","text":"tool failed"},{"type":"output_text","text":"details"}]`)
+	content := responseToolOutputContent(output)
+	if got := decodeStringContent(content); got != "tool failed\ndetails" {
+		t.Fatalf("normalized tool output = %q (%s)", got, content)
+	}
+	if strings.Contains(string(content), "input_text") {
+		t.Fatalf("native Responses part leaked into Chat content: %s", content)
+	}
+}
+
 func TestPreviousResponseIDExpandsLocalConversation(t *testing.T) {
 	s := testServer(codexTestConfig())
 	priorContent := json.RawMessage(`[{"type":"output_text","text":"prior answer","annotations":[]}]`)

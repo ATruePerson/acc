@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 type resolvedModel struct {
@@ -15,9 +16,9 @@ type resolvedModel struct {
 	ImageOnly         bool
 }
 
-// legacyCodexModelID keeps tasks created by older ACC catalogs working. Only
-// Sol/Terra/Luna are advertised; family and old provider-flavoured IDs remain
-// accepted without cluttering the picker.
+// legacyCodexModelID keeps tasks created by older ACC catalogs working. These
+// IDs remain accepted for history compatibility but are never advertised in
+// the provider-prefixed Codex catalog.
 func legacyCodexModelID(modelID string) string {
 	switch normalizeModelID(modelID) {
 	case "opus", "openai/codex-5.6-sol":
@@ -136,6 +137,36 @@ func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
 		return chain, nil
 	}
 
+	if provider, upstreamModel, ok := splitRealCodexModelID(resolvedID); ok {
+		if _, exists := cfg.Providers[provider]; !exists {
+			return nil, fmt.Errorf("selected Codex provider %q is unavailable", provider)
+		}
+		capability := ModelCapability{
+			DisplayName: provider + "/" + upstreamModel, Provider: provider, Model: upstreamModel,
+			Enabled: true, StreamingSupport: true, ToolCallSupport: true,
+			Reasoning: map[string]ReasoningTarget{
+				"minimal": {}, "low": {Effort: "low"}, "medium": {Effort: "medium"},
+				"high": {Effort: "high"}, "xhigh": {Effort: "xhigh"}, "max": {Effort: "max"},
+			},
+		}
+		for id, configured := range cfg.Models {
+			if !configured.Enabled {
+				continue
+			}
+			route, err := resolveCapabilityRoute(cfg, id, configured)
+			if err == nil && route.Provider == provider && route.Model == upstreamModel {
+				capability = configured
+				capability.Provider, capability.Model, capability.Route = provider, upstreamModel, ""
+				break
+			}
+		}
+		route := Route{Provider: provider, Model: upstreamModel, Reasoning: capability.Reasoning}
+		if capability.MaxOutput > 0 {
+			route.MaxTokens = capability.MaxOutput
+		}
+		return []resolvedModel{{ID: resolvedID, Capability: capability, Route: route}}, nil
+	}
+
 	// Legacy non-Codex clients can still use aliases and route fallbacks. They do
 	// not become selectable Codex catalog entries until explicitly registered.
 	route, err := s.routeFor(modelID)
@@ -147,6 +178,17 @@ func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
 		chain = append(chain, resolvedModel{ID: fallback.Provider + "/" + fallback.Model, Route: fallback, Fallback: true})
 	}
 	return chain, nil
+}
+
+func splitRealCodexModelID(modelID string) (provider, model string, ok bool) {
+	provider, model, ok = strings.Cut(modelID, "/")
+	if !ok || provider == "" || model == "" {
+		return "", "", false
+	}
+	if _, isAlias := aliasFamily(normalizeModelID(provider)); isAlias {
+		return "", "", false
+	}
+	return provider, model, true
 }
 
 func configuredFallbackModels(capability ModelCapability) []string {

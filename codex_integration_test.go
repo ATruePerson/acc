@@ -121,8 +121,8 @@ func TestCodexCatalogComesFromEnabledCapabilityRegistry(t *testing.T) {
 	if len(catalog.Models) != 3 {
 		t.Fatalf("catalog has %d models, want 3 enabled models", len(catalog.Models))
 	}
-	if catalog.Models[0].Slug != codexOpusID || catalog.Models[1].Slug != codexSonnetID || catalog.Models[2].Slug != codexHaikuID {
-		t.Fatalf("catalog slugs are not in Sol/Terra/Luna order: %+v", catalog.Models)
+	if catalog.Models[0].Slug != "nvidia/z-ai/glm-5.2" || catalog.Models[1].Slug != "opencode/big-pickle" || catalog.Models[2].Slug != "nvidia/stepfun-ai/step-3.7-flash" {
+		t.Fatalf("catalog slugs are not deterministic provider-prefixed IDs: %+v", catalog.Models)
 	}
 	if !strings.Contains(catalog.Models[1].BaseInstructions, "Kabir's Second Brain") || strings.Contains(catalog.Models[1].BaseInstructions, "You are Codex") {
 		t.Fatalf("catalog has the wrong identity: %q", catalog.Models[1].BaseInstructions)
@@ -136,22 +136,22 @@ func TestCodexCatalogComesFromEnabledCapabilityRegistry(t *testing.T) {
 	if catalog.Models[1].EffectiveContext != 75 {
 		t.Fatalf("effective context = %d%%, want 75%% with output reserved", catalog.Models[1].EffectiveContext)
 	}
-	var opus, sonnet []string
+	var glm, pickle []string
 	for _, model := range catalog.Models {
 		for _, level := range model.Levels {
-			if model.Slug == codexOpusID {
-				opus = append(opus, level.Effort)
+			if model.Slug == "nvidia/z-ai/glm-5.2" {
+				glm = append(glm, level.Effort)
 			}
-			if model.Slug == codexSonnetID {
-				sonnet = append(sonnet, level.Effort)
+			if model.Slug == "opencode/big-pickle" {
+				pickle = append(pickle, level.Effort)
 			}
 		}
 	}
-	if strings.Contains(strings.Join(opus, ","), "max") {
-		t.Fatalf("Opus exposes unsupported Max: %v", opus)
+	if strings.Contains(strings.Join(glm, ","), "max") {
+		t.Fatalf("GLM exposes unsupported Max: %v", glm)
 	}
-	if !strings.Contains(strings.Join(sonnet, ","), "max") {
-		t.Fatalf("Sonnet should expose provider-supported Max: %v", sonnet)
+	if !strings.Contains(strings.Join(pickle, ","), "max") {
+		t.Fatalf("big-pickle should expose provider-supported Max: %v", pickle)
 	}
 }
 

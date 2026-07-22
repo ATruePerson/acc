@@ -36,6 +36,7 @@ type ModelPrice struct {
 type Provider struct {
 	BaseURL string `json:"base_url"`
 	APIKey  string `json:"api_key"`
+	Adapter string `json:"adapter,omitempty"`
 }
 
 type Route struct {

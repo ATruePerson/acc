@@ -57,10 +57,15 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
+	auth, authErr := newDefaultAuthManager()
+	if authErr != nil {
+		log.Printf("auth: %v", authErr)
+	}
 	s := &server{
 		cfgPath: path,
 		http:    newUpstreamHTTPClient(),
 		limiter: newProviderRateLimiter(cfg),
+		auth:    auth,
 	}
 	s.cfg.Store(cfg)
 	if fi, statErr := os.Stat(path); statErr == nil {
@@ -151,6 +156,7 @@ type server struct {
 	cfgModNano  atomic.Int64
 	http        *http.Client
 	limiter     *providerRateLimiter
+	auth        *authManager
 	responsesMu sync.RWMutex
 	responses   map[string]*ResponsesResponse
 }
@@ -675,7 +681,7 @@ func (s *server) handleModels(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if isCodex {
-		json.NewEncoder(w).Encode(map[string]any{"models": codexModelCatalogEntries(s.cfg.Load())})
+		json.NewEncoder(w).Encode(map[string]any{"models": codexModelCatalogEntriesWithAuth(s.cfg.Load(), s.auth)})
 	} else if isAnthropic {
 		var data []map[string]any
 		for _, id := range allow {
@@ -832,6 +838,12 @@ func (s *server) routeFor(model string) (Route, error) {
 			}
 		}
 		return r, nil
+	}
+
+	if provider, upstreamModel, ok := splitRealCodexModelID(model); ok {
+		if _, exists := cfg.Providers[provider]; exists {
+			return Route{Provider: provider, Model: upstreamModel}, nil
+		}
 	}
 
 	if parts := strings.SplitN(model, "/", 3); len(parts) == 3 {

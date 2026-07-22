@@ -376,14 +376,14 @@ func (s *server) executeUpstream(
 	for ri, target := range routes {
 		activeRoute = target
 		currentRoute := target.Route
-		prov, ok := cfg.Providers[currentRoute.Provider]
-		if !ok {
+		runtime, runtimeErr := resolveProviderRuntime(ctx, cfg, s.auth, currentRoute.Provider, false)
+		if runtimeErr != nil {
 			if ri == len(routes)-1 {
-				httpErr(w, 500, "unknown provider: "+currentRoute.Provider)
+				httpErr(w, 500, runtimeErr.Error())
 				logit(currentRoute.Model, 500, 0, 0, "")
-				return nil, resolvedModel{}, fmt.Errorf("unknown provider: %s", currentRoute.Provider)
+				return nil, resolvedModel{}, runtimeErr
 			}
-			log.Printf("unknown provider %q for route %d, trying fallback", currentRoute.Provider, ri)
+			log.Printf("provider %q unavailable for route %d, trying fallback: %v", currentRoute.Provider, ri, runtimeErr)
 			continue
 		}
 
@@ -421,22 +421,13 @@ func (s *server) executeUpstream(
 			maxAttempts = 1
 		}
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
-			upstream, err := http.NewRequestWithContext(ctx, "POST", prov.BaseURL+"/chat/completions", bytes.NewReader(body))
-			if err != nil {
-				httpErr(w, 500, err.Error())
-				logit(currentRoute.Model, 500, 0, 0, requestForRoute.ReasoningEffort)
-				return nil, resolvedModel{}, err
-			}
-			upstream.Header.Set("Content-Type", "application/json")
-			upstream.Header.Set("Authorization", "Bearer "+prov.APIKey)
-
 			if err := s.limiter.Wait(ctx, currentRoute.Provider); err != nil {
 				httpErr(w, 504, fmt.Sprintf("rate limiter interrupted for %s/%s: %v", currentRoute.Provider, currentRoute.Model, err))
 				logit(currentRoute.Model, 504, 0, 0, requestForRoute.ReasoningEffort)
 				return nil, resolvedModel{}, err
 			}
 
-			resp, err = s.http.Do(upstream)
+			resp, err = doProviderRequestWithBody(ctx, s.http, s.auth, runtime, requestForRoute, body)
 			if err != nil {
 				if ri == len(routes)-1 {
 					httpErr(w, 502, "upstream: "+err.Error())

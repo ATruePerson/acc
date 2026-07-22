@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // responseToolTranslation carries the lossless mapping between a Responses
@@ -239,7 +240,30 @@ func responseToolOutputContent(output json.RawMessage) json.RawMessage {
 	if len(output) == 0 || string(output) == "null" {
 		return jsonString("")
 	}
-	return append(json.RawMessage(nil), output...)
+	var text string
+	if json.Unmarshal(output, &text) == nil {
+		return jsonString(text)
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(output, &parts) == nil && len(parts) > 0 {
+		var texts []string
+		for _, part := range parts {
+			switch part.Type {
+			case "input_text", "output_text", "text":
+				texts = append(texts, part.Text)
+			}
+		}
+		if len(texts) > 0 {
+			return jsonString(strings.Join(texts, "\n"))
+		}
+	}
+	// Chat Completions tool content must be a string or provider-supported part
+	// array. Stringify unknown structured output instead of forwarding native
+	// Responses part names such as input_text, which providers reject.
+	return jsonString(string(output))
 }
 
 func appendChatToolCall(messages *[]OpenAIMessage, toolCall OpenAIToolCall) {

@@ -194,9 +194,6 @@ func TestHandleResponses_nonstream(t *testing.T) {
 		Providers: map[string]Provider{
 			"cloudflare": {BaseURL: "https://api.cloudflare.com", APIKey: "test"},
 		},
-		Routes: map[string]Route{
-			"kimi": {Provider: "nvidia", Model: "moonshotai/kimi-k2.6"},
-		},
 	}
 	s := testServer(cfg)
 	s.http = &http.Client{
@@ -226,7 +223,7 @@ func TestHandleResponses_nonstream(t *testing.T) {
 		},
 	}
 
-	reqBody := `{"model":"anthropic/claude-kimi","input":[{"type":"message","role":"user","content":"hello"}]}`
+	reqBody := `{"model":"cloudflare/real-model","input":[{"type":"message","role":"user","content":"hello"}]}`
 	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(reqBody))
 	w := httptest.NewRecorder()
 
@@ -266,7 +263,7 @@ func TestHandleModelsCodexShape(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.Models) != 3 || body.Models[0].Slug != codexOpusID || body.Models[0].BaseInstructions == "" {
+	if len(body.Models) != 3 || body.Models[0].Slug != "nvidia/z-ai/glm-5.2" || body.Models[0].BaseInstructions == "" {
 		t.Fatalf("unexpected Codex models response: %s", w.Body.String())
 	}
 }

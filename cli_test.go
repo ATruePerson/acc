@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -9,6 +8,14 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestCodexExperimentalNoticeIsExplicit(t *testing.T) {
+	for _, word := range []string{"experimental", "work in progress", "restore"} {
+		if !strings.Contains(strings.ToLower(codexExperimentalNotice), word) {
+			t.Fatalf("Codex warning is missing %q: %s", word, codexExperimentalNotice)
+		}
+	}
+}
 
 func TestFindCodexDesktopAppUsesExistingChatGPTApp(t *testing.T) {
 	home := t.TempDir()
@@ -35,31 +42,9 @@ func TestCodexOpenArgsOpenExistingAppWithoutInstaller(t *testing.T) {
 	}
 }
 
-func TestChooseCodexModel(t *testing.T) {
-	cases := []struct {
-		input string
-		want  string
-	}{
-		{"2\n", codexTerraID},
-		{"Sol\n", codexSolID},
-		{"terra\n", codexTerraID},
-		{"LUNA\n", codexLunaID},
-	}
-
-	for _, tc := range cases {
-		t.Run(strings.TrimSpace(tc.input), func(t *testing.T) {
-			var out bytes.Buffer
-			got, err := chooseCodexModel(strings.NewReader(tc.input), &out)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got != tc.want {
-				t.Fatalf("choice %q = %q, want %q", tc.input, got, tc.want)
-			}
-			if !strings.Contains(out.String(), "Terra") || !strings.Contains(out.String(), "Sonnet") {
-				t.Fatalf("picker does not explain family mapping:\n%s", out.String())
-			}
-		})
+func TestCodexOfflineDefaultIsRealProviderModel(t *testing.T) {
+	if defaultCodexModel != "nvidia/z-ai/glm-5.2" {
+		t.Fatalf("default Codex model = %q", defaultCodexModel)
 	}
 }
 
@@ -70,6 +55,14 @@ func TestDetachedProxyCommandStartsIndependentSession(t *testing.T) {
 	}
 	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setsid {
 		t.Fatal("detached proxy must start in its own session")
+	}
+}
+
+func TestDetachedProxyCommandPinsConfigAndEnvPaths(t *testing.T) {
+	cmd := detachedProxyCommand("/tmp/acc-proxy", "-config", "/tmp/config.json", "-env", "/tmp/.env")
+	want := []string{"nohup", "/tmp/acc-proxy", "-config", "/tmp/config.json", "-env", "/tmp/.env"}
+	if !reflect.DeepEqual(cmd.Args, want) {
+		t.Fatalf("command args = %q, want %q", cmd.Args, want)
 	}
 }
 
@@ -92,13 +85,13 @@ func TestCodexModelCatalogHasNamedModels(t *testing.T) {
 			DisplayName string `json:"display_name"`
 		} `json:"models"`
 	}
-	if err := json.Unmarshal(codexModelCatalogJSON(), &catalog); err != nil {
+	if err := json.Unmarshal(codexModelCatalogJSON(codexTestConfig()), &catalog); err != nil {
 		t.Fatal(err)
 	}
 	want := []struct{ slug, display string }{
-		{"openai/codex-5.6-sol", "Codex 5.6 Sol"},
-		{"openai/codex-5.6-terra", "Codex 5.6 Terra"},
-		{"openai/codex-5.6-luna", "Codex 5.6 Luna"},
+		{"nvidia/z-ai/glm-5.2", "z-ai/glm-5.2 (nvidia)"},
+		{"opencode/big-pickle", "big-pickle (opencode)"},
+		{"nvidia/stepfun-ai/step-3.7-flash", "stepfun-ai/step-3.7-flash (nvidia)"},
 	}
 	if len(catalog.Models) != len(want) {
 		t.Fatalf("got %d models, want %d", len(catalog.Models), len(want))
@@ -110,7 +103,25 @@ func TestCodexModelCatalogHasNamedModels(t *testing.T) {
 	}
 }
 
+func TestCodexCatalogDoesNotAdvertiseHostedWebSearch(t *testing.T) {
+	var catalog struct {
+		Models []map[string]json.RawMessage `json:"models"`
+	}
+	if err := json.Unmarshal(codexModelCatalogJSON(codexTestConfig()), &catalog); err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.Models) == 0 {
+		t.Fatal("catalog has no models")
+	}
+	for _, model := range catalog.Models {
+		if _, ok := model["web_search_tool_type"]; ok {
+			t.Fatalf("catalog must not advertise provider-hosted web search: %s", model["web_search_tool_type"])
+		}
+	}
+}
+
 func TestConfigureAndRestoreCodexApp(t *testing.T) {
+	cfg := codexTestConfig()
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	catalogPath := filepath.Join(dir, "acc-models.json")
@@ -120,7 +131,7 @@ func TestConfigureAndRestoreCodexApp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := configureCodexApp(configPath, catalogPath, restorePath, "http://localhost:9999/v1", "openai/codex-5.6-sol")
+	err := configureCodexApp(configPath, catalogPath, restorePath, "http://localhost:9999/v1", "nvidia/z-ai/glm-5.2", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,9 +142,10 @@ func TestConfigureAndRestoreCodexApp(t *testing.T) {
 	text := string(configured)
 	for _, required := range []string{
 		`sandbox_mode = "workspace-write"`,
-		`model = "openai/codex-5.6-sol"`,
+		`model = "nvidia/z-ai/glm-5.2"`,
 		`model_provider = "acc"`,
 		`model_catalog_json = "` + catalogPath + `"`,
+		`web_search = "disabled"`,
 		`[features]`,
 		`plugins = true`,
 		`[model_providers.acc]`,
@@ -147,14 +159,14 @@ func TestConfigureAndRestoreCodexApp(t *testing.T) {
 	if strings.Contains(text, `model = "gpt-subscription"`) {
 		t.Fatalf("old root model was not replaced:\n%s", text)
 	}
-	if err := configureCodexApp(configPath, catalogPath, restorePath, "http://localhost:9999/v1", "openai/codex-5.6-terra"); err != nil {
+	if err := configureCodexApp(configPath, catalogPath, restorePath, "http://localhost:9999/v1", "opencode/big-pickle", cfg); err != nil {
 		t.Fatal(err)
 	}
 	switched, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(switched), `model = "openai/codex-5.6-terra"`) {
+	if !strings.Contains(string(switched), `model = "opencode/big-pickle"`) {
 		t.Fatalf("second launch did not switch models:\n%s", switched)
 	}
 
@@ -201,9 +213,40 @@ func TestDefaultConfigIsValidAndLoads(t *testing.T) {
 	if c.Port == 0 || len(c.Providers) == 0 || len(c.Routes) == 0 {
 		t.Fatalf("default config missing essentials: %+v", c)
 	}
+	if c.Models["acc-minimax-m3"].ToolCallSupport {
+		t.Fatal("default config must not claim MiniMax M3 supports Codex tool calls")
+	}
 	// every route must point at a defined provider
 	if err := validateConfig(&c); err != nil {
 		t.Fatalf("default config fails validation: %v", err)
+	}
+}
+
+func TestDefaultConfigExposesOnlyProviderPrefixedRealModels(t *testing.T) {
+	b, err := os.ReadFile("config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	visible := codexNamedModels(&cfg)
+	if len(visible) == 0 {
+		t.Fatal("user-facing catalog is empty")
+	}
+	seen := map[string]bool{}
+	for _, model := range visible {
+		if !strings.Contains(model.ID, "/") || seen[model.ID] {
+			t.Fatalf("catalog has ambiguous or duplicate real ID %q", model.ID)
+		}
+		seen[model.ID] = true
+		for _, forbidden := range []string{"opus", "sonnet", "haiku", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} {
+			if strings.EqualFold(model.ID, forbidden) {
+				t.Fatalf("forbidden alias in catalog: %q", model.ID)
+			}
+		}
 	}
 }
 

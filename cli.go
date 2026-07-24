@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	_ "embed"
 	"flag"
 	"fmt"
 	"io"
@@ -56,6 +57,10 @@ func dispatch(args []string) bool {
 		cmdClaude(args[2:])
 	case "codex":
 		cmdCodex(args[2:])
+	case "auth":
+		cmdAuth(args[2:])
+	case "mcp":
+		cmdMCP(args[2:])
 	case "help", "--help", "-h":
 		printHelp()
 	default:
@@ -74,8 +79,21 @@ Usage:
   acc models          List the model names you can use
   acc bench           Benchmark every persona + fallback, judged for quality
   acc claude [args]   Start the proxy and launch Claude Code through it
-  acc codex [path]    Switch Codex Desktop to ACC and launch it
-  acc codex --restore Switch Codex Desktop back to your subscription
+	acc codex setup      Back up Codex and point it directly at ACC
+	acc codex start      Start an owned ACC service and verify Responses
+	acc codex stop       Stop only the ACC process started by this command
+	acc codex status     Show direct config, catalog, process, and auth state
+	acc codex doctor     Run deterministic integration checks
+	acc codex restore    Restore the previous Codex settings
+	acc codex remove     Remove only ACC-owned Codex settings
+		acc codex [path]     Legacy direct ACC launcher
+	  acc auth list       List native authentication methods
+	  acc auth login      Log in to kimi, xai/grok, or anthropic
+	  acc auth status     Show safe provider login status
+	  acc auth logout     Remove only one provider's ACC credential
+  acc mcp install     Install ACC's bundled local tools for Claude Code
+                      (use --claude-3p --include-obsidian for Obsidian)
+  acc mcp doctor      Check bundled local tools
   acc help            Show this help
 
 First time? Run:  acc setup
@@ -275,6 +293,12 @@ func cmdModels() {
 			fmt.Printf("  anthropic/%-26s → %s (%s)\n", normalizeModelID(k), r.Model, r.Provider)
 		}
 	}
+	if cfg != nil && len(cfg.Models) > 0 {
+		fmt.Print("\n  Codex models (from config.json):\n\n")
+		for _, model := range codexNamedModels(cfg) {
+			fmt.Printf("  %-26s -> %s (%s)\n", model.ID, model.Route.Model, model.Route.Provider)
+		}
+	}
 	fmt.Print("\n  Or use the family names (opus / sonnet / haiku) — those follow config.json routes.\n\n")
 }
 
@@ -308,15 +332,46 @@ func cmdClaude(extra []string) {
 	}
 
 	fmt.Printf("  Launching Claude Code through acc (%s)...\n\n", base)
-	cmd := exec.Command(claude, extra...)
+	self, err := os.Executable()
+	if err != nil {
+		fmt.Printf("  Could not locate acc for MCP tools: %v\n", err)
+		return
+	}
+	mcpConfig, err := ensureMCPConfig(self)
+	if err != nil {
+		fmt.Printf("  Could not prepare ACC MCP tools: %v\n", err)
+		return
+	}
+	cmd := exec.Command(claude, claudeArgsWithMCP(extra, mcpConfig)...)
 	cmd.Env = append(os.Environ(), "ANTHROPIC_BASE_URL="+base)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.Run()
 }
 
-const defaultCodexModel = codexSolID
+const codexExperimentalNotice = "EXPERIMENTAL: Codex integration is a work in progress and can still break. Run `acc codex restore` to return to your normal subscription."
+
+// Kept as a stable offline seed for callers that need a constant. Runtime
+// commands choose the first available real model from the generated catalog.
+const defaultCodexModel = "nvidia/z-ai/glm-5.2"
 
 func cmdCodex(args []string) {
+	if len(args) > 0 {
+		switch args[0] {
+		case "setup", "start", "stop", "status", "doctor", "restore", "remove":
+			cmdCodexLifecycle(args)
+			return
+		}
+	}
+	for _, arg := range args {
+		if arg == "--restore" {
+			cmdCodexLifecycle([]string{"restore"})
+			return
+		}
+	}
+	cmdCodexLegacy(args)
+}
+
+func cmdCodexLegacy(args []string) {
 	flags := flag.NewFlagSet("acc codex", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	model := ""
@@ -325,27 +380,30 @@ func cmdCodex(args []string) {
 	flags.StringVar(&model, "m", "", "ACC model alias to use")
 	flags.BoolVar(&restore, "restore", false, "restore the previous Codex subscription settings")
 	if err := flags.Parse(args); err != nil {
-		fmt.Println("  Usage: acc codex [--model MODEL] [path] | acc codex --restore")
+		fmt.Println("  Usage: acc codex [--model MODEL] [path] | acc codex restore")
 		return
 	}
 	if len(flags.Args()) > 1 {
-		fmt.Println("  Usage: acc codex [--model MODEL] [path] | acc codex --restore")
+		fmt.Println("  Usage: acc codex [--model MODEL] [path] | acc codex restore")
 		return
 	}
+	var cfg *Config
 	if !restore {
+		var err error
+		cfg, err = loadConfig(defaultConfigPath())
+		if err != nil {
+			fmt.Printf("  No config found. Run `acc setup` first. (%v)\n", err)
+			return
+		}
 		if model == "" {
-			model = defaultCodexModel
-			if stdinIsTerminal() {
-				selected, err := chooseCodexModel(os.Stdin, os.Stdout)
-				if err != nil {
-					fmt.Printf("  Could not select a Codex model: %v\n", err)
-					return
-				}
-				model = selected
+			model, err = defaultCodexModelFor(cfg, nil)
+			if err != nil {
+				fmt.Printf("  %v\n", err)
+				return
 			}
 		}
-		if !isCodexModel(model) {
-			fmt.Printf("  Unknown Codex model %q. Use %s, %s, or %s.\n", model, codexSolID, codexTerraID, codexLunaID)
+		if !isCodexModel(cfg, model) {
+			fmt.Printf("  Unknown or disabled ACC model %q. Run `acc models` to list enabled model IDs.\n", model)
 			return
 		}
 	}
@@ -372,11 +430,8 @@ func cmdCodex(args []string) {
 		return
 	}
 
-	cfg, err := loadConfig(defaultConfigPath())
-	if err != nil {
-		fmt.Printf("  No config found. Run `acc setup` first. (%v)\n", err)
-		return
-	}
+	fmt.Printf("\n  %s\n", codexExperimentalNotice)
+
 	loadDotenv(defaultEnvPath())
 
 	base := fmt.Sprintf("http://localhost:%d", cfg.Port)
@@ -398,7 +453,7 @@ func cmdCodex(args []string) {
 		return
 	}
 	apiBase := strings.TrimRight(base, "/") + "/v1"
-	if err := configureCodexApp(codexConfig, codexCatalog, restoreState, apiBase, model); err != nil {
+	if err := configureCodexApp(codexConfig, codexCatalog, restoreState, apiBase, model, cfg); err != nil {
 		fmt.Printf("  Could not configure Codex Desktop: %v\n", err)
 		return
 	}
@@ -414,33 +469,6 @@ func launchCodexDesktop(path string) {
 		return
 	}
 	launchCodexDesktopWith(app, path)
-}
-
-func stdinIsTerminal() bool {
-	info, err := os.Stdin.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
-}
-
-func chooseCodexModel(in io.Reader, out io.Writer) (string, error) {
-	fmt.Fprintln(out, "  Select an ACC model:")
-	fmt.Fprintln(out, "    1) Sol   (Opus route)")
-	fmt.Fprintln(out, "    2) Terra (Sonnet route)")
-	fmt.Fprintln(out, "    3) Luna  (Haiku route)")
-	fmt.Fprint(out, "  Choice [1]: ")
-	choice, err := bufio.NewReader(in).ReadString('\n')
-	if err != nil && len(choice) == 0 {
-		return "", err
-	}
-	switch strings.ToLower(strings.TrimSpace(choice)) {
-	case "", "1", "sol":
-		return codexSolID, nil
-	case "2", "terra":
-		return codexTerraID, nil
-	case "3", "luna":
-		return codexLunaID, nil
-	default:
-		return "", fmt.Errorf("enter 1, 2, 3, Sol, Terra, or Luna")
-	}
 }
 
 func findCodexDesktopApp() (string, error) {
@@ -511,29 +539,39 @@ func waitForProxy(base string, timeout time.Duration) bool {
 
 // startProxyDetached launches this same binary as a background proxy.
 func startProxyDetached() error {
+	_, _, err := startProxyDetachedWithPID()
+	return err
+}
+
+func startProxyDetachedWithPID() (int, string, error) {
 	self, err := os.Executable()
 	if err != nil {
-		return err
+		return 0, "", err
 	}
 	if err := os.MkdirAll(accDir(), 0700); err != nil {
-		return err
+		return 0, "", err
 	}
 	logFile, err := os.OpenFile(filepath.Join(accDir(), "proxy.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
-		return err
+		return 0, "", err
 	}
 	defer logFile.Close()
 
-	cmd := detachedProxyCommand(proxyExecutable(self))
+	executable := proxyExecutable(self)
+	cmd := detachedProxyCommand(executable, "-config", defaultConfigPath(), "-env", defaultEnvPath())
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	if err := cmd.Start(); err != nil {
-		return err
+		return 0, "", err
 	}
-	return cmd.Process.Release()
+	pid := cmd.Process.Pid
+	if err := cmd.Process.Release(); err != nil {
+		return 0, "", err
+	}
+	return pid, executable, nil
 }
 
-func detachedProxyCommand(proxy string) *exec.Cmd {
-	cmd := exec.Command("nohup", proxy)
+func detachedProxyCommand(proxy string, args ...string) *exec.Cmd {
+	cmd := exec.Command("nohup", append([]string{proxy}, args...)...)
 	cmd.Stdin = nil
 	// `acc codex` exits as soon as it reopens Desktop. A new session plus nohup
 	// keeps the proxy alive after the launching terminal command is gone.
@@ -549,30 +587,8 @@ func proxyExecutable(commandPath string) string {
 	return commandPath
 }
 
-// defaultConfigJSON is the config written by `acc setup`. Providers reference
-// ${ENV_VAR} placeholders resolved at load time from the .env file.
-const defaultConfigJSON = `{
-  "port": 9999,
-  "system_prepend": "Always respond in English unless the user explicitly writes in another language.",
-  "providers": {
-    "nvidia":     { "base_url": "https://integrate.api.nvidia.com/v1", "api_key": "${NVIDIA_NIM_API_KEY}" },
-    "gemini":     { "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "api_key": "${GEMINI_API_KEY}" },
-    "openrouter": { "base_url": "https://openrouter.ai/api/v1", "api_key": "${OPENROUTER_API_KEY}" },
-    "zai":        { "base_url": "https://api.z.ai/api/paas/v4", "api_key": "${ZAI_API_KEY}" },
-    "opencode":   { "base_url": "https://opencode.ai/zen/v1", "api_key": "${OPENCODE_API_KEY}" }
-  },
-  "routes": {
-    "opus":   { "provider": "nvidia",   "model": "z-ai/glm-5.1" },
-    "sonnet": { "provider": "opencode", "model": "big-pickle" },
-    "haiku":  { "provider": "nvidia",   "model": "stepfun-ai/step-3.7-flash" }
-  },
-  "effort": {
-    "low":       { "budget": 2000,  "reasoning": "low" },
-    "medium":    { "budget": 6000,  "reasoning": "low" },
-    "high":      { "budget": 16000, "reasoning": "medium" },
-    "xhigh":     { "budget": 24000, "reasoning": "high" },
-    "max":       { "budget": 32000, "reasoning": "high" },
-    "ultracode": { "budget": 48000, "reasoning": "high" }
-  }
-}
-`
+// defaultConfigJSON is the config written by `acc setup`. Keeping it embedded
+// from config.json prevents setup and the live template from drifting apart.
+//
+//go:embed config.json
+var defaultConfigJSON string

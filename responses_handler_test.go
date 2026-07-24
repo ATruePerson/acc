@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -193,9 +194,6 @@ func TestHandleResponses_nonstream(t *testing.T) {
 		Providers: map[string]Provider{
 			"cloudflare": {BaseURL: "https://api.cloudflare.com", APIKey: "test"},
 		},
-		Routes: map[string]Route{
-			"kimi": {Provider: "nvidia", Model: "moonshotai/kimi-k2.6"},
-		},
 	}
 	s := testServer(cfg)
 	s.http = &http.Client{
@@ -225,7 +223,7 @@ func TestHandleResponses_nonstream(t *testing.T) {
 		},
 	}
 
-	reqBody := `{"model":"anthropic/claude-kimi","input":[{"type":"message","role":"user","content":"hello"}]}`
+	reqBody := `{"model":"cloudflare/real-model","input":[{"type":"message","role":"user","content":"hello"}]}`
 	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(reqBody))
 	w := httptest.NewRecorder()
 
@@ -249,7 +247,7 @@ func TestHandleResponses_nonstream(t *testing.T) {
 }
 
 func TestHandleModelsCodexShape(t *testing.T) {
-	s := testServer(&Config{})
+	s := testServer(codexTestConfig())
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	req.Header.Set("User-Agent", "codex_cli_rs/0.144.2")
 	w := httptest.NewRecorder()
@@ -265,7 +263,42 @@ func TestHandleModelsCodexShape(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.Models) != 3 || body.Models[0].Slug != "openai/codex-5.6-sol" || body.Models[0].BaseInstructions == "" {
+	if len(body.Models) != 3 || body.Models[0].Slug != "nvidia/z-ai/glm-5.2" || body.Models[0].BaseInstructions == "" {
 		t.Fatalf("unexpected Codex models response: %s", w.Body.String())
+	}
+}
+
+func TestHandleModelsLegacyShapeUsesConfiguredPublicAliases(t *testing.T) {
+	cfg := &Config{
+		AliasRoutes: map[string]Route{
+			"opus":   {Provider: "openrouter", Model: "tencent/hy3:free"},
+			"sonnet": {Provider: "opencode", Model: "big-pickle"},
+			"haiku":  {Provider: "nvidia", Model: "nvidia/nemotron-3-super-120b-a12b"},
+		},
+	}
+	cfg.Aliases = map[string]Route{
+		"anthropic/claude-fast": {Provider: "nvidia", Model: "fast"},
+	}
+	s := testServer(cfg)
+	req := httptest.NewRequest("GET", "/v1/models", nil)
+	w := httptest.NewRecorder()
+
+	s.handleModels(w, req)
+
+	var body struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(body.Data))
+	for _, model := range body.Data {
+		got = append(got, model.ID)
+	}
+	want := []string{"anthropic/claude-fast", "anthropic/claude-haiku", "anthropic/claude-opus", "anthropic/claude-sonnet"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("legacy model IDs = %v, want configured aliases %v", got, want)
 	}
 }

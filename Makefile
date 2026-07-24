@@ -1,8 +1,12 @@
-.PHONY: build run tui test cover fmt vet lint clean
+.PHONY: build build-obsidian-plugin run tui test test-obsidian-plugin cover fmt vet lint clean
 
 # Build the acc binary into the current directory.
 build:
 	go build -o acc .
+
+# Build the standalone Obsidian plugin server. It is not part of ACC core.
+build-obsidian-plugin:
+	cd plugins/obsidian/server && go build -o ../bin/obsidian-mcp .
 
 # Run the proxy against the local config.json.
 run:
@@ -15,6 +19,9 @@ tui:
 # Run the test suite with the race detector.
 test:
 	go test -race ./...
+
+test-obsidian-plugin:
+	cd plugins/obsidian/server && go test -race ./...
 
 # Test suite with coverage summary.
 cover:

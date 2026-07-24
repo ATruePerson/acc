@@ -38,9 +38,9 @@ func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRe
 
 	// system prompt -> leading system message (with optional prepend)
 	sys := decodeSystem(ar.System)
-	prepend := cfg.SystemPrepend
-	if route.SystemPrepend != "" {
-		prepend = route.SystemPrepend // per-route overrides the global prepend
+	prepend := ""
+	if cfg != nil {
+		prepend = cfg.SystemPrepend
 	}
 	if prepend != "" {
 		sys = prepend + "\n\n" + sys
@@ -78,14 +78,20 @@ func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRe
 	// the route's own effort when no bucket matches (or no effort block is
 	// configured). Without this fallback an empty effort map would silently
 	// downgrade every thinking request to "low".
-	if ar.Thinking != nil && ar.Thinking.BudgetTokens > 0 {
+	if route.ReasoningLocked {
+		or.ReasoningEffort = route.ReasoningEffort
+	} else if ar.Thinking != nil && ar.Thinking.BudgetTokens > 0 {
 		or.ReasoningEffort = bucketForBudget(ar.Thinking.BudgetTokens, cfg)
 	}
 	if or.ReasoningEffort == "" && route.ReasoningEffort != "" {
 		or.ReasoningEffort = route.ReasoningEffort
 	}
 	if or.ReasoningEffort != "" {
-		or.ReasoningEffort = sanitizeReasoningEffort(route.Provider, or.ReasoningEffort)
+		mapped, err := exactProviderReasoningEffort(route.Provider, or.ReasoningEffort)
+		if err != nil {
+			return nil, err
+		}
+		or.ReasoningEffort = mapped
 	}
 
 	if or.Stream {
@@ -110,7 +116,7 @@ func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRe
 		}
 	}
 
-	return or, nil
+	return requestWithACCPersona(or, route, personaRuntimeClaudeCode)
 }
 
 // translateMessage turns one Anthropic message into one or more OpenAI
@@ -339,32 +345,26 @@ func jsonString(s string) json.RawMessage {
 	return b
 }
 
-func sanitizeReasoningEffort(provider string, effort string) string {
+func exactProviderReasoningEffort(provider string, effort string) (string, error) {
 	if effort == "" {
-		return ""
+		return "", nil
 	}
 	switch provider {
 	case "opencode":
-		// opencode expects one of high, low, medium, max, xhigh
 		switch effort {
 		case "low", "medium", "high", "max", "xhigh":
-			return effort
-		case "ultracode":
-			return "max" // fallback to max
+			return effort, nil
 		default:
-			return "high"
+			return "", fmt.Errorf("provider %q does not support reasoning effort %q", provider, effort)
 		}
-	case "nvidia", "gemini", "zai", "openrouter":
-		// standard OpenAI/Nvidia/etc usually expects low, medium, high
+	case "nvidia", "gemini", "zai", "openrouter", "cloudflare":
 		switch effort {
 		case "low", "medium", "high":
-			return effort
-		case "max", "xhigh", "ultracode":
-			return "high" // fallback to high
+			return effort, nil
 		default:
-			return "high"
+			return "", fmt.Errorf("provider %q does not support reasoning effort %q", provider, effort)
 		}
 	default:
-		return effort
+		return effort, nil
 	}
 }

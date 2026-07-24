@@ -1,44 +1,26 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
-	"path/filepath"
 	"testing"
 )
 
-func TestRouteForUsesSelectedCodexModelWhenDesktopSendsGPT54(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	codexDir := filepath.Join(home, ".codex")
-	if err := os.MkdirAll(codexDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := &Config{Routes: map[string]Route{
-		"opus":   {Provider: "test", Model: "sol-upstream"},
-		"sonnet": {Provider: "test", Model: "terra-upstream"},
-		"haiku":  {Provider: "test", Model: "luna-upstream"},
-	}}
-	s := testServer(cfg)
+func TestRouteForUsesExactRequestedCodexModel(t *testing.T) {
+	s := testServer(codexTestConfig())
 
 	cases := []struct {
 		selected string
-		client   string
 		want     string
 	}{
-		{codexSolID, "gpt-5.4", "sol-upstream"},
-		{codexTerraID, "gpt-5.4-mini", "terra-upstream"},
-		{codexLunaID, "gpt-5.4", "luna-upstream"},
+		{codexOpusID, "z-ai/glm-5.2"},
+		{codexSonnetID, "big-pickle"},
+		{codexHaikuID, "stepfun-ai/step-3.7-flash"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.selected, func(t *testing.T) {
-			config := "model = \"" + tc.selected + "\"\nmodel_provider = \"acc\"\n"
-			if err := os.WriteFile(filepath.Join(codexDir, "config.toml"), []byte(config), 0600); err != nil {
-				t.Fatal(err)
-			}
-
-			route, err := s.routeFor(tc.client)
+			route, err := s.routeFor(tc.selected)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -49,19 +31,89 @@ func TestRouteForUsesSelectedCodexModelWhenDesktopSendsGPT54(t *testing.T) {
 	}
 }
 
-func TestRouteForDoesNotTreatInactiveCodexConfigAsASelectedModel(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	codexDir := filepath.Join(home, ".codex")
-	if err := os.MkdirAll(codexDir, 0755); err != nil {
+func TestRouteForRejectsUnregisteredCodexModel(t *testing.T) {
+	s := testServer(codexTestConfig())
+	if _, err := s.routeFor("gpt-5.6-unknown"); err == nil {
+		t.Fatal("expected unregistered Codex model to be rejected")
+	}
+}
+
+func TestResponseModelChainAcceptsLegacyCodexIDs(t *testing.T) {
+	s := testServer(codexTestConfig())
+	cases := []struct {
+		legacy  string
+		current string
+	}{
+		{"opus", codexOpusID},
+		{"sonnet", codexSonnetID},
+		{"haiku", codexHaikuID},
+		{"openai/codex-5.6-sol", codexOpusID},
+	}
+	for _, tc := range cases {
+		t.Run(tc.legacy, func(t *testing.T) {
+			chain, err := s.responseModelChain(tc.legacy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(chain) == 0 || chain[0].ID != tc.current {
+				t.Fatalf("resolved chain = %+v, want primary %q", chain, tc.current)
+			}
+		})
+	}
+}
+
+func TestNormalizeLegacyResponsesRequestMapsOldHighEffort(t *testing.T) {
+	req := &ResponsesRequest{
+		Model:     "opus",
+		Reasoning: &ResponsesReasoning{Effort: "high"},
+	}
+	normalizeLegacyResponsesRequest(req)
+	if req.Model != codexOpusID || req.Reasoning.Effort != "max" {
+		t.Fatalf("normalized request = %+v, want model=%q effort=max", req, codexOpusID)
+	}
+}
+
+func TestConfiguredSolTerraLunaChainsMatchTheirRoles(t *testing.T) {
+	raw, err := os.ReadFile("config.json")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(codexDir, "config.toml"), []byte("model = \""+codexTerraID+"\"\nmodel_provider = \"openai\"\n"), 0600); err != nil {
+	var cfg Config
+	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatal(err)
+	}
+	s := testServer(&cfg)
+	wantChains := map[string][]string{
+		codexOpusID:   {codexOpusID, "acc-openrouter-nemotron-ultra", "acc-gemini-3.5-flash", "acc-minimax-m3"},
+		codexSonnetID: {codexSonnetID, "acc-openrouter-hy3", "acc-gemini-3.5-flash", "acc-nemotron-super"},
+		codexHaikuID:  {codexHaikuID, "acc-nemotron-super", "acc-minimax-m3"},
+	}
+	for model, want := range wantChains {
+		chain, err := s.responseModelChain(model)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(chain) != len(want) {
+			t.Fatalf("%s chain length = %d, want %d: %+v", model, len(chain), len(want), chain)
+		}
+		for i := range want {
+			if chain[i].ID != want[i] {
+				t.Fatalf("%s chain[%d] = %s, want %s", model, i, chain[i].ID, want[i])
+			}
+		}
 	}
 
-	s := testServer(&Config{Routes: map[string]Route{"sonnet": {Model: "terra-upstream"}}})
-	if _, err := s.routeFor("gpt-5.4"); err == nil {
-		t.Fatal("expected an unrecognized gpt-5.4 model when ACC is not active")
+	imageWithTools := &ResponsesRequest{
+		Model: codexOpusID,
+		Input: json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]`),
+		Tools: []ResponsesTool{{Type: "function", Name: "inspect_image", Parameters: json.RawMessage(`{"type":"object"}`)}},
+	}
+	chain, _ := s.responseModelChain(codexOpusID)
+	selected, err := selectResponseModelChain(imageWithTools, chain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selected) != 1 || selected[0].ID != "acc-gemini-3.5-flash" {
+		t.Fatalf("Sol image+tool route = %+v, want Gemini only", selected)
 	}
 }

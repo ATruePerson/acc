@@ -2,7 +2,7 @@ package main
 
 import (
 	"encoding/json"
-	"reflect"
+	"os"
 	"strings"
 	"testing"
 )
@@ -73,7 +73,7 @@ func TestSystemPromptBecomesFirstMessage(t *testing.T) {
 	}
 }
 
-func TestRouteSystemPrependOverridesGlobal(t *testing.T) {
+func TestLegacyRoutePersonaIsNotInjected(t *testing.T) {
 	ar := &AnthropicRequest{
 		Model:    "x",
 		System:   json.RawMessage(`"base"`),
@@ -85,14 +85,39 @@ func TestRouteSystemPrependOverridesGlobal(t *testing.T) {
 	or, _ := translateRequest(ar, route, cfg)
 
 	sys := string(or.Messages[0].Content)
-	if !strings.Contains(sys, "I am Claude Fable 5.") {
-		t.Fatalf("route prepend missing from system: %s", sys)
+	if strings.Contains(sys, "I am Claude Fable 5.") {
+		t.Fatalf("legacy route persona was injected: %s", sys)
 	}
-	if strings.Contains(sys, "GLOBAL") {
-		t.Fatalf("global prepend should be overridden, got: %s", sys)
+	if !strings.Contains(sys, "GLOBAL") {
+		t.Fatalf("global user instruction was dropped: %s", sys)
 	}
 	if !strings.Contains(sys, "base") {
 		t.Fatalf("original system text dropped: %s", sys)
+	}
+	if !strings.Contains(sys, "Kabir's Second Brain") {
+		t.Fatalf("ACC persona missing: %s", sys)
+	}
+}
+
+func TestAnthropicTranslationUsesOnlyClaudeRuntimePersona(t *testing.T) {
+	ar := &AnthropicRequest{
+		Model:    "claude-sonnet",
+		System:   json.RawMessage(`"Claude platform instruction"`),
+		Messages: []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"hello"`)}},
+	}
+	or, err := translateRequest(ar, Route{Provider: "opencode", Model: "big-pickle"}, testCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(or.Messages) == 0 {
+		t.Fatal("translated request has no system message")
+	}
+	system := decodeStringContent(or.Messages[0].Content)
+	if !strings.Contains(system, "Claude Code runtime/tool adapter") || strings.Contains(system, "Codex runtime/tool adapter") {
+		t.Fatalf("Anthropic request has the wrong runtime adapter:\n%s", system)
+	}
+	if !strings.Contains(system, "Claude platform instruction") {
+		t.Fatalf("Claude platform instruction was dropped:\n%s", system)
 	}
 }
 
@@ -176,33 +201,174 @@ func TestConfigAliasOverridesAndExtends(t *testing.T) {
 	}
 }
 
+func TestFamilyAliasesUseConfiguredRoutesExactly(t *testing.T) {
+	want := map[string]Route{
+		"opus":   {Provider: "openrouter", Model: "tencent/hy3:free"},
+		"sonnet": {Provider: "opencode", Model: "big-pickle"},
+		"haiku":  {Provider: "nvidia", Model: "nvidia/nemotron-3-super-120b-a12b"},
+	}
+	s := testServer(&Config{
+		AliasRoutes: want,
+		Routes: map[string]Route{
+			// These routes are owned by the separate Codex capability registry.
+			// Legacy family aliases must not read or modify them.
+			"opus":   {Provider: "protected", Model: "codex-opus"},
+			"sonnet": {Provider: "protected", Model: "codex-sonnet"},
+			"haiku":  {Provider: "protected", Model: "codex-haiku"},
+		},
+		Aliases: map[string]Route{
+			// Family aliases must not drift from their named route if an old
+			// duplicated aliases block remains in a user's config.
+			"anthropic/claude-opus":   {Provider: "stale", Model: "old-opus"},
+			"anthropic/claude-sonnet": {Provider: "stale", Model: "old-sonnet"},
+			"anthropic/claude-haiku":  {Provider: "stale", Model: "old-haiku"},
+		},
+	})
+
+	for family, route := range want {
+		for _, id := range []string{family, "claude-" + family, "anthropic/claude-" + family, "claude-" + family + "-4-5", "anthropic/claude-" + family + "-4-5-20260701"} {
+			got, err := s.routeFor(id)
+			if err != nil {
+				t.Fatalf("routeFor(%q): %v", id, err)
+			}
+			if got.Provider != route.Provider || got.Model != route.Model {
+				t.Errorf("routeFor(%q) = %s/%s, want %s/%s", id, got.Provider, got.Model, route.Provider, route.Model)
+			}
+		}
+	}
+
+	if _, err := s.routeFor("claude-opus-copy"); err == nil {
+		t.Fatal("substring lookalike unexpectedly resolved as the opus alias")
+	}
+}
+
+func TestConfiguredAliasRoutesKeepProviderDiversityAndMaximumReasoning(t *testing.T) {
+	raw, err := os.ReadFile("config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Aliases) != 0 {
+		t.Fatalf("family routes are duplicated in aliases: %v", cfg.Aliases)
+	}
+
+	opus := cfg.AliasRoutes["opus"]
+	sonnet := cfg.AliasRoutes["sonnet"]
+	haiku := cfg.AliasRoutes["haiku"]
+	if opus.Provider != "nvidia" || opus.Model != "z-ai/glm-5.2" || opus.ReasoningEffort != "high" {
+		t.Fatalf("opus route = %+v", opus)
+	}
+	if sonnet.Provider != "opencode" || sonnet.Model != "big-pickle" || sonnet.ReasoningEffort != "max" {
+		t.Fatalf("sonnet route = %+v", sonnet)
+	}
+	if haiku.Provider != "nvidia" || haiku.Model != "stepfun-ai/step-3.7-flash" {
+		t.Fatalf("haiku route = %+v", haiku)
+	}
+
+	if len(opus.Fallbacks) != 1 || opus.Fallbacks[0].Provider != "openrouter" || opus.Fallbacks[0].Model != "nvidia/nemotron-3-ultra-550b-a55b:free" {
+		t.Fatalf("opus fallback = %+v", opus.Fallbacks)
+	}
+	if len(sonnet.Fallbacks) != 2 || sonnet.Fallbacks[0].Provider != "openrouter" || sonnet.Fallbacks[0].Model != "tencent/hy3:free" || sonnet.Fallbacks[1].Provider != "nvidia" || sonnet.Fallbacks[1].Model != "nvidia/nemotron-3-super-120b-a12b" {
+		t.Fatalf("sonnet fallback = %+v", sonnet.Fallbacks)
+	}
+	if len(haiku.Fallbacks) != 0 {
+		t.Fatalf("haiku fallback = %+v", haiku.Fallbacks)
+	}
+	for name, route := range map[string]Route{
+		"opus": opus, "opus fallback": opus.Fallbacks[0],
+		"sonnet": sonnet, "sonnet fallback 1": sonnet.Fallbacks[0], "sonnet fallback 2": sonnet.Fallbacks[1],
+		"haiku": haiku,
+	} {
+		if !route.ReasoningLocked {
+			t.Errorf("%s reasoning is not locked to provider maximum", name)
+		}
+	}
+
+	for name, route := range map[string]Route{"opus": opus, "sonnet fallback": sonnet.Fallbacks[1]} {
+		if got := route.ExtraBody["reasoning_budget"]; got != float64(32000) {
+			t.Fatalf("%s reasoning budget = %v, want 32000", name, got)
+		}
+		thinking, ok := route.ExtraBody["chat_template_kwargs"].(map[string]any)
+		if !ok || thinking["enable_thinking"] != true {
+			t.Fatalf("%s does not enable NVIDIA thinking: %v", name, route.ExtraBody)
+		}
+	}
+
+	var defaults Config
+	if err := json.Unmarshal([]byte(defaultConfigJSON), &defaults); err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range []string{"opus", "sonnet", "haiku"} {
+		configured, _ := json.Marshal(cfg.AliasRoutes[family])
+		setupDefault, _ := json.Marshal(defaults.AliasRoutes[family])
+		if string(configured) != string(setupDefault) {
+			t.Errorf("default %s alias route differs from config.json\nconfig: %s\ndefault: %s", family, configured, setupDefault)
+		}
+	}
+}
+
+func TestReasoningLockedKeepsProviderMaximum(t *testing.T) {
+	ar := &AnthropicRequest{Thinking: &Thinking{BudgetTokens: 32000}}
+	route := Route{Provider: "opencode", Model: "big-pickle", ReasoningEffort: "max", ReasoningLocked: true}
+	or, err := translateRequest(ar, route, testCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if or.ReasoningEffort != "max" {
+		t.Fatalf("locked reasoning effort = %q, want max", or.ReasoningEffort)
+	}
+
+	route.ReasoningLocked = false
+	or, err = translateRequest(ar, route, testCfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if or.ReasoningEffort != "high" {
+		t.Fatalf("unlocked reasoning effort = %q, want budget-mapped high", or.ReasoningEffort)
+	}
+}
+
+func TestValidateConfigChecksAliasRouteFallbackProviders(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]Provider{"openrouter": {}},
+		AliasRoutes: map[string]Route{
+			"opus": {
+				Provider: "openrouter",
+				Model:    "tencent/hy3:free",
+				Fallbacks: []Route{
+					{Provider: "missing", Model: "fallback"},
+				},
+			},
+		},
+	}
+	if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "provider \"missing\" not defined") {
+		t.Fatalf("validateConfig error = %v", err)
+	}
+}
+
 func TestCodexAliasesFollowConfiguredFamilies(t *testing.T) {
-	cfg := &Config{Routes: map[string]Route{
-		"opus": {
-			Provider: "nvidia", Model: "z-ai/glm-5.2",
-			Fallbacks: []Route{{Provider: "nvidia", Model: "minimaxai/minimax-m3"}},
-		},
-		"sonnet": {
-			Provider: "opencode", Model: "big-pickle",
-			Fallbacks: []Route{{Provider: "nvidia", Model: "nvidia/nemotron-3-super-120b-a12b"}},
-		},
-		"haiku": {Provider: "nvidia", Model: "stepfun-ai/step-3.7-flash"},
-	}}
+	cfg := codexTestConfig()
 	s := testServer(cfg)
 	tests := []struct {
-		id, family string
+		id, routeName string
 	}{
-		{"openai/codex-5.6-sol", "opus"},
-		{"openai/codex-5.6-terra", "sonnet"},
-		{"openai/codex-5.6-luna", "haiku"},
+		{codexOpusID, "sol"},
+		{codexSonnetID, "terra"},
+		{codexHaikuID, "luna"},
 	}
 	for _, tc := range tests {
 		route, err := s.routeFor(tc.id)
 		if err != nil {
 			t.Fatalf("routeFor(%q): %v", tc.id, err)
 		}
-		if want := cfg.Routes[tc.family]; !reflect.DeepEqual(route, want) {
-			t.Errorf("routeFor(%q) = %+v, want full %s route %+v", tc.id, route, tc.family, want)
+		if want := cfg.Routes[tc.routeName]; route.Provider != want.Provider || route.Model != want.Model {
+			t.Errorf("routeFor(%q) = %s/%s, want %s/%s", tc.id, route.Provider, route.Model, want.Provider, want.Model)
+		}
+		if len(route.Reasoning) == 0 || route.MaxTokens == 0 {
+			t.Errorf("routeFor(%q) did not apply registry capabilities: %+v", tc.id, route)
 		}
 	}
 }
@@ -289,26 +455,31 @@ func TestRouteFor(t *testing.T) {
 	}
 }
 
-func TestSanitizeReasoningEffort(t *testing.T) {
+func TestExactProviderReasoningEffort(t *testing.T) {
 	testCases := []struct {
 		provider string
 		effort   string
 		expected string
+		wantErr  bool
 	}{
-		{"opencode", "ultracode", "max"},
-		{"opencode", "max", "max"},
-		{"opencode", "high", "high"},
-		{"nvidia", "ultracode", "high"},
-		{"nvidia", "max", "high"},
-		{"nvidia", "medium", "medium"},
-		{"gemini", "xhigh", "high"},
-		{"random", "ultracode", "ultracode"}, // unknown provider gets returned as is
+		{"opencode", "ultracode", "", true},
+		{"opencode", "max", "max", false},
+		{"opencode", "high", "high", false},
+		{"nvidia", "ultracode", "", true},
+		{"nvidia", "max", "", true},
+		{"nvidia", "medium", "medium", false},
+		{"gemini", "xhigh", "", true},
+		{"random", "ultracode", "ultracode", false},
 	}
 
 	for _, tc := range testCases {
-		got := sanitizeReasoningEffort(tc.provider, tc.effort)
+		got, err := exactProviderReasoningEffort(tc.provider, tc.effort)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("exactProviderReasoningEffort(%q, %q) error = %v, wantErr %v", tc.provider, tc.effort, err, tc.wantErr)
+			continue
+		}
 		if got != tc.expected {
-			t.Errorf("sanitizeReasoningEffort(%q, %q) = %q, want %q", tc.provider, tc.effort, got, tc.expected)
+			t.Errorf("exactProviderReasoningEffort(%q, %q) = %q, want %q", tc.provider, tc.effort, got, tc.expected)
 		}
 	}
 }

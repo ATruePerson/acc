@@ -5,60 +5,132 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
-	codexSolID   = "openai/codex-5.6-sol"
-	codexTerraID = "openai/codex-5.6-terra"
-	codexLunaID  = "openai/codex-5.6-luna"
+	codexOpusID   = "gpt-5.6-sol"
+	codexSonnetID = "gpt-5.6-terra"
+	codexHaikuID  = "gpt-5.6-luna"
 )
 
 type codexNamedModel struct {
-	ID      string
-	Display string
-	Family  string
+	ID         string
+	Display    string
+	Capability ModelCapability
+	Route      Route
 }
 
-func codexNamedModels() []codexNamedModel {
-	return []codexNamedModel{
-		{ID: codexSolID, Display: "Codex 5.6 Sol", Family: "opus"},
-		{ID: codexTerraID, Display: "Codex 5.6 Terra", Family: "sonnet"},
-		{ID: codexLunaID, Display: "Codex 5.6 Luna", Family: "haiku"},
-	}
+func codexNamedModels(cfg *Config) []codexNamedModel {
+	return codexNamedModelsWithAuth(cfg, nil)
 }
 
-func codexModelCatalogEntries() []map[string]any {
-	levels := []map[string]any{
-		{"effort": "low", "description": "Fast responses with lighter reasoning"},
-		{"effort": "medium", "description": "Balanced speed and reasoning"},
-		{"effort": "high", "description": "More reasoning for difficult work"},
-		{"effort": "xhigh", "description": "Extra reasoning for complex work"},
+func codexNamedModelsWithAuth(cfg *Config, auth *authManager) []codexNamedModel {
+	byID := make(map[string]codexNamedModel, len(cfg.Models))
+	for _, id := range enabledModelIDs(cfg) {
+		capability := cfg.Models[id]
+		if capability.CatalogVisible != nil && !*capability.CatalogVisible {
+			continue
+		}
+		route, err := resolveCapabilityRoute(cfg, id, capability)
+		if err != nil {
+			continue
+		}
+		realID := route.Provider + "/" + strings.TrimPrefix(route.Model, "/")
+		candidate := codexNamedModel{
+			ID: realID, Display: route.Model + " (" + route.Provider + ")",
+			Capability: capability, Route: route,
+		}
+		if existing, ok := byID[realID]; ok && existing.Capability.CatalogPriority > 0 &&
+			(candidate.Capability.CatalogPriority == 0 || existing.Capability.CatalogPriority <= candidate.Capability.CatalogPriority) {
+			continue
+		}
+		byID[realID] = candidate
 	}
-	models := codexNamedModels()
+	for _, candidate := range nativeCodexModels(cfg, auth) {
+		if _, exists := byID[candidate.ID]; !exists {
+			byID[candidate.ID] = candidate
+		}
+	}
+	models := make([]codexNamedModel, 0, len(byID))
+	for _, model := range byID {
+		models = append(models, model)
+	}
+	sort.SliceStable(models, func(i, j int) bool {
+		left, right := models[i].Capability.CatalogPriority, models[j].Capability.CatalogPriority
+		if left == 0 {
+			left = int(^uint(0) >> 1)
+		}
+		if right == 0 {
+			right = int(^uint(0) >> 1)
+		}
+		if left != right {
+			return left < right
+		}
+		return models[i].ID < models[j].ID
+	})
+	return models
+}
+
+func codexModelCatalogEntries(cfg *Config) []map[string]any {
+	return codexModelCatalogEntriesWithAuth(cfg, nil)
+}
+
+func codexModelCatalogEntriesWithAuth(cfg *Config, auth *authManager) []map[string]any {
+	models := codexNamedModelsWithAuth(cfg, auth)
 	entries := make([]map[string]any, 0, len(models))
 	for i, model := range models {
+		levels := make([]map[string]any, 0, len(model.Capability.Reasoning))
+		for _, effort := range supportedEfforts(model.Capability) {
+			levels = append(levels, map[string]any{
+				"effort":      effort,
+				"description": reasoningDescription(effort),
+			})
+		}
+		defaultEffort := "minimal"
+		for _, candidate := range []string{"max", "xhigh", "high", "medium", "low", "minimal"} {
+			if _, ok := model.Capability.Reasoning[candidate]; ok {
+				defaultEffort = candidate
+				break
+			}
+		}
+		modalities := []string{"text"}
+		supportsImages := model.Capability.ImageInputSupport || model.Capability.ImageModel != "" || len(model.Capability.ImageFallbackModels) > 0
+		if supportsImages {
+			modalities = append(modalities, "image")
+		}
+		description := model.Capability.Description
+		if description == "" {
+			description = fmt.Sprintf("Kabir's Second Brain via %s/%s", model.Route.Provider, model.Route.Model)
+		}
+		effectiveContextPercent := 95
+		if model.Capability.MaxContext > 0 && model.Capability.MaxOutput > 0 && model.Capability.MaxOutput < model.Capability.MaxContext {
+			effectiveContextPercent = (model.Capability.MaxContext - model.Capability.MaxOutput) * 100 / model.Capability.MaxContext
+		}
 		entries = append(entries, map[string]any{
 			"slug": model.ID, "display_name": model.Display,
-			"description": "Routed through ACC", "default_reasoning_level": "high",
+			"description": description, "default_reasoning_level": defaultEffort,
 			"supported_reasoning_levels": levels, "shell_type": "shell_command",
 			"visibility": "list", "supported_in_api": true, "priority": i + 1,
 			"additional_speed_tiers": []string{}, "service_tiers": []any{},
 			"availability_nux": nil, "upgrade": nil,
-			"base_instructions": "You are Codex, a coding agent. Work in the user's repository, follow the supplied instructions, and use tools when needed.",
+			"base_instructions": accPersonaForRuntime(model.Route.Provider, model.Route.Model, personaRuntimeCodex),
 			"model_messages": map[string]any{
 				"instructions_template": nil, "instructions_variables": nil, "approvals": nil,
 			},
 			"include_skills_usage_instructions": true,
 			"supports_reasoning_summaries":      false, "default_reasoning_summary": "none",
 			"support_verbosity": false, "default_verbosity": "low",
-			"apply_patch_tool_type": "freeform", "web_search_tool_type": "text_and_image",
+			"apply_patch_tool_type":        "freeform",
 			"truncation_policy":            map[string]any{"mode": "tokens", "limit": 10000},
-			"supports_parallel_tool_calls": true, "supports_image_detail_original": true,
-			"context_window": 131072, "max_context_window": 131072,
-			"comp_hash": "acc", "effective_context_window_percent": 95,
-			"experimental_supported_tools": []any{}, "input_modalities": []string{"text", "image"},
+			"supports_parallel_tool_calls": model.Capability.ToolCallSupport, "supports_image_detail_original": supportsImages,
+			"context_window": model.Capability.MaxContext, "max_context_window": model.Capability.MaxContext,
+			"max_output_tokens": model.Capability.MaxOutput,
+			"comp_hash":         "acc", "effective_context_window_percent": effectiveContextPercent,
+			"experimental_supported_tools": []any{}, "input_modalities": modalities,
 			"supports_search_tool": false, "use_responses_lite": false,
 			"tool_mode": "code_mode_only", "multi_agent_version": "v1",
 		})
@@ -66,8 +138,31 @@ func codexModelCatalogEntries() []map[string]any {
 	return entries
 }
 
-func codexModelCatalogJSON() []byte {
-	b, _ := json.MarshalIndent(map[string]any{"models": codexModelCatalogEntries()}, "", "  ")
+func reasoningDescription(effort string) string {
+	switch effort {
+	case "minimal":
+		return "No optional provider reasoning effort"
+	case "low":
+		return "Fast responses with lighter reasoning"
+	case "medium":
+		return "Balanced speed and reasoning"
+	case "high":
+		return "More reasoning for difficult work"
+	case "xhigh":
+		return "Extra reasoning for complex work"
+	case "max":
+		return "Maximum provider-supported reasoning"
+	default:
+		return effort
+	}
+}
+
+func codexModelCatalogJSON(cfg *Config) []byte {
+	return codexModelCatalogJSONWithAuth(cfg, nil)
+}
+
+func codexModelCatalogJSONWithAuth(cfg *Config, auth *authManager) []byte {
+	b, _ := json.MarshalIndent(map[string]any{"models": codexModelCatalogEntriesWithAuth(cfg, auth)}, "", "  ")
 	return append(b, '\n')
 }
 
@@ -78,8 +173,18 @@ type codexRestoreState struct {
 	Catalog        []byte `json:"catalog,omitempty"`
 }
 
-func configureCodexApp(configPath, catalogPath, restorePath, baseURL, model string) error {
-	if !isCodexModel(model) {
+const (
+	accCodexRootBegin = "# BEGIN ACC CODEX OWNED"
+	accCodexRootEnd   = "# END ACC CODEX OWNED"
+	accCodexProvider  = "# ACC CODEX OWNED PROVIDER"
+)
+
+func configureCodexApp(configPath, catalogPath, restorePath, baseURL, model string, cfg *Config) error {
+	return configureCodexAppWithAuth(configPath, catalogPath, restorePath, baseURL, model, cfg, nil)
+}
+
+func configureCodexAppWithAuth(configPath, catalogPath, restorePath, baseURL, model string, cfg *Config, auth *authManager) error {
+	if !isCodexModelWithAuth(cfg, auth, model) {
 		return fmt.Errorf("unknown Codex model %q", model)
 	}
 	if err := saveCodexRestoreState(configPath, catalogPath, restorePath); err != nil {
@@ -90,8 +195,16 @@ func configureCodexApp(configPath, catalogPath, restorePath, baseURL, model stri
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	if len(original) > 0 {
+		if _, err := writeTimestampedBackup(configPath, original); err != nil {
+			return fmt.Errorf("timestamp Codex config: %w", err)
+		}
+	}
 	configured := renderCodexConfig(string(original), catalogPath, baseURL, model)
-	if err := atomicWriteFile(catalogPath, codexModelCatalogJSON(), 0600); err != nil {
+	if err := validateCodexConfigText(configured); err != nil {
+		return fmt.Errorf("generated Codex config is invalid: %w", err)
+	}
+	if err := atomicWriteFile(catalogPath, codexModelCatalogJSONWithAuth(cfg, auth), 0600); err != nil {
 		return fmt.Errorf("write Codex model catalog: %w", err)
 	}
 	if err := atomicWriteFile(configPath, []byte(configured), 0600); err != nil {
@@ -111,6 +224,16 @@ func restoreCodexApp(configPath, catalogPath, restorePath string) error {
 	var state codexRestoreState
 	if err := json.Unmarshal(b, &state); err != nil {
 		return fmt.Errorf("read restore state: %w", err)
+	}
+	if current, readErr := os.ReadFile(configPath); readErr == nil {
+		if _, err := writeTimestampedBackup(configPath, current); err != nil {
+			return fmt.Errorf("back up current Codex config: %w", err)
+		}
+	}
+	if state.ConfigExisted {
+		if err := validateCodexConfigText(string(state.Config)); err != nil {
+			return fmt.Errorf("saved Codex config is invalid: %w", err)
+		}
 	}
 	if state.ConfigExisted {
 		if err := atomicWriteFile(configPath, state.Config, 0600); err != nil {
@@ -160,9 +283,21 @@ func renderCodexConfig(original, catalogPath, baseURL, model string) string {
 	lines := strings.Split(strings.ReplaceAll(original, "\r\n", "\n"), "\n")
 	cleaned := make([]string, 0, len(lines)+10)
 	inACCProvider := false
+	inOwnedRoot := false
 	inRoot := true
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
+		if trimmed == accCodexRootBegin {
+			inOwnedRoot = true
+			continue
+		}
+		if trimmed == accCodexRootEnd {
+			inOwnedRoot = false
+			continue
+		}
+		if inOwnedRoot || trimmed == accCodexProvider {
+			continue
+		}
 		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
 			inRoot = false
 			inACCProvider = trimmed == "[model_providers.acc]"
@@ -176,8 +311,12 @@ func renderCodexConfig(original, catalogPath, baseURL, model string) string {
 			key, _, ok := strings.Cut(trimmed, "=")
 			if ok {
 				switch strings.TrimSpace(key) {
-				case "model", "model_provider", "model_catalog_json":
+				case "model", "model_provider", "model_catalog_json", "web_search":
 					continue
+				case "openai_base_url":
+					if legacyOpenCodexDetected(line) {
+						continue
+					}
 				}
 			}
 		}
@@ -193,9 +332,12 @@ func renderCodexConfig(original, catalogPath, baseURL, model string) string {
 		}
 	}
 	root := []string{
+		accCodexRootBegin,
 		"model = " + strconv.Quote(model),
 		`model_provider = "acc"`,
 		"model_catalog_json = " + strconv.Quote(catalogPath),
+		`web_search = "disabled"`,
+		accCodexRootEnd,
 		"",
 	}
 	cleaned = append(cleaned[:insertAt], append(root, cleaned[insertAt:]...)...)
@@ -204,6 +346,7 @@ func renderCodexConfig(original, catalogPath, baseURL, model string) string {
 	}
 	cleaned = append(cleaned,
 		"",
+		accCodexProvider,
 		"[model_providers.acc]",
 		`name = "ACC"`,
 		"base_url = "+strconv.Quote(strings.TrimRight(baseURL, "/")),
@@ -214,8 +357,12 @@ func renderCodexConfig(original, catalogPath, baseURL, model string) string {
 	return strings.Join(cleaned, "\n") + "\n"
 }
 
-func isCodexModel(model string) bool {
-	for _, candidate := range codexNamedModels() {
+func isCodexModel(cfg *Config, model string) bool {
+	return isCodexModelWithAuth(cfg, nil, model)
+}
+
+func isCodexModelWithAuth(cfg *Config, auth *authManager, model string) bool {
+	for _, candidate := range codexNamedModelsWithAuth(cfg, auth) {
 		if model == candidate.ID {
 			return true
 		}
@@ -223,49 +370,77 @@ func isCodexModel(model string) bool {
 	return false
 }
 
-// activeCodexModel reads the route selected by `acc codex`. Desktop currently
-// sends its own gpt-5.4 IDs for Custom, so the proxy uses this as the source of
-// truth when it receives those IDs.
-func activeCodexModel() (string, bool) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", false
+func validateCodexConfigText(text string) error {
+	seenTables := map[string]bool{}
+	for lineNumber, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "[") {
+			if !strings.HasSuffix(trimmed, "]") || strings.Count(trimmed, "[") != strings.Count(trimmed, "]") {
+				return fmt.Errorf("line %d has an invalid table header", lineNumber+1)
+			}
+			isArrayTable := strings.HasPrefix(trimmed, "[[")
+			if seenTables[trimmed] && !isArrayTable {
+				return fmt.Errorf("duplicate table %s", trimmed)
+			}
+			seenTables[trimmed] = true
+			continue
+		}
 	}
-	return activeCodexModelFromConfig(filepath.Join(home, ".codex", "config.toml"))
+	return nil
 }
 
-func activeCodexModelFromConfig(path string) (string, bool) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return "", false
+func writeTimestampedBackup(path string, data []byte) (string, error) {
+	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
+	backup := path + ".acc-backup-" + stamp
+	if err := atomicWriteFile(backup, data, 0600); err != nil {
+		return "", err
 	}
+	return backup, nil
+}
 
-	var model, provider string
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+func removeACCFromCodexConfig(original string) string {
+	lines := strings.Split(strings.ReplaceAll(original, "\r\n", "\n"), "\n")
+	out := make([]string, 0, len(lines))
+	inOwnedRoot, inACCProvider := false, false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == accCodexRootBegin {
+			inOwnedRoot = true
 			continue
 		}
-		if strings.HasPrefix(line, "[") {
-			break // Only the root settings choose the desktop model.
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok {
+		if trimmed == accCodexRootEnd {
+			inOwnedRoot = false
 			continue
 		}
-		value = strings.TrimSpace(value)
-		unquoted, err := strconv.Unquote(value)
-		if err != nil {
+		if inOwnedRoot || trimmed == accCodexProvider {
 			continue
 		}
-		switch strings.TrimSpace(key) {
-		case "model":
-			model = unquoted
-		case "model_provider":
-			provider = unquoted
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			if trimmed == "[model_providers.acc]" {
+				inACCProvider = true
+				continue
+			}
+			inACCProvider = false
+		}
+		if !inACCProvider {
+			out = append(out, line)
 		}
 	}
-	return model, provider == "acc" && isCodexModel(model)
+	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+		out = out[:len(out)-1]
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	return strings.Join(out, "\n") + "\n"
+}
+
+func legacyOpenCodexDetected(config string) bool {
+	lower := strings.ToLower(config)
+	return strings.Contains(lower, "127.0.0.1:10100") || strings.Contains(lower, "localhost:10100") || strings.Contains(lower, "opencodex")
 }
 
 func atomicWriteFile(path string, data []byte, mode os.FileMode) error {

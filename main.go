@@ -16,7 +16,10 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -54,10 +57,15 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
+	auth, authErr := newDefaultAuthManager()
+	if authErr != nil {
+		log.Printf("auth: %v", authErr)
+	}
 	s := &server{
 		cfgPath: path,
 		http:    newUpstreamHTTPClient(),
 		limiter: newProviderRateLimiter(cfg),
+		auth:    auth,
 	}
 	s.cfg.Store(cfg)
 	if fi, statErr := os.Stat(path); statErr == nil {
@@ -87,7 +95,9 @@ func main() {
 		http.NotFound(w, r)
 	})
 
-	addr := fmt.Sprintf(":%d", cfg.Port)
+	// ACC is a local gateway. Binding explicitly to loopback prevents its
+	// configured provider credentials from becoming reachable on the LAN.
+	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
 
 	srv := &http.Server{Addr: addr, Handler: corsMiddleware(mux)}
 
@@ -141,11 +151,14 @@ func newUpstreamHTTPClient() *http.Client {
 type server struct {
 	// cfg is hot-swappable: reloadIfChanged replaces the whole pointer when
 	// config.json changes on disk, so model edits take effect without a restart.
-	cfg        atomic.Pointer[Config]
-	cfgPath    string
-	cfgModNano atomic.Int64
-	http       *http.Client
-	limiter    *providerRateLimiter
+	cfg         atomic.Pointer[Config]
+	cfgPath     string
+	cfgModNano  atomic.Int64
+	http        *http.Client
+	limiter     *providerRateLimiter
+	auth        *authManager
+	responsesMu sync.RWMutex
+	responses   map[string]*ResponsesResponse
 }
 
 // reloadIfChanged re-reads the config file when its modtime has advanced, so
@@ -231,11 +244,10 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	routes := append([]Route{route}, route.Fallbacks...)
 
 	var (
-		or              *OpenAIRequest
-		resp            *http.Response
-		activeRoute     Route
-		lastRequestJSON []byte
-		streamReader    io.Reader
+		or           *OpenAIRequest
+		resp         *http.Response
+		activeRoute  Route
+		streamReader io.Reader
 	)
 
 	for ri, currentRoute := range routes {
@@ -274,8 +286,6 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		lastRequestJSON = body
-
 		// When a fallback route exists, don't hammer a 503ing model for minutes —
 		// bail after a couple quick tries so latency-sensitive callers (e.g. the
 		// Agent safety classifier) fall through to a healthy route instead of
@@ -304,9 +314,13 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 			resp, err = s.http.Do(upstream)
 			if err != nil {
-				httpErr(w, 502, "upstream: "+err.Error())
-				logit(currentRoute.Model, 502, 0, 0, 0, or.ReasoningEffort)
-				return
+				if ri == len(routes)-1 {
+					httpErr(w, 502, "upstream: "+err.Error())
+					logit(currentRoute.Model, 502, 0, 0, 0, or.ReasoningEffort)
+					return
+				}
+				log.Printf("upstream connection failed for %s/%s, trying fallback: %v", currentRoute.Provider, currentRoute.Model, err)
+				break
 			}
 
 			if resp.StatusCode == 503 && attempt < maxAttempts {
@@ -334,19 +348,19 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			}
 			break
 		}
+		if resp == nil {
+			continue
+		}
 
-		// On 429 (rate limited) OR 5xx (provider crashed), try the next fallback
-		// route if one is configured. Same backup list — more failure types trip it.
-		// Also treat a NVIDIA NIM "DEGRADED" 400 as failover-worthy: the model node
-		// is disabled upstream ("DEGRADED function cannot be invoked"), not a bad
-		// request, so the next fallback can actually succeed.
+		// On provider failures, try the next configured fallback. This includes a
+		// provider's own generic 400, which is different from a bad client request.
 		shouldFallback := resp.StatusCode == 429 || resp.StatusCode >= 500
 		var degradedBody []byte
 		if !shouldFallback && resp.StatusCode == 400 {
 			degradedBody, _ = io.ReadAll(resp.Body)
 			resp.Body.Close()
 			resp.Body = io.NopCloser(bytes.NewReader(degradedBody))
-			if bytes.Contains(degradedBody, []byte("DEGRADED")) || bytes.Contains(degradedBody, []byte("cannot be invoked")) {
+			if recoverableProvider400(degradedBody) {
 				shouldFallback = true
 			}
 		}
@@ -394,7 +408,6 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
 		log.Printf("upstream %d for model=%s->%s/%s: %s", resp.StatusCode, ar.Model, activeRoute.Provider, activeRoute.Model, truncate(string(b), 500))
-		log.Printf("failed request body sent upstream: %s", string(lastRequestJSON))
 		// Plain-English message for the two failure modes a free-tier user actually
 		// hits, instead of leaking the raw upstream error blob.
 		msg := fmt.Sprintf("upstream %s/%s: %s", activeRoute.Provider, activeRoute.Model, truncate(string(b), 300))
@@ -498,7 +511,12 @@ func (s *server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		body := raw
+		body, err := chatJSONWithACCPersona(raw, currentRoute)
+		if err != nil {
+			httpErr(w, 400, "prepare request: "+err.Error())
+			logit(currentRoute.Model, 400, 0, 0, 0, "")
+			return
+		}
 		// Rewrite model name to the actual upstream model. The client sends
 		// "anthropic/claude-haiku" but the upstream expects "stepfun-ai/step-3.7-flash".
 		var merged map[string]any
@@ -568,7 +586,7 @@ func (s *server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			degradedBody, _ = io.ReadAll(resp.Body)
 			resp.Body.Close()
 			resp.Body = io.NopCloser(bytes.NewReader(degradedBody))
-			if bytes.Contains(degradedBody, []byte("DEGRADED")) || bytes.Contains(degradedBody, []byte("cannot be invoked")) {
+			if recoverableProvider400(degradedBody) {
 				shouldFallback = true
 			}
 		}
@@ -659,15 +677,14 @@ func (s *server) handleModels(w http.ResponseWriter, r *http.Request) {
 	isAnthropic := r.Header.Get("anthropic-version") != ""
 	isCodex := strings.Contains(strings.ToLower(r.UserAgent()), "codex")
 
-	allow := []string{"claude-opus", "claude-sonnet", "claude-haiku", "claude-fable", "claude-mythos"}
+	allow := publicLegacyModelIDs(s.cfg.Load())
 
 	w.Header().Set("Content-Type", "application/json")
 	if isCodex {
-		json.NewEncoder(w).Encode(map[string]any{"models": codexModelCatalogEntries()})
+		json.NewEncoder(w).Encode(map[string]any{"models": codexModelCatalogEntriesWithAuth(s.cfg.Load(), s.auth)})
 	} else if isAnthropic {
 		var data []map[string]any
-		for _, name := range allow {
-			id := "anthropic/" + name
+		for _, id := range allow {
 			data = append(data, map[string]any{
 				"type": "model", "id": id, "display_name": id,
 				"created_at": "2025-01-01T00:00:00Z",
@@ -676,8 +693,7 @@ func (s *server) handleModels(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"data": data, "has_more": false})
 	} else {
 		var data []map[string]any
-		for _, name := range allow {
-			id := "anthropic/" + name
+		for _, id := range allow {
 			data = append(data, map[string]any{
 				"id": id, "object": "model",
 				"created": 1735689600, "owned_by": "acc-proxy",
@@ -687,11 +703,63 @@ func (s *server) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func publicLegacyModelIDs(cfg *Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	ids := make([]string, 0, len(cfg.AliasRoutes)+len(cfg.Aliases))
+	for _, family := range []string{"opus", "sonnet", "haiku"} {
+		if _, ok := aliasRouteForFamily(cfg, family); ok {
+			id := "anthropic/claude-" + family
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	for id := range cfg.Aliases {
+		publicID := "anthropic/" + normalizeModelID(id)
+		if !seen[publicID] {
+			seen[publicID] = true
+			ids = append(ids, publicID)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
 // normalizeModelID strips the "anthropic/" prefix and normalizes separators so
 // "anthropic/claude_K_2" and "claude-k-2" resolve to the same alias key.
 func normalizeModelID(model string) string {
-	clean := strings.TrimPrefix(model, "anthropic/")
-	return strings.ToLower(strings.ReplaceAll(clean, "_", "-"))
+	clean := strings.TrimPrefix(strings.ToLower(model), "anthropic/")
+	return strings.ReplaceAll(clean, "_", "-")
+}
+
+func aliasFamily(normalizedModel string) (string, bool) {
+	for _, family := range []string{"opus", "sonnet", "haiku"} {
+		base := "claude-" + family
+		if normalizedModel == family || normalizedModel == base {
+			return family, true
+		}
+		// Claude clients send versioned family IDs such as claude-sonnet-4-5
+		// and claude-opus-4-1-20250805. Require a numeric version so unrelated
+		// names like claude-opus-copy never become family aliases by accident.
+		if suffix, ok := strings.CutPrefix(normalizedModel, base+"-"); ok && suffix != "" && suffix[0] >= '0' && suffix[0] <= '9' {
+			return family, true
+		}
+	}
+	return "", false
+}
+
+func aliasRouteForFamily(cfg *Config, family string) (Route, bool) {
+	if cfg == nil {
+		return Route{}, false
+	}
+	if route, ok := cfg.AliasRoutes[family]; ok {
+		return route, true
+	}
+	// Backward compatibility for configs written before alias_routes existed.
+	route, ok := cfg.Routes[family]
+	return route, ok
 }
 
 // modelDef is one catalog entry: a canonical ID, accepted aliases, and the
@@ -731,9 +799,12 @@ func (s *server) effectiveAliases() map[string]Route {
 		}
 	}
 	if cfg := s.cfg.Load(); cfg != nil {
-		for _, model := range codexNamedModels() {
-			if route, ok := cfg.Routes[model.Family]; ok {
-				m[normalizeModelID(model.ID)] = route
+		for id, capability := range cfg.Models {
+			if !capability.Enabled {
+				continue
+			}
+			if route, err := resolveCapabilityRoute(cfg, id, capability); err == nil {
+				m[normalizeModelID(id)] = route
 			}
 		}
 		for k, r := range cfg.Aliases {
@@ -746,6 +817,12 @@ func (s *server) effectiveAliases() map[string]Route {
 func (s *server) routeFor(model string) (Route, error) {
 	cfg := s.cfg.Load()
 	normalizedModel := normalizeModelID(model)
+	if family, ok := aliasFamily(normalizedModel); ok {
+		if route, configured := aliasRouteForFamily(cfg, family); configured {
+			return route, nil
+		}
+		return Route{}, fmt.Errorf("model alias %q has no configured alias route", model)
+	}
 	aliases := s.effectiveAliases()
 
 	if r, ok := aliases[normalizedModel]; ok {
@@ -763,15 +840,9 @@ func (s *server) routeFor(model string) (Route, error) {
 		return r, nil
 	}
 
-	// Codex Desktop currently replaces a configured custom model with one of
-	// these built-in IDs (for example, Custom Light -> gpt-5.4-mini). Preserve
-	// the Sol/Terra/Luna selection that `acc codex` wrote to its config instead
-	// of rejecting the request as an unknown model.
-	if strings.HasPrefix(normalizedModel, "gpt-5.4") {
-		if selected, ok := activeCodexModel(); ok {
-			if r, ok := aliases[normalizeModelID(selected)]; ok {
-				return r, nil
-			}
+	if provider, upstreamModel, ok := splitRealCodexModelID(model); ok {
+		if _, exists := cfg.Providers[provider]; exists {
+			return Route{Provider: provider, Model: upstreamModel}, nil
 		}
 	}
 
@@ -781,15 +852,37 @@ func (s *server) routeFor(model string) (Route, error) {
 		}
 	}
 
-	for _, fam := range []string{"opus", "sonnet", "haiku"} {
-		if strings.Contains(normalizedModel, fam) {
-			if r, ok := cfg.Routes[fam]; ok {
-				return r, nil
-			}
-		}
-	}
-
 	return Route{}, fmt.Errorf("unrecognized model ID %q — did you mean anthropic/claude-kimi-k2 or a direct provider path like anthropic/nvidia/moonshotai/kimi-k2.6?", model)
+}
+
+// mergeRouteExtraBody flat-merges a route's provider-specific request settings
+// into an already-encoded OpenAI request. NVIDIA expects these fields at the
+// request root, while Gemini can intentionally use an extra_body wrapper.
+func mergeRouteExtraBody(body []byte, extra map[string]any) []byte {
+	if len(extra) == 0 {
+		return body
+	}
+	var merged map[string]any
+	if err := json.Unmarshal(body, &merged); err != nil {
+		return body
+	}
+	for k, v := range extra {
+		merged[k] = v
+	}
+	if newBody, err := json.Marshal(merged); err == nil {
+		return newBody
+	}
+	return body
+}
+
+// recoverableProvider400 distinguishes a malformed client request from a
+// provider admitting that its own backend rejected the request. The latter can
+// safely try the next configured route.
+func recoverableProvider400(body []byte) bool {
+	lower := bytes.ToLower(body)
+	return bytes.Contains(lower, []byte("degraded")) ||
+		bytes.Contains(lower, []byte("cannot be invoked")) ||
+		bytes.Contains(lower, []byte("error from provider")) && bytes.Contains(lower, []byte("upstream request failed"))
 }
 
 // ---------- Config ----------
@@ -812,22 +905,6 @@ func loadPrependFile(baseDir, path string) (string, error) {
 		return "", fmt.Errorf("failed to read system_prepend file %q: %w", path, err)
 	}
 	return string(content), nil
-}
-
-func resolveRoutePrepend(r *Route, baseDir string) error {
-	if strings.HasPrefix(r.SystemPrepend, "@") {
-		resolved, err := loadPrependFile(baseDir, r.SystemPrepend[1:])
-		if err != nil {
-			return err
-		}
-		r.SystemPrepend = resolved
-	}
-	for i := range r.Fallbacks {
-		if err := resolveRoutePrepend(&r.Fallbacks[i], baseDir); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -854,15 +931,27 @@ func loadConfig(path string) (*Config, error) {
 	}
 
 	for k, r := range c.Routes {
-		if err := resolveRoutePrepend(&r, baseDir); err != nil {
-			return nil, err
+		// Route-specific persona files were an ACC-owned legacy mechanism. They
+		// are intentionally retired so provider imitation prompts can never
+		// override the central Kabir's Second Brain identity.
+		r.SystemPrepend = ""
+		for i := range r.Fallbacks {
+			r.Fallbacks[i].SystemPrepend = ""
 		}
 		c.Routes[k] = r
 	}
+	for k, r := range c.AliasRoutes {
+		r.SystemPrepend = ""
+		for i := range r.Fallbacks {
+			r.Fallbacks[i].SystemPrepend = ""
+		}
+		c.AliasRoutes[k] = r
+	}
 
 	for k, r := range c.Aliases {
-		if err := resolveRoutePrepend(&r, baseDir); err != nil {
-			return nil, err
+		r.SystemPrepend = ""
+		for i := range r.Fallbacks {
+			r.Fallbacks[i].SystemPrepend = ""
 		}
 		c.Aliases[k] = r
 	}
@@ -876,9 +965,60 @@ func validateConfig(cfg *Config) error {
 			return fmt.Errorf("route %q: provider %q not defined", slot, route.Provider)
 		}
 	}
+	for family, route := range cfg.AliasRoutes {
+		canonical, ok := aliasFamily(family)
+		if !ok || canonical != family {
+			return fmt.Errorf("alias route %q: expected opus, sonnet, or haiku", family)
+		}
+		if err := validateRouteProviders("alias route "+strconv.Quote(family), route, cfg.Providers); err != nil {
+			return err
+		}
+	}
 	for name, e := range cfg.Effort {
 		if e.Budget <= 0 {
 			return fmt.Errorf("effort %q: budget must be > 0", name)
+		}
+	}
+	for id, capability := range cfg.Models {
+		if !capability.Enabled {
+			continue
+		}
+		if _, err := resolveCapabilityRoute(cfg, id, capability); err != nil {
+			return err
+		}
+		for _, fallbackID := range configuredFallbackModels(capability) {
+			fallback, ok := cfg.Models[fallbackID]
+			if !ok || !fallback.Enabled {
+				return fmt.Errorf("model %q: fallback model %q is unavailable", id, fallbackID)
+			}
+		}
+		if capability.ImageModel != "" {
+			imageModel, ok := cfg.Models[capability.ImageModel]
+			if !ok || !imageModel.Enabled {
+				return fmt.Errorf("model %q: image model %q is unavailable", id, capability.ImageModel)
+			}
+			if !imageModel.ImageInputSupport {
+				return fmt.Errorf("model %q: image model %q does not support image input", id, capability.ImageModel)
+			}
+		}
+		for effort := range capability.Reasoning {
+			switch effort {
+			case "minimal", "low", "medium", "high", "xhigh", "max":
+			default:
+				return fmt.Errorf("model %q: unsupported catalog reasoning effort %q", id, effort)
+			}
+		}
+	}
+	return nil
+}
+
+func validateRouteProviders(label string, route Route, providers map[string]Provider) error {
+	if _, ok := providers[route.Provider]; !ok {
+		return fmt.Errorf("%s: provider %q not defined", label, route.Provider)
+	}
+	for i, fallback := range route.Fallbacks {
+		if err := validateRouteProviders(fmt.Sprintf("%s fallback %d", label, i+1), fallback, providers); err != nil {
+			return err
 		}
 	}
 	return nil

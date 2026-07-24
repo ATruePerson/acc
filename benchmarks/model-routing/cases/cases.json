@@ -1,0 +1,82 @@
+[
+  {
+    "id": "text-exact",
+    "category": "reliability",
+    "kind": "text",
+    "runs": 3,
+    "prompt": "Reply with exactly ROUTE_OK and nothing else.",
+    "expected": "ROUTE_OK"
+  },
+  {
+    "id": "stream-exact",
+    "category": "streaming",
+    "kind": "stream",
+    "runs": 3,
+    "prompt": "Reply with exactly STREAM_ROUTE_OK and nothing else.",
+    "expected": "STREAM_ROUTE_OK"
+  },
+  {
+    "id": "evidence-debug",
+    "category": "reasoning",
+    "kind": "text",
+    "runs": 3,
+    "prompt": "Evidence: the parser test fails only for escaped quotes; the network mock is never called; reverting the parser commit fixes it. Return exactly ROOT_CAUSE=parser;DO_NOT_EDIT=network.",
+    "expected": "ROOT_CAUSE=parser;DO_NOT_EDIT=network"
+  },
+  {
+    "id": "standard-tool-loop",
+    "category": "tools",
+    "kind": "function_tool",
+    "runs": 5,
+    "prompt": "Call lookup_number exactly once with key alpha. After its result, reply exactly VALUE=42.",
+    "expected": "VALUE=42"
+  },
+  {
+    "id": "custom-exec-loop",
+    "category": "custom_tools",
+    "kind": "custom_tool",
+    "runs": 5,
+    "prompt": "Call exec exactly once with the raw input 2+2. After its result, reply exactly FOUR.",
+    "expected": "FOUR"
+  },
+  {
+    "id": "temporary-repo-workflow",
+    "category": "coding",
+    "kind": "workflow",
+    "runs": 5,
+    "prompt": "Fix the failing Add function in this temporary repository. Follow AGENTS.md, inspect before editing, make the smallest change, run tests, repair if needed, then report only verified results.",
+    "expected": "PASS"
+  },
+  {
+    "id": "long-20k",
+    "category": "long_context",
+    "kind": "long_context",
+    "runs": 1,
+    "context_tokens": 20000,
+    "expected": "ALPHA-7319|OMEGA-2846|NO_DESTRUCTIVE_ACTION"
+  },
+  {
+    "id": "long-50k",
+    "category": "long_context",
+    "kind": "long_context",
+    "runs": 1,
+    "context_tokens": 50000,
+    "expected": "ALPHA-7319|OMEGA-2846|NO_DESTRUCTIVE_ACTION"
+  },
+  {
+    "id": "long-80k",
+    "category": "long_context",
+    "kind": "long_context",
+    "runs": 1,
+    "context_tokens": 80000,
+    "expected": "ALPHA-7319|OMEGA-2846|NO_DESTRUCTIVE_ACTION"
+  },
+  {
+    "id": "red-image",
+    "category": "multimodal",
+    "kind": "image",
+    "runs": 3,
+    "prompt": "Name the dominant color in this image using one lowercase word.",
+    "expected": "red"
+  }
+]

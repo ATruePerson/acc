@@ -29,8 +29,9 @@ acc codex
 
 `acc setup` stores keys in `~/.config/acc/.env` and creates a config file if
 one does not exist. `acc claude` starts the gateway when needed and launches
-Claude Code with the right connection. `acc codex` backs up your Codex provider
-settings, switches it to ACC, and reopens the existing ChatGPT desktop app.
+Claude Code with the right connection. `acc codex` creates a durable raw and
+sanitized subscription baseline, switches Codex to ACC, and reopens the
+existing ChatGPT desktop app.
 
 ## Commands
 
@@ -45,8 +46,8 @@ settings, switches it to ACC, and reopens the existing ChatGPT desktop app.
 | `acc codex start` | Start an owned ACC process and verify Responses readiness. |
 | `acc codex status` | Show safe config, catalog, process, and provider status. |
 | `acc codex doctor` | Run non-destructive direct-integration checks. |
-| `acc codex restore` | Restore the exact previous Codex settings. |
-| `acc codex remove` | Remove only ACC-owned Codex settings. |
+| `acc codex restore` | Restore the durable sanitized subscription baseline. |
+| `acc codex remove` | Remove active ACC/OpenCodex routing through the same sanitized restore path. |
 | `acc auth login/status/logout` | Manage native provider login without printing secrets. |
 | `acc mcp install` | Install ACC's safe bundled MCP config. |
 | `acc mcp doctor` | Check bundled MCP tools and config. |
@@ -112,7 +113,7 @@ after the call; apps already running before the call are left alone.
 ### Codex Desktop (experimental)
 
 This integration is a work in progress and can still break on app or protocol
-changes. Keep `acc codex --restore` as the escape hatch back to the normal
+changes. Keep `acc codex restore` as the escape hatch back to a normal
 subscription connection.
 
 `acc codex setup` generates a deterministic catalog of real, provider-prefixed
@@ -130,8 +131,9 @@ acc codex start
 
 The catalog contains only the efforts declared for each model. Unsupported
 choices are rejected before ACC contacts a provider. Model and effort arrive on
-every request, so separate Codex tasks stay independent. `acc codex --restore`
-puts your previous Codex connection back.
+every request, so separate Codex tasks stay independent. `acc codex restore`
+removes active ACC/OpenCodex routing and writes the durable sanitized
+subscription baseline while retaining the raw snapshot for recovery.
 
 Codex real-model IDs route to that exact provider and model. They never inherit
 Claude alias fallback chains. Explicit real-model fallback configuration still
@@ -141,8 +143,8 @@ Codex's free-form custom tools are bridged through Chat Completions without
 changing their native Responses call or streaming shape. Provider-hosted tools
 such as web search are not ACC capabilities and return a clear backend-specific
 error if Codex sends one. Codex 0.144.2 enables web search by default, so
-`acc codex` disables it only for the active ACC connection; `--restore` returns
-your previous setting.
+`acc codex` disables it only for the active ACC connection; restore returns the
+sanitized subscription baseline.
 
 ### Native provider login
 
@@ -238,28 +240,3 @@ export ANTHROPIC_BASE_URL=http://localhost:9999
 
 The `-env` flag loads a dotenv file, defaulting to `~/.config/acc/.env`.
 Existing environment variables win over values from that file.
-
-## API
-
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /health` | Health check. Returns `acc-proxy ok`. |
-| `GET /v1/models` | Model discovery for Anthropic and OpenAI clients. |
-| `POST /v1/messages` | Anthropic Messages API. |
-| `POST /v1/responses` | OpenAI Responses API, used by Codex. |
-| `POST /v1/chat/completions` | OpenAI-compatible chat endpoint. |
-| `GET /app` | Web dashboard. |
-
-## Tests
-
-```bash
-make test
-```
-
-### Development
-
-ACC is maintained by Kabir and developed with assistance from OpenAI Codex.
-
-## License
-
-Apache License 2.0. See [LICENSE](LICENSE).

@@ -1,14 +1,21 @@
 name: Release
 
-# Builds prebuilt binaries for macOS and Linux when a version tag is pushed,
-# and attaches them to a GitHub Release so users can install without Go.
+# Publish a complete, updater-compatible release for every change merged to main.
+# Version tags pushed manually continue to produce releases as well.
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -32,6 +39,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Test
+        run: go test ./...
+
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
@@ -52,20 +62,43 @@ jobs:
             acc-*.tar.gz.sha256
           retention-days: 1
 
-  # Single release job avoids the matrix all racing to create the same
-  # release at once (which dropped an asset on the first v0.1.0 run).
   release:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve release tag
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="v0.2.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "Publishing ${tag} from ${GITHUB_SHA}"
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
 
+      - name: Verify complete release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for platform in darwin-arm64 darwin-amd64 linux-arm64 linux-amd64; do
+            test -s "dist/acc-${platform}.tar.gz"
+            test -s "dist/acc-${platform}.tar.gz.sha256"
+            (cd dist && sha256sum -c "acc-${platform}.tar.gz.sha256")
+          done
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           files: dist/*
           generate_release_notes: true
+          make_latest: true

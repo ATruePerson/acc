@@ -61,7 +61,7 @@ Codex Desktop reads provider settings when its app process starts. After `start`
 
 ## Catalog and routing
 
-Catalog IDs are real `provider/upstream-model` values. They are deterministic, unique, and exclude the Claude aliases `opus`, `sonnet`, and `haiku`. Native Kimi, xAI, and Anthropic model discovery refreshes after login and setup; non-secret results are cached atomically. A static seed is used only when live discovery is unavailable. Direct Codex IDs do not inherit Claude alias fallback chains.
+Catalog IDs are real `provider/upstream-model` values. The Codex model selector contains only enabled models explicitly selected in `config.json` whose `catalog_visible` value is not `false`. Provider login and model discovery may refresh non-secret cached metadata, but discovered models are never added to the selector automatically. Catalog entries are deterministic, unique, and exclude the Claude aliases `opus`, `sonnet`, and `haiku`. Direct Codex IDs do not inherit Claude alias fallback chains.
 
 ## Authentication
 

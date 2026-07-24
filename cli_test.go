@@ -177,14 +177,52 @@ func TestConfigureAndRestoreCodexApp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(restored) != original {
-		t.Fatalf("restore changed original config:\ngot:\n%s\nwant:\n%s", restored, original)
+	restoredText := string(restored)
+	for _, preserved := range []string{
+		`sandbox_mode = "workspace-write"`,
+		`[features]`,
+		`plugins = true`,
+	} {
+		if !strings.Contains(restoredText, preserved) {
+			t.Fatalf("sanitized restore lost %q:\n%s", preserved, restoredText)
+		}
+	}
+	for _, forbidden := range []string{
+		`model = "gpt-subscription"`,
+		`model_provider = "acc"`,
+		`model_catalog_json`,
+		`[model_providers.acc]`,
+		`http://localhost:9999/v1`,
+	} {
+		if strings.Contains(restoredText, forbidden) {
+			t.Fatalf("sanitized restore retained %q:\n%s", forbidden, restoredText)
+		}
 	}
 	if _, err := os.Stat(catalogPath); !os.IsNotExist(err) {
 		t.Fatalf("generated catalog still exists after restore: %v", err)
 	}
-	if _, err := os.Stat(restorePath); !os.IsNotExist(err) {
-		t.Fatalf("restore state still exists after restore: %v", err)
+	baseline, err := readCodexBaseline(restorePath)
+	if err != nil {
+		t.Fatalf("durable baseline missing or unreadable: %v", err)
+	}
+	if err := validateCodexBaseline(baseline); err != nil {
+		t.Fatalf("durable baseline invalid: %v", err)
+	}
+	if string(baseline.RawConfig.Data) != original {
+		t.Fatalf("raw subscription snapshot changed:\ngot:\n%s\nwant:\n%s", baseline.RawConfig.Data, original)
+	}
+	if string(baseline.SanitizedConfig.Data) != restoredText {
+		t.Fatalf("restore did not use the stored sanitized baseline:\ngot:\n%s\nwant:\n%s", restoredText, baseline.SanitizedConfig.Data)
+	}
+	if err := restoreCodexApp(configPath, catalogPath, restorePath); err != nil {
+		t.Fatalf("repeated restore failed: %v", err)
+	}
+	repeated, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(repeated) != restoredText {
+		t.Fatalf("repeated restore was not idempotent:\ngot:\n%s\nwant:\n%s", repeated, restoredText)
 	}
 }
 

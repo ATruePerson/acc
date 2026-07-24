@@ -73,7 +73,7 @@ func TestNormalizeLegacyResponsesRequestMapsOldHighEffort(t *testing.T) {
 	}
 }
 
-func TestConfiguredSolTerraLunaChainsMatchTheirRoles(t *testing.T) {
+func TestConfiguredSelectedCodexModelsHaveNoFallbackChains(t *testing.T) {
 	raw, err := os.ReadFile("config.json")
 	if err != nil {
 		t.Fatal(err)
@@ -83,37 +83,31 @@ func TestConfiguredSolTerraLunaChainsMatchTheirRoles(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := testServer(&cfg)
-	wantChains := map[string][]string{
-		codexOpusID:   {codexOpusID, "acc-openrouter-nemotron-ultra", "acc-gemini-3.5-flash", "acc-minimax-m3"},
-		codexSonnetID: {codexSonnetID, "acc-openrouter-hy3", "acc-gemini-3.5-flash", "acc-nemotron-super"},
-		codexHaikuID:  {codexHaikuID, "acc-nemotron-super", "acc-minimax-m3"},
+	want := map[string]struct {
+		provider string
+		model    string
+		images   bool
+	}{
+		"nvidia/nvidia/nemotron-3-ultra-550b-a55b": {provider: "nvidia", model: "nvidia/nemotron-3-ultra-550b-a55b"},
+		"openrouter/poolside/laguna-s-2.1:free":    {provider: "openrouter", model: "poolside/laguna-s-2.1:free"},
+		"nvidia/stepfun-ai/step-3.7-flash":         {provider: "nvidia", model: "stepfun-ai/step-3.7-flash", images: true},
 	}
-	for model, want := range wantChains {
-		chain, err := s.responseModelChain(model)
+	for selected, expected := range want {
+		chain, err := s.responseModelChain(selected)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("%s: %v", selected, err)
 		}
-		if len(chain) != len(want) {
-			t.Fatalf("%s chain length = %d, want %d: %+v", model, len(chain), len(want), chain)
+		if len(chain) != 1 {
+			t.Fatalf("%s chain = %+v, want exactly one explicitly selected model", selected, chain)
 		}
-		for i := range want {
-			if chain[i].ID != want[i] {
-				t.Fatalf("%s chain[%d] = %s, want %s", model, i, chain[i].ID, want[i])
-			}
+		if chain[0].Route.Provider != expected.provider || chain[0].Route.Model != expected.model {
+			t.Fatalf("%s route = %s/%s, want %s/%s", selected, chain[0].Route.Provider, chain[0].Route.Model, expected.provider, expected.model)
 		}
-	}
-
-	imageWithTools := &ResponsesRequest{
-		Model: codexOpusID,
-		Input: json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]`),
-		Tools: []ResponsesTool{{Type: "function", Name: "inspect_image", Parameters: json.RawMessage(`{"type":"object"}`)}},
-	}
-	chain, _ := s.responseModelChain(codexOpusID)
-	selected, err := selectResponseModelChain(imageWithTools, chain)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(selected) != 1 || selected[0].ID != "acc-gemini-3.5-flash" {
-		t.Fatalf("Sol image+tool route = %+v, want Gemini only", selected)
+		if chain[0].Capability.ImageInputSupport != expected.images {
+			t.Fatalf("%s image support = %v, want %v", selected, chain[0].Capability.ImageInputSupport, expected.images)
+		}
+		if chain[0].Fallback || chain[0].ImageOnly {
+			t.Fatalf("%s was unexpectedly marked as an internal fallback: %+v", selected, chain[0])
+		}
 	}
 }

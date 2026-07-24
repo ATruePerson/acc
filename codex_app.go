@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -29,6 +28,7 @@ func codexNamedModels(cfg *Config) []codexNamedModel {
 }
 
 func codexNamedModelsWithAuth(cfg *Config, auth *authManager) []codexNamedModel {
+	_ = auth
 	byID := make(map[string]codexNamedModel, len(cfg.Models))
 	for _, id := range enabledModelIDs(cfg) {
 		capability := cfg.Models[id]
@@ -49,11 +49,6 @@ func codexNamedModelsWithAuth(cfg *Config, auth *authManager) []codexNamedModel 
 			continue
 		}
 		byID[realID] = candidate
-	}
-	for _, candidate := range nativeCodexModels(cfg, auth) {
-		if _, exists := byID[candidate.ID]; !exists {
-			byID[candidate.ID] = candidate
-		}
 	}
 	models := make([]codexNamedModel, 0, len(byID))
 	for _, model := range byID {
@@ -166,195 +161,41 @@ func codexModelCatalogJSONWithAuth(cfg *Config, auth *authManager) []byte {
 	return append(b, '\n')
 }
 
-type codexRestoreState struct {
-	ConfigExisted  bool   `json:"config_existed"`
-	Config         []byte `json:"config,omitempty"`
-	CatalogExisted bool   `json:"catalog_existed"`
-	Catalog        []byte `json:"catalog,omitempty"`
-}
-
 const (
 	accCodexRootBegin = "# BEGIN ACC CODEX OWNED"
 	accCodexRootEnd   = "# END ACC CODEX OWNED"
 	accCodexProvider  = "# ACC CODEX OWNED PROVIDER"
 )
 
+func codexRestartPathForBaseline(baselinePath string) string {
+	return filepath.Join(filepath.Dir(baselinePath), "codex-restart-required")
+}
+
 func configureCodexApp(configPath, catalogPath, restorePath, baseURL, model string, cfg *Config) error {
 	return configureCodexAppWithAuth(configPath, catalogPath, restorePath, baseURL, model, cfg, nil)
 }
 
 func configureCodexAppWithAuth(configPath, catalogPath, restorePath, baseURL, model string, cfg *Config, auth *authManager) error {
-	if !isCodexModelWithAuth(cfg, auth, model) {
-		return fmt.Errorf("unknown Codex model %q", model)
-	}
-	if err := saveCodexRestoreState(configPath, catalogPath, restorePath); err != nil {
-		return fmt.Errorf("back up Codex settings: %w", err)
-	}
-
-	original, err := os.ReadFile(configPath)
-	if err != nil && !os.IsNotExist(err) {
+	tx, err := beginConfigureCodexApp(configPath, catalogPath, restorePath, codexRestartPathForBaseline(restorePath), baseURL, model, cfg, auth)
+	if err != nil {
 		return err
 	}
-	if len(original) > 0 {
-		if _, err := writeTimestampedBackup(configPath, original); err != nil {
-			return fmt.Errorf("timestamp Codex config: %w", err)
-		}
-	}
-	configured := renderCodexConfig(string(original), catalogPath, baseURL, model)
-	if err := validateCodexConfigText(configured); err != nil {
-		return fmt.Errorf("generated Codex config is invalid: %w", err)
-	}
-	if err := atomicWriteFile(catalogPath, codexModelCatalogJSONWithAuth(cfg, auth), 0600); err != nil {
-		return fmt.Errorf("write Codex model catalog: %w", err)
-	}
-	if err := atomicWriteFile(configPath, []byte(configured), 0600); err != nil {
-		return fmt.Errorf("write Codex config: %w", err)
-	}
+	tx.Commit()
 	return nil
 }
 
 func restoreCodexApp(configPath, catalogPath, restorePath string) error {
-	b, err := os.ReadFile(restorePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("no ACC Codex backup found")
-		}
-		return err
-	}
-	var state codexRestoreState
-	if err := json.Unmarshal(b, &state); err != nil {
-		return fmt.Errorf("read restore state: %w", err)
-	}
-	if current, readErr := os.ReadFile(configPath); readErr == nil {
-		if _, err := writeTimestampedBackup(configPath, current); err != nil {
-			return fmt.Errorf("back up current Codex config: %w", err)
-		}
-	}
-	if state.ConfigExisted {
-		if err := validateCodexConfigText(string(state.Config)); err != nil {
-			return fmt.Errorf("saved Codex config is invalid: %w", err)
-		}
-	}
-	if state.ConfigExisted {
-		if err := atomicWriteFile(configPath, state.Config, 0600); err != nil {
-			return err
-		}
-	} else if err := os.Remove(configPath); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if state.CatalogExisted {
-		if err := atomicWriteFile(catalogPath, state.Catalog, 0600); err != nil {
-			return err
-		}
-	} else if err := os.Remove(catalogPath); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if err := os.Remove(restorePath); err != nil {
-		return err
-	}
-	return nil
+	_, err := restoreCodexAppDetailed(configPath, catalogPath, restorePath, codexRestartPathForBaseline(restorePath))
+	return err
 }
 
 func saveCodexRestoreState(configPath, catalogPath, restorePath string) error {
-	if _, err := os.Stat(restorePath); err == nil {
-		return nil
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	state := codexRestoreState{}
-	if b, err := os.ReadFile(configPath); err == nil {
-		state.ConfigExisted, state.Config = true, b
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	if b, err := os.ReadFile(catalogPath); err == nil {
-		state.CatalogExisted, state.Catalog = true, b
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	b, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	return atomicWriteFile(restorePath, append(b, '\n'), 0600)
+	_, _, err := ensureCodexSubscriptionBaseline(configPath, catalogPath, restorePath)
+	return err
 }
 
 func renderCodexConfig(original, catalogPath, baseURL, model string) string {
-	lines := strings.Split(strings.ReplaceAll(original, "\r\n", "\n"), "\n")
-	cleaned := make([]string, 0, len(lines)+10)
-	inACCProvider := false
-	inOwnedRoot := false
-	inRoot := true
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == accCodexRootBegin {
-			inOwnedRoot = true
-			continue
-		}
-		if trimmed == accCodexRootEnd {
-			inOwnedRoot = false
-			continue
-		}
-		if inOwnedRoot || trimmed == accCodexProvider {
-			continue
-		}
-		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-			inRoot = false
-			inACCProvider = trimmed == "[model_providers.acc]"
-			if inACCProvider {
-				continue
-			}
-		} else if inACCProvider {
-			continue
-		}
-		if inRoot {
-			key, _, ok := strings.Cut(trimmed, "=")
-			if ok {
-				switch strings.TrimSpace(key) {
-				case "model", "model_provider", "model_catalog_json", "web_search":
-					continue
-				case "openai_base_url":
-					if legacyOpenCodexDetected(line) {
-						continue
-					}
-				}
-			}
-		}
-		cleaned = append(cleaned, line)
-	}
-
-	insertAt := len(cleaned)
-	for i, line := range cleaned {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-			insertAt = i
-			break
-		}
-	}
-	root := []string{
-		accCodexRootBegin,
-		"model = " + strconv.Quote(model),
-		`model_provider = "acc"`,
-		"model_catalog_json = " + strconv.Quote(catalogPath),
-		`web_search = "disabled"`,
-		accCodexRootEnd,
-		"",
-	}
-	cleaned = append(cleaned[:insertAt], append(root, cleaned[insertAt:]...)...)
-	for len(cleaned) > 0 && strings.TrimSpace(cleaned[len(cleaned)-1]) == "" {
-		cleaned = cleaned[:len(cleaned)-1]
-	}
-	cleaned = append(cleaned,
-		"",
-		accCodexProvider,
-		"[model_providers.acc]",
-		`name = "ACC"`,
-		"base_url = "+strconv.Quote(strings.TrimRight(baseURL, "/")),
-		`wire_api = "responses"`,
-		"requires_openai_auth = false",
-		"supports_websockets = false",
-	)
-	return strings.Join(cleaned, "\n") + "\n"
+	return renderCodexACCConfig(original, catalogPath, baseURL, model)
 }
 
 func isCodexModel(cfg *Config, model string) bool {
@@ -378,15 +219,15 @@ func validateCodexConfigText(text string) error {
 			continue
 		}
 		if strings.HasPrefix(trimmed, "[") {
-			if !strings.HasSuffix(trimmed, "]") || strings.Count(trimmed, "[") != strings.Count(trimmed, "]") {
+			header := strings.TrimSpace(strings.SplitN(trimmed, "#", 2)[0])
+			if !strings.HasSuffix(header, "]") || strings.Count(header, "[") != strings.Count(header, "]") {
 				return fmt.Errorf("line %d has an invalid table header", lineNumber+1)
 			}
-			isArrayTable := strings.HasPrefix(trimmed, "[[")
-			if seenTables[trimmed] && !isArrayTable {
-				return fmt.Errorf("duplicate table %s", trimmed)
+			isArrayTable := strings.HasPrefix(header, "[[")
+			if seenTables[header] && !isArrayTable {
+				return fmt.Errorf("duplicate table %s", header)
 			}
-			seenTables[trimmed] = true
-			continue
+			seenTables[header] = true
 		}
 	}
 	return nil
@@ -402,45 +243,11 @@ func writeTimestampedBackup(path string, data []byte) (string, error) {
 }
 
 func removeACCFromCodexConfig(original string) string {
-	lines := strings.Split(strings.ReplaceAll(original, "\r\n", "\n"), "\n")
-	out := make([]string, 0, len(lines))
-	inOwnedRoot, inACCProvider := false, false
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == accCodexRootBegin {
-			inOwnedRoot = true
-			continue
-		}
-		if trimmed == accCodexRootEnd {
-			inOwnedRoot = false
-			continue
-		}
-		if inOwnedRoot || trimmed == accCodexProvider {
-			continue
-		}
-		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-			if trimmed == "[model_providers.acc]" {
-				inACCProvider = true
-				continue
-			}
-			inACCProvider = false
-		}
-		if !inACCProvider {
-			out = append(out, line)
-		}
-	}
-	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
-		out = out[:len(out)-1]
-	}
-	if len(out) == 0 {
-		return ""
-	}
-	return strings.Join(out, "\n") + "\n"
+	return sanitizeCodexSubscriptionConfig(original)
 }
 
 func legacyOpenCodexDetected(config string) bool {
-	lower := strings.ToLower(config)
-	return strings.Contains(lower, "127.0.0.1:10100") || strings.Contains(lower, "localhost:10100") || strings.Contains(lower, "opencodex")
+	return inspectCodexRouting(config).ActiveOpenCodex
 }
 
 func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
@@ -461,8 +268,19 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 		f.Close()
 		return err
 	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	if dir, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
+	return nil
 }

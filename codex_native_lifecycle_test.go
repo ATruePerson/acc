@@ -63,8 +63,8 @@ func TestConfigureCreatesTimestampedBackupAndSecretFreeCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	backups, _ := filepath.Glob(configPath + ".acc-backup-*")
-	if len(backups) != 1 {
-		t.Fatalf("timestamped backups = %v", backups)
+	if len(backups) == 0 {
+		t.Fatal("configure did not create a timestamped config backup")
 	}
 	catalog, _ := os.ReadFile(catalogPath)
 	if !json.Valid(catalog) {
@@ -77,14 +77,23 @@ func TestConfigureCreatesTimestampedBackupAndSecretFreeCatalog(t *testing.T) {
 	}
 }
 
-func TestLegacyOpenCodexDetectionIsNarrow(t *testing.T) {
-	for _, legacy := range []string{`openai_base_url = "http://127.0.0.1:10100/v1"`, `# OpenCodex owned`} {
+func TestLegacyOpenCodexDetectionUsesActiveRoutingOnly(t *testing.T) {
+	for _, legacy := range []string{
+		`openai_base_url = "http://127.0.0.1:10100/v1"`,
+		"model_provider = \"opencodex\"\n\n[model_providers.opencodex]\nbase_url = \"http://127.0.0.1:10100/v1\"\n",
+	} {
 		if !legacyOpenCodexDetected(legacy) {
-			t.Fatalf("missed legacy config: %s", legacy)
+			t.Fatalf("missed active legacy config: %s", legacy)
 		}
 	}
-	if legacyOpenCodexDetected(`base_url = "http://127.0.0.1:8080/v1"`) {
-		t.Fatal("direct ACC config was mistaken for OpenCodex")
+	for _, harmless := range []string{
+		`# OpenCodex owned`,
+		"[mcp_servers.docs]\ncommand = \"/Users/kabir/tools/opencodex-helper\"\n",
+		`base_url = "http://127.0.0.1:8080/v1"`,
+	} {
+		if legacyOpenCodexDetected(harmless) {
+			t.Fatalf("inactive text was mistaken for OpenCodex routing: %s", harmless)
+		}
 	}
 }
 

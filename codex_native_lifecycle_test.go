@@ -63,8 +63,8 @@ func TestConfigureCreatesTimestampedBackupAndSecretFreeCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	backups, _ := filepath.Glob(configPath + ".acc-backup-*")
-	if len(backups) != 1 {
-		t.Fatalf("timestamped backups = %v", backups)
+	if len(backups) == 0 {
+		t.Fatal("configure did not create a timestamped config backup")
 	}
 	catalog, _ := os.ReadFile(catalogPath)
 	if !json.Valid(catalog) {

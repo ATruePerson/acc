@@ -1,0 +1,94 @@
+name: Apply PR 8 keychain review fix
+
+on:
+  push:
+    branches: [feat/normalized-codex-protocol]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/normalized-codex-protocol
+      - name: Patch Keychain command handling
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          auth = Path('auth.go')
+          text = auth.read_text()
+          old_import = '''\t"context"\n\t"encoding/json"'''
+          new_import = '''\t"context"\n\t"encoding/hex"\n\t"encoding/json"'''
+          if old_import not in text:
+              raise SystemExit('auth.go import anchor not found')
+          text = text.replace(old_import, new_import, 1)
+
+          old_save = '''\t// Passing -w last makes `security` read the password from stdin. Tokens never
+\t// appear in argv, shell history, or normal configuration files.
+\t_, err = s.runner.Run(ctx, append(b, '\\n'), "security", "add-generic-password", "-U", "-a", credential.Provider, "-s", s.service, "-w")'''
+          new_save = '''\t// Use security's interactive command mode and -X hexadecimal password data.
+\t// The credential stays on stdin and never appears in argv or shell history.
+\tcommand := fmt.Sprintf("add-generic-password -U -a %s -s %s -X %s\\n", credential.Provider, s.service, hex.EncodeToString(b))
+\t_, err = s.runner.Run(ctx, []byte(command), "security", "-i")'''
+          if old_save not in text:
+              raise SystemExit('auth.go save anchor not found')
+          auth.write_text(text.replace(old_save, new_save, 1))
+
+          test = Path('auth_test.go')
+          text = test.read_text()
+          old_test_import = '''\t"context"\n\t"errors"'''
+          new_test_import = '''\t"context"\n\t"encoding/hex"\n\t"errors"'''
+          if old_test_import not in text:
+              raise SystemExit('auth_test.go import anchor not found')
+          text = text.replace(old_test_import, new_test_import, 1)
+
+          old_assert = '''\tif runner.name != "security" || !strings.Contains(joined, "add-generic-password") {
+\t\tt.Fatalf("unexpected command: %s %v", runner.name, runner.args)
+\t}
+\tif strings.Contains(joined, "access-secret") || strings.Contains(joined, "refresh-secret") {
+\t\tt.Fatalf("credential leaked into argv: %v", runner.args)
+\t}
+\tif !strings.Contains(string(runner.stdin), "access-secret") || runner.args[len(runner.args)-1] != "-w" {
+\t\tt.Fatalf("credential was not supplied through stdin: args=%v stdin=%q", runner.args, runner.stdin)
+\t}'''
+          new_assert = '''\tif runner.name != "security" || len(runner.args) != 1 || runner.args[0] != "-i" {
+\t\tt.Fatalf("unexpected command: %s %v", runner.name, runner.args)
+\t}
+\tif strings.Contains(joined, "access-secret") || strings.Contains(joined, "refresh-secret") {
+\t\tt.Fatalf("credential leaked into argv: %v", runner.args)
+\t}
+\tstdin := strings.TrimSpace(string(runner.stdin))
+\tprefix := "add-generic-password -U -a kimi -s " + authKeychainService + " -X "
+\tif !strings.HasPrefix(stdin, prefix) {
+\t\tt.Fatalf("unexpected interactive command: %q", stdin)
+\t}
+\tdecoded, err := hex.DecodeString(strings.TrimPrefix(stdin, prefix))
+\tif err != nil {
+\t\tt.Fatalf("credential was not hex encoded: %v", err)
+\t}
+\tif !strings.Contains(string(decoded), "access-secret") || !strings.Contains(string(decoded), "refresh-secret") {
+\t\tt.Fatalf("encoded credential did not round-trip: %q", decoded)
+\t}
+\tif strings.Contains(stdin, "access-secret") || strings.Contains(stdin, "refresh-secret") {
+\t\tt.Fatalf("raw credential leaked into interactive command: %q", stdin)
+\t}'''
+          if old_assert not in text:
+              raise SystemExit('auth_test.go assertion anchor not found')
+          test.write_text(text.replace(old_assert, new_assert, 1))
+          PY
+          gofmt -w auth.go auth_test.go
+          go test ./...
+      - name: Commit fix
+        run: |
+          if git diff --quiet; then
+            exit 0
+          fi
+          git config user.name "OpenAI Codex"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add auth.go auth_test.go
+          git commit -m "fix(auth): store Keychain credentials without argv exposure"
+          git push origin HEAD:feat/normalized-codex-protocol

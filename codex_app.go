@@ -28,6 +28,7 @@ func codexNamedModels(cfg *Config) []codexNamedModel {
 }
 
 func codexNamedModelsWithAuth(cfg *Config, auth *authManager) []codexNamedModel {
+	_ = auth
 	byID := make(map[string]codexNamedModel, len(cfg.Models))
 	for _, id := range enabledModelIDs(cfg) {
 		capability := cfg.Models[id]
@@ -48,11 +49,6 @@ func codexNamedModelsWithAuth(cfg *Config, auth *authManager) []codexNamedModel 
 			continue
 		}
 		byID[realID] = candidate
-	}
-	for _, candidate := range nativeCodexModels(cfg, auth) {
-		if _, exists := byID[candidate.ID]; !exists {
-			byID[candidate.ID] = candidate
-		}
 	}
 	models := make([]codexNamedModel, 0, len(byID))
 	for _, model := range byID {

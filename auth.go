@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -210,9 +211,10 @@ func (s *keychainCredentialStore) Save(ctx context.Context, credential authCrede
 	if err != nil {
 		return err
 	}
-	// Passing -w last makes `security` read the password from stdin. Tokens never
-	// appear in argv, shell history, or normal configuration files.
-	_, err = s.runner.Run(ctx, append(b, '\n'), "security", "add-generic-password", "-U", "-a", credential.Provider, "-s", s.service, "-w")
+	// Use security's interactive command mode and -X hexadecimal password data.
+	// The credential stays on stdin and never appears in argv or shell history.
+	command := fmt.Sprintf("add-generic-password -U -a %s -s %s -X %s\n", credential.Provider, s.service, hex.EncodeToString(b))
+	_, err = s.runner.Run(ctx, []byte(command), "security", "-i")
 	if err != nil {
 		return fmt.Errorf("save %s credential in Keychain: %w", credential.Provider, err)
 	}

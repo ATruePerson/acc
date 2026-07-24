@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -194,14 +195,26 @@ func TestKeychainStoreKeepsTokensOutOfCommandArguments(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(runner.args, " ")
-	if runner.name != "security" || !strings.Contains(joined, "add-generic-password") {
+	if runner.name != "security" || len(runner.args) != 1 || runner.args[0] != "-i" {
 		t.Fatalf("unexpected command: %s %v", runner.name, runner.args)
 	}
 	if strings.Contains(joined, "access-secret") || strings.Contains(joined, "refresh-secret") {
 		t.Fatalf("credential leaked into argv: %v", runner.args)
 	}
-	if !strings.Contains(string(runner.stdin), "access-secret") || runner.args[len(runner.args)-1] != "-w" {
-		t.Fatalf("credential was not supplied through stdin: args=%v stdin=%q", runner.args, runner.stdin)
+	stdin := strings.TrimSpace(string(runner.stdin))
+	prefix := "add-generic-password -U -a kimi -s " + authKeychainService + " -X "
+	if !strings.HasPrefix(stdin, prefix) {
+		t.Fatalf("unexpected interactive command: %q", stdin)
+	}
+	decoded, err := hex.DecodeString(strings.TrimPrefix(stdin, prefix))
+	if err != nil {
+		t.Fatalf("credential was not hex encoded: %v", err)
+	}
+	if !strings.Contains(string(decoded), "access-secret") || !strings.Contains(string(decoded), "refresh-secret") {
+		t.Fatalf("encoded credential did not round-trip: %q", decoded)
+	}
+	if strings.Contains(stdin, "access-secret") || strings.Contains(stdin, "refresh-secret") {
+		t.Fatalf("raw credential leaked into interactive command: %q", stdin)
 	}
 }
 

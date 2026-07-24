@@ -89,7 +89,7 @@ func TestConfiguredSelectedCodexModelsHaveNoFallbackChains(t *testing.T) {
 		images   bool
 	}{
 		"nvidia/nvidia/nemotron-3-ultra-550b-a55b": {provider: "nvidia", model: "nvidia/nemotron-3-ultra-550b-a55b"},
-		"openrouter/poolside/laguna-s-2.1:free":     {provider: "openrouter", model: "poolside/laguna-s-2.1:free"},
+		"openrouter/poolside/laguna-s-2.1:free":    {provider: "openrouter", model: "poolside/laguna-s-2.1:free"},
 		"nvidia/stepfun-ai/step-3.7-flash":         {provider: "nvidia", model: "stepfun-ai/step-3.7-flash", images: true},
 	}
 	for selected, expected := range want {

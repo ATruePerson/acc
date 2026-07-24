@@ -201,9 +201,12 @@ func TestConfigureAndRestoreCodexApp(t *testing.T) {
 	if _, err := os.Stat(catalogPath); !os.IsNotExist(err) {
 		t.Fatalf("generated catalog still exists after restore: %v", err)
 	}
-	baseline, err := loadCodexSubscriptionBaseline(restorePath, configPath)
+	baseline, err := readCodexBaseline(restorePath)
 	if err != nil {
-		t.Fatalf("durable baseline missing or invalid: %v", err)
+		t.Fatalf("durable baseline missing or unreadable: %v", err)
+	}
+	if err := validateCodexBaseline(baseline); err != nil {
+		t.Fatalf("durable baseline invalid: %v", err)
 	}
 	if string(baseline.RawConfig.Data) != original {
 		t.Fatalf("raw subscription snapshot changed:\ngot:\n%s\nwant:\n%s", baseline.RawConfig.Data, original)

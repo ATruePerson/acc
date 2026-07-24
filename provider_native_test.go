@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -48,7 +49,7 @@ func TestAnthropicAPIKeyTakesStablePrecedenceOverOAuthCopy(t *testing.T) {
 	}
 }
 
-func TestNativeCatalogAppearsAfterLoginAndExcludesAnthropicSubscriptionOAuth(t *testing.T) {
+func TestNativeLoginDoesNotAutoSelectModels(t *testing.T) {
 	store := newMemoryCredentialStore()
 	now := time.Now().Add(time.Hour)
 	for _, credential := range []authCredential{
@@ -61,16 +62,19 @@ func TestNativeCatalogAppearsAfterLoginAndExcludesAnthropicSubscriptionOAuth(t *
 		}
 	}
 	manager := newAuthManager(store, nil)
-	ids := map[string]bool{}
-	for _, model := range codexNamedModelsWithAuth(&Config{}, manager) {
-		ids[model.ID] = true
+	selected := codexNamedModels(codexTestConfig())
+	withLogin := codexNamedModelsWithAuth(codexTestConfig(), manager)
+	if len(withLogin) != len(selected) {
+		t.Fatalf("login expanded selector from %d to %d models", len(selected), len(withLogin))
 	}
-	if !ids["kimi/kimi-k2.7-code"] || !ids["xai/grok-4.5"] {
-		t.Fatalf("authenticated native models missing: %+v", ids)
-	}
-	for id := range ids {
-		if len(id) >= len("anthropic/") && id[:len("anthropic/")] == "anthropic/" {
-			t.Fatalf("unsupported Anthropic subscription OAuth model was advertised: %s", id)
+	for i := range selected {
+		if withLogin[i].ID != selected[i].ID {
+			t.Fatalf("selector[%d] = %q, want %q", i, withLogin[i].ID, selected[i].ID)
+		}
+		for _, prefix := range []string{"kimi/", "xai/", "anthropic/"} {
+			if strings.HasPrefix(withLogin[i].ID, prefix) {
+				t.Fatalf("unselected native model was advertised after login: %s", withLogin[i].ID)
+			}
 		}
 	}
 }

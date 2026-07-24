@@ -92,6 +92,30 @@ func TestCachedNativeCatalogOverridesStaticSeedDeterministically(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedDiscoveryDoesNotExpandCodexSelector(t *testing.T) {
+	cfg := codexTestConfig()
+	selected := codexNamedModels(cfg)
+
+	store := newMemoryCredentialStore()
+	if err := store.Save(context.Background(), authCredential{Provider: "xai", AccessToken: "token"}); err != nil {
+		t.Fatal(err)
+	}
+	auth := newAuthManager(store, nil)
+	withAuth := codexNamedModelsWithAuth(cfg, auth)
+
+	if len(withAuth) != len(selected) {
+		t.Fatalf("authenticated discovery expanded selector from %d to %d models", len(selected), len(withAuth))
+	}
+	for i := range selected {
+		if withAuth[i].ID != selected[i].ID {
+			t.Fatalf("selector[%d] = %q, want %q", i, withAuth[i].ID, selected[i].ID)
+		}
+		if strings.HasPrefix(withAuth[i].ID, "xai/") {
+			t.Fatalf("unselected discovered model leaked into selector: %q", withAuth[i].ID)
+		}
+	}
+}
+
 func containsFold(value, fragment string) bool {
 	return strings.Contains(strings.ToLower(value), strings.ToLower(fragment))
 }

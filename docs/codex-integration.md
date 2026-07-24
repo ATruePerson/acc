@@ -61,7 +61,15 @@ Codex Desktop reads provider settings when its app process starts. After `start`
 
 ## Catalog and routing
 
-Catalog IDs are real `provider/upstream-model` values. The Codex model selector contains only enabled models explicitly selected in `config.json` whose `catalog_visible` value is not `false`. Provider login and model discovery may refresh non-secret cached metadata, but discovered models are never added to the selector automatically. Catalog entries are deterministic, unique, and exclude the Claude aliases `opus`, `sonnet`, and `haiku`. Direct Codex IDs do not inherit Claude alias fallback chains.
+The shipped Codex registry contains exactly these three explicitly enabled models:
+
+1. `nvidia/nvidia/nemotron-3-ultra-550b-a55b` — NVIDIA Nemotron Ultra 550B, 1M text context.
+2. `openrouter/poolside/laguna-s-2.1:free` — Poolside Laguna S 2.1 through OpenRouter, configured for coding and creative writing.
+3. `nvidia/stepfun-ai/step-3.7-flash` — Step 3.7 Flash through NVIDIA, with text and image input.
+
+They resolve directly to their selected provider and upstream model. The Codex registry does not attach hidden fallback or image-reroute chains to them. Additional models appear only after they are explicitly added and enabled in `config.json`; authenticated provider discovery does not automatically flood the selector.
+
+Catalog IDs are deterministic, unique, provider-prefixed, and exclude the Claude aliases `opus`, `sonnet`, and `haiku`. Direct Codex IDs do not inherit Claude alias fallback chains.
 
 ## Authentication
 

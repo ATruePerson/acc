@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -35,6 +36,8 @@ func codexPaths() (configPath, catalogPath, restorePath string, err error) {
 }
 
 func codexPIDPath() string { return filepath.Join(accDir(), "codex-service.json") }
+
+func codexRestartPath() string { return filepath.Join(accDir(), "codex-restart-required") }
 
 func loadCodexRuntime() (*Config, *authManager, error) {
 	loadDotenv(defaultEnvPath())
@@ -95,37 +98,26 @@ func refreshAvailableProviderCatalogs(cfg *Config, auth *authManager) []string {
 }
 
 func codexIntegrationStatus(cfg *Config, auth *authManager) map[string]any {
-	base := fmt.Sprintf("http://127.0.0.1:%d", cfg.Port)
-	configPath, catalogPath, restorePath, _ := codexPaths()
+	configPath, _, restorePath, _ := codexPaths()
 	config, _ := os.ReadFile(configPath)
-	catalog, catalogErr := os.ReadFile(catalogPath)
-	models := codexNamedModelsWithAuth(cfg, auth)
-	providers := map[string]string{}
-	availableProviders := map[string]bool{}
-	for _, model := range models {
-		availableProviders[model.Route.Provider] = true
-	}
-	for _, provider := range []string{"kimi", "xai", "anthropic"} {
-		if providerConfigured(cfg, auth, provider) {
-			providers[provider] = "ready"
-		} else {
-			providers[provider] = "login required"
-		}
-	}
+	routing := inspectCodexRouting(string(config))
+	processRunning := ownedCodexProcessRunning(codexPIDPath())
 	return map[string]any{
-		"acc_running":                proxyAlive(base),
-		"listening_address":          fmt.Sprintf("127.0.0.1:%d", cfg.Port),
-		"responses_url":              codexFrontGatewayURL(cfg) + "/responses",
-		"loopback_only":              true,
-		"codex_configured":           strings.Contains(string(config), `model_provider = "acc"`) && strings.Contains(string(config), codexFrontGatewayURL(cfg)),
-		"catalog_valid":              catalogErr == nil && json.Valid(catalog),
-		"provider_authentication":    providers,
-		"available_provider_count":   len(availableProviders),
-		"available_real_model_count": len(models),
-		"legacy_opencodex_detected":  legacyOpenCodexDetected(string(config)),
-		"backup_available":           fileExists(restorePath),
-		"managed_service_running":    ownedCodexProcessRunning(codexPIDPath()),
+		"mode":                  routing.Mode,
+		"acc_process":           ternary(processRunning, "Running", "Stopped"),
+		"codex_endpoint":        routing.Endpoint,
+		"active_model_provider": routing.Provider,
+		"active_catalog":        routing.Catalog,
+		"subscription_baseline": codexBaselineStatus(restorePath, string(config)),
+		"restart_chatgpt":       ternary(codexRestartRequired(codexRestartPath()), "Yes", "No"),
 	}
+}
+
+func ternary[T any](condition bool, yes, no T) T {
+	if condition {
+		return yes
+	}
+	return no
 }
 
 func fileExists(path string) bool {
@@ -133,14 +125,51 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-func printCodexStatus() {
-	cfg, auth, err := loadCodexRuntime()
+func codexRestartRequired(path string) bool {
+	info, err := os.Stat(path)
 	if err != nil {
-		fmt.Printf("  Codex status failed: %v\n", err)
-		return
+		return false
 	}
-	body, _ := json.MarshalIndent(codexIntegrationStatus(cfg, auth), "", "  ")
-	fmt.Println(string(body))
+	if runtime.GOOS != "darwin" {
+		return true
+	}
+	output, err := exec.Command("ps", "-axo", "lstart=,command=").Output()
+	if err != nil {
+		return true
+	}
+	latest := time.Time{}
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 6 {
+			continue
+		}
+		command := strings.Join(fields[5:], " ")
+		if !strings.Contains(command, "/ChatGPT.app/") && !strings.Contains(command, "/Codex.app/") {
+			continue
+		}
+		started, parseErr := time.ParseInLocation("Mon Jan _2 15:04:05 2006", strings.Join(fields[:5], " "), time.Local)
+		if parseErr == nil && started.After(latest) {
+			latest = started
+		}
+	}
+	if !latest.IsZero() && latest.After(info.ModTime()) {
+		_ = clearCodexRestartRequired(path)
+		return false
+	}
+	return true
+}
+
+func printCodexStatus() {
+	// Status only inspects Codex lifecycle state. It remains usable even when
+	// ACC's provider configuration is missing or currently invalid.
+	status := codexIntegrationStatus(nil, nil)
+	fmt.Printf("  Mode: %s\n", status["mode"])
+	fmt.Printf("  ACC process: %s\n", status["acc_process"])
+	fmt.Printf("  Codex endpoint: %s\n", status["codex_endpoint"])
+	fmt.Printf("  Active model provider: %s\n", status["active_model_provider"])
+	fmt.Printf("  Active catalog: %s\n", status["active_catalog"])
+	fmt.Printf("  Subscription baseline: %s\n", status["subscription_baseline"])
+	fmt.Printf("  Restart ChatGPT required: %s\n", status["restart_chatgpt"])
 }
 
 func cmdCodexLifecycle(args []string) {
@@ -165,19 +194,27 @@ func cmdCodexLifecycle(args []string) {
 	case "status":
 		printCodexStatus()
 		return
-	case "restore":
-		if err := restoreCodexSettings(); err != nil {
-			fmt.Printf("  Could not restore Codex settings: %v\n", err)
+	case "restore", "remove":
+		stopped, err := stopOwnedCodexProcess(codexPIDPath())
+		if err != nil {
+			fmt.Printf("  Could not stop the ACC-managed Codex service: %v\n", err)
 			return
 		}
-		fmt.Println("  Restored the exact previous Codex configuration. Current settings were timestamp-backed up first.")
-		return
-	case "remove":
-		if err := removeNativeCodexSettings(); err != nil {
-			fmt.Printf("  Could not remove ACC's Codex settings: %v\n", err)
+		result, err := restoreCodexSettingsDetailed()
+		if err != nil {
+			fmt.Printf("  Could not restore Codex subscription mode: %v\n", err)
 			return
 		}
-		fmt.Println("  Removed only ACC-owned Codex settings. History, ACC, OpenCodex, and provider credentials were preserved.")
+		if result.RecoveryMode {
+			fmt.Println("  Restored subscription mode using a newly constructed sanitized recovery baseline.")
+		} else {
+			fmt.Println("  Restored the durable sanitized subscription baseline.")
+		}
+		if stopped {
+			fmt.Println("  Stopped the ACC process owned by `acc codex start`.")
+		}
+		fmt.Printf("  Subscription authentication files: %s\n", ternary(result.AuthUnchanged, "Unchanged", "Verification failed"))
+		fmt.Printf("  Restart ChatGPT required: %s. Fully quit and reopen ChatGPT Desktop before using Codex.\n", ternary(result.RestartRequired || codexRestartRequired(codexRestartPath()), "Yes", "No"))
 		return
 	case "stop":
 		stopped, err := stopOwnedCodexProcess(codexPIDPath())
@@ -220,40 +257,59 @@ func cmdCodexLifecycle(args []string) {
 		fmt.Printf("  Unknown or unavailable real model %q. Run `acc models`.\n", model)
 		return
 	}
-	if err := configureNativeCodex(cfg, auth, model); err != nil {
+	configPath, catalogPath, restorePath, err := codexPaths()
+	if err != nil {
+		fmt.Printf("  Could not locate Codex settings: %v\n", err)
+		return
+	}
+	tx, err := beginConfigureCodexApp(configPath, catalogPath, restorePath, codexRestartPath(), codexFrontGatewayURL(cfg), model, cfg, auth)
+	if err != nil {
 		fmt.Printf("  Could not configure Codex: %v\n", err)
 		return
 	}
 	if command == "setup" {
+		result := tx.Commit()
 		fmt.Printf("  Codex now points directly to ACC with %s. Nothing was started.\n", model)
+		fmt.Printf("  Subscription baseline: %s. Restart ChatGPT required: %s.\n", ternary(result.BaselineCreated, "Created", "Preserved"), ternary(result.RestartRequired, "Yes", "No"))
 		return
 	}
+
 	base := fmt.Sprintf("http://127.0.0.1:%d", cfg.Port)
-	if !proxyAlive(base) {
-		pid, executable, startErr := startProxyDetachedWithPID()
-		if startErr != nil {
-			fmt.Printf("  Could not start ACC: %v\n", startErr)
+	_, newlyStarted, startErr := startOwnedCodexProcess(base)
+	if startErr != nil {
+		_ = tx.Rollback()
+		fmt.Printf("  Could not start ACC-owned Codex service: %v\n", startErr)
+		return
+	}
+	fail := func(message string) {
+		if newlyStarted {
+			_, _ = stopOwnedCodexProcess(codexPIDPath())
+		}
+		if rollbackErr := tx.Rollback(); rollbackErr != nil {
+			fmt.Printf("  %s Rollback also failed: %v\n", message, rollbackErr)
 			return
 		}
-		ownership := codexProcessOwnership{PID: pid, Executable: executable, StartedAt: time.Now().UTC()}
-		encoded, _ := json.MarshalIndent(ownership, "", "  ")
-		if err := atomicWriteFile(codexPIDPath(), append(encoded, '\n'), 0600); err != nil {
-			_ = syscall.Kill(pid, syscall.SIGTERM)
-			fmt.Printf("  ACC started but ownership could not be recorded: %v\n", err)
-			return
-		}
-		if !waitForProxy(base, 10*time.Second) {
-			_ = stopOwnedProcess(ownership)
-			_ = os.Remove(codexPIDPath())
-			fmt.Printf("  ACC did not become healthy at %s\n", base)
-			return
-		}
+		fmt.Println("  " + message + " Pre-command Codex files were restored.")
+	}
+	if err := validateCodexLoopbackBaseURL(codexFrontGatewayURL(cfg)); err != nil {
+		fail("ACC endpoint is not loopback-only.")
+		return
 	}
 	if !responsesEndpointReady(base) {
-		fmt.Printf("  ACC is running, but %s/v1/responses did not pass its compatibility probe.\n", base)
+		fail(fmt.Sprintf("%s/v1/responses did not pass its compatibility probe.", base))
 		return
 	}
+	configBody, configErr := os.ReadFile(configPath)
+	catalogBody, catalogErr := os.ReadFile(catalogPath)
+	routing := inspectCodexRouting(string(configBody))
+	validCatalog, _ := validateCodexCatalog(catalogBody)
+	if configErr != nil || catalogErr != nil || routing.Mode != "ACC" || routing.Provider != "acc" || !validCatalog || !catalogHasCodexModel(catalogBody, model) {
+		fail("ACC configuration verification failed.")
+		return
+	}
+	result := tx.Commit()
 	fmt.Printf("  Codex is using ACC directly at %s (%s). OpenCodex was not started.\n", codexFrontGatewayURL(cfg), model)
+	fmt.Printf("  Subscription baseline: %s. Restart ChatGPT required: %s.\n", ternary(result.BaselineCreated, "Created", "Preserved"), ternary(result.RestartRequired || codexRestartRequired(codexRestartPath()), "Yes", "No"))
 }
 
 func responsesEndpointReady(base string) bool {
@@ -270,9 +326,13 @@ func responsesEndpointReady(base string) bool {
 }
 
 func runCodexDoctor(out io.Writer, cfg *Config, auth *authManager) bool {
-	configPath, catalogPath, restorePath, _ := codexPaths()
+	configPath, _, restorePath, _ := codexPaths()
 	config, configErr := os.ReadFile(configPath)
-	catalog, catalogErr := os.ReadFile(catalogPath)
+	if os.IsNotExist(configErr) {
+		configErr = nil
+		config = nil
+	}
+	routing := inspectCodexRouting(string(config))
 	ok := true
 	check := func(name string, pass bool, detail string) {
 		mark := "OK"
@@ -282,19 +342,38 @@ func runCodexDoctor(out io.Writer, cfg *Config, auth *authManager) bool {
 		fmt.Fprintf(out, "  %-4s %-26s %s\n", mark, name, detail)
 	}
 	check("Codex config syntax", configErr == nil && validateCodexConfigText(string(config)) == nil, configPath)
+	check("active routing mode", routing.Mode == "ACC" || routing.Mode == "Subscription", routing.Mode)
+	check("legacy OpenCodex routing", !routing.ActiveOpenCodex, "active port 10100/provider routing absent")
+	loopbackOK := routing.Mode != "ACC" || validateCodexLoopbackBaseURL(routing.Endpoint) == nil
+	check("loopback binding", loopbackOK, routing.Endpoint)
+
 	base := fmt.Sprintf("http://127.0.0.1:%d", cfg.Port)
 	running := proxyAlive(base)
-	check("ACC endpoint", running, base)
-	check("Responses compatibility", running && responsesEndpointReady(base), base+"/v1/responses")
-	check("loopback binding", strings.Contains(string(config), "127.0.0.1") && !strings.Contains(string(config), "0.0.0.0"), "127.0.0.1 only")
-	validCatalog, catalogDetail := validateCodexCatalog(catalog)
-	check("real-model catalog", catalogErr == nil && validCatalog, catalogDetail)
+	owned := ownedCodexProcessRunning(codexPIDPath())
+	if routing.Mode == "ACC" {
+		check("ACC endpoint", running, base)
+		check("Responses compatibility", running && responsesEndpointReady(base), base+"/v1/responses")
+		activeCatalog := resolveCodexPath(routing.Catalog, configPath)
+		catalog, catalogErr := os.ReadFile(activeCatalog)
+		validCatalog, catalogDetail := validateCodexCatalog(catalog)
+		check("real-model catalog", catalogErr == nil && validCatalog, catalogDetail)
+		check("ACC process ownership", owned, codexPIDPath())
+	} else {
+		check("ACC endpoint", true, "not required in subscription mode")
+		check("Responses compatibility", true, "not required in subscription mode")
+		check("real-model catalog", routing.Catalog == "Built-in", routing.Catalog)
+		check("ACC process ownership", !owned, "no owned process expected")
+	}
 	check("stream/tool translation", codexTransportSelfTest(), "local deterministic conversion")
-	check("configuration backup", fileExists(restorePath), restorePath)
-	check("legacy OpenCodex routing", !legacyOpenCodexDetected(string(config)), "port 10100 and OpenCodex markers absent")
-	check("port ownership", !running || proxyAlive(base), strconv.Itoa(cfg.Port))
+	baseline := codexBaselineStatus(restorePath, string(config))
+	check("subscription baseline", baseline == "Valid" || baseline == "Recoverable", baseline)
+	check("port ownership", routing.Mode != "ACC" || running && owned, strconv.Itoa(cfg.Port))
 	storeReady := auth != nil && auth.store != nil
-	check("credential store", storeReady, auth.storeName)
+	storeName := "unavailable"
+	if auth != nil {
+		storeName = auth.storeName
+	}
+	check("credential store", storeReady, storeName)
 	for _, provider := range []string{"kimi", "xai", "anthropic"} {
 		state := "login required"
 		if providerConfigured(cfg, auth, provider) {
@@ -335,41 +414,21 @@ func codexTransportSelfTest() bool {
 }
 
 func restoreCodexSettings() error {
+	_, err := restoreCodexSettingsDetailed()
+	return err
+}
+
+func restoreCodexSettingsDetailed() (codexRestoreResult, error) {
 	configPath, catalogPath, restorePath, err := codexPaths()
 	if err != nil {
-		return err
+		return codexRestoreResult{}, err
 	}
-	return restoreCodexApp(configPath, catalogPath, restorePath)
+	return restoreCodexAppDetailed(configPath, catalogPath, restorePath, codexRestartPath())
 }
 
 func removeNativeCodexSettings() error {
-	configPath, catalogPath, restorePath, err := codexPaths()
-	if err != nil {
-		return err
-	}
-	if fileExists(restorePath) {
-		return restoreCodexApp(configPath, catalogPath, restorePath)
-	}
-	original, err := os.ReadFile(configPath)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if len(original) > 0 {
-		if _, err := writeTimestampedBackup(configPath, original); err != nil {
-			return err
-		}
-		cleaned := removeACCFromCodexConfig(string(original))
-		if err := validateCodexConfigText(cleaned); err != nil {
-			return err
-		}
-		if err := atomicWriteFile(configPath, []byte(cleaned), 0600); err != nil {
-			return err
-		}
-	}
-	if err := os.Remove(catalogPath); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
+	_, err := restoreCodexSettingsDetailed()
+	return err
 }
 
 func ownedCodexProcessRunning(path string) bool {
@@ -389,8 +448,12 @@ func readCodexProcessOwnership(path string) (codexProcessOwnership, error) {
 	return ownership, nil
 }
 
+func processExists(pid int) bool {
+	return syscall.Kill(pid, 0) == nil
+}
+
 func processMatchesOwnership(ownership codexProcessOwnership) bool {
-	if err := syscall.Kill(ownership.PID, 0); err != nil {
+	if !processExists(ownership.PID) {
 		return false
 	}
 	output, err := exec.Command("ps", "-p", strconv.Itoa(ownership.PID), "-o", "command=").Output()
@@ -407,6 +470,46 @@ func processMatchesOwnership(ownership codexProcessOwnership) bool {
 	return fields[0] == ownership.Executable || actual != "" && expected != "" && actual == expected
 }
 
+func startOwnedCodexProcess(base string) (codexProcessOwnership, bool, error) {
+	path := codexPIDPath()
+	if ownership, err := readCodexProcessOwnership(path); err == nil {
+		if processMatchesOwnership(ownership) {
+			if proxyAlive(base) {
+				return ownership, false, nil
+			}
+			if err := stopOwnedProcess(ownership); err != nil {
+				return codexProcessOwnership{}, false, err
+			}
+			_ = os.Remove(path)
+		} else if processExists(ownership.PID) {
+			return codexProcessOwnership{}, false, fmt.Errorf("PID %d is alive but no longer matches the recorded ACC executable; refusing to replace or kill it", ownership.PID)
+		} else {
+			_ = os.Remove(path)
+		}
+	} else if !os.IsNotExist(err) {
+		return codexProcessOwnership{}, false, err
+	}
+	if proxyAlive(base) {
+		return codexProcessOwnership{}, false, fmt.Errorf("an unowned process is already serving %s; stop it before `acc codex start`", base)
+	}
+	pid, executable, err := startProxyDetachedWithPID()
+	if err != nil {
+		return codexProcessOwnership{}, false, err
+	}
+	ownership := codexProcessOwnership{PID: pid, Executable: executable, StartedAt: time.Now().UTC()}
+	encoded, _ := json.MarshalIndent(ownership, "", "  ")
+	if err := atomicWriteFile(path, append(encoded, '\n'), 0600); err != nil {
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+		return codexProcessOwnership{}, false, fmt.Errorf("record ACC process ownership: %w", err)
+	}
+	if !waitForProxy(base, 10*time.Second) {
+		_ = stopOwnedProcess(ownership)
+		_ = os.Remove(path)
+		return codexProcessOwnership{}, false, fmt.Errorf("ACC did not become healthy at %s", base)
+	}
+	return ownership, true, nil
+}
+
 func stopOwnedCodexProcess(path string) (bool, error) {
 	ownership, err := readCodexProcessOwnership(path)
 	if err != nil {
@@ -414,6 +517,12 @@ func stopOwnedCodexProcess(path string) (bool, error) {
 			return false, nil
 		}
 		return false, err
+	}
+	if !processExists(ownership.PID) {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return false, err
+		}
+		return false, nil
 	}
 	if !processMatchesOwnership(ownership) {
 		return false, fmt.Errorf("PID %d no longer matches the recorded ACC executable; refusing to kill it", ownership.PID)

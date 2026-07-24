@@ -34,4 +34,9 @@ jobs:
         run: go build ./...
 
       - name: Test (race + coverage)
-        run: go test -race -cover ./...
+        run: |
+          if ! go test -race -cover ./... > /tmp/go-test.log 2>&1; then
+            tail -n 120 /tmp/go-test.log
+            exit 1
+          fi
+          cat /tmp/go-test.log

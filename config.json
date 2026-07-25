@@ -1,4 +1,5 @@
 {
+  "config_version": 2,
   "port": 9999,
   "system_prepend": "Always respond in English unless the user explicitly writes in another language.",
   "providers": {
@@ -20,7 +21,7 @@
     }
   },
   "models": {
-    "codex-nemotron-ultra-550b": {
+    "nvidia/nvidia/nemotron-3-ultra-550b-a55b": {
       "display_name": "Nemotron Ultra 550B (NVIDIA)",
       "description": "1M-context reasoning model for coding, planning, tool use, and long-context work.",
       "catalog_priority": 1,
@@ -45,7 +46,7 @@
       "max_output": 65536,
       "enabled": true
     },
-    "codex-laguna-s-2.1-free": {
+    "openrouter/poolside/laguna-s-2.1:free": {
       "display_name": "Laguna S 2.1 (OpenRouter Free)",
       "description": "Strong coding model that also works well for creative writing and fiction.",
       "catalog_priority": 2,
@@ -65,7 +66,7 @@
       "max_output": 32768,
       "enabled": true
     },
-    "codex-step-3.7-flash": {
+    "nvidia/stepfun-ai/step-3.7-flash": {
       "display_name": "Step 3.7 Flash (NVIDIA)",
       "description": "Fast, reliable multimodal model for coding, agents, and image understanding.",
       "catalog_priority": 3,
@@ -81,30 +82,6 @@
       "max_context": 262144,
       "max_output": 16384,
       "enabled": true
-    }
-  },
-  "routes": {
-    "sol": {
-      "provider": "openrouter",
-      "model": "tencent/hy3:free",
-      "max_tokens": 65536,
-      "toolcalling": true,
-      "stream": true
-    },
-    "terra": {
-      "provider": "opencode",
-      "model": "big-pickle",
-      "max_context": 131072,
-      "max_tokens": 48000,
-      "toolcalling": true,
-      "stream": true
-    },
-    "luna": {
-      "provider": "gemini",
-      "model": "gemini-3.5-flash",
-      "max_tokens": 65536,
-      "toolcalling": true,
-      "stream": true
     }
   },
   "alias_routes": {

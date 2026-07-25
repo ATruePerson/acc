@@ -226,18 +226,26 @@ func sanitizeCodexConfig(original string, removeWebSearch bool) string {
 			switch trimmed {
 			case accCodexRootBegin:
 				inOwned = true
+				out.WriteString(line)
 				continue
 			case accCodexRootEnd:
 				inOwned = false
+				out.WriteString(line)
 				continue
 			}
-			if inOwned || trimmed == accCodexProvider || strings.EqualFold(trimmed, "# Auto-injected by opencodex") {
+			if trimmed == accCodexProvider || strings.EqualFold(trimmed, "# Auto-injected by opencodex") {
 				continue
 			}
+			if inOwned {
+				// Inside ACC-owned section: keep the line as-is
+				out.WriteString(line)
+				continue
+			}
+			// Outside ACC-owned section: check if we should remove this line
 			key, _, ok := codexAssignment(line)
 			if ok {
 				switch key {
-				case "model", "model_provider", "model_catalog_json", "openai_base_url":
+				case "model", "model_provider", "model_catalog_json", "openai_base_url", "model_reasoning_effort":
 					continue
 				case "web_search":
 					if removeWebSearch {
@@ -280,7 +288,9 @@ func renderCodexACCConfig(original, catalogPath, baseURL, model, effort string) 
 	}
 	out.WriteString(accCodexRootBegin + newline)
 	out.WriteString("model = " + strconv.Quote(model) + newline)
-	out.WriteString("model_reasoning_effort = " + strconv.Quote(effort) + newline)
+	if effort != "" {
+		out.WriteString("model_reasoning_effort = " + strconv.Quote(effort) + newline)
+	}
 	out.WriteString(`model_provider = "acc"` + newline)
 	out.WriteString("model_catalog_json = " + strconv.Quote(catalogPath) + newline)
 	out.WriteString(`web_search = "disabled"` + newline)

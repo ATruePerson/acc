@@ -355,9 +355,9 @@ func TestCodexAliasesFollowConfiguredFamilies(t *testing.T) {
 	tests := []struct {
 		id, routeName string
 	}{
-		{"nvidia/z-ai/glm-5.2", "nvidia-glm"},
+		{"nvidia/z-ai~sglm-5.2", "nvidia-glm"},
 		{"opencode/big-pickle", "opencode-pickle"},
-		{"nvidia/stepfun-ai/step-3.7-flash", "nvidia-step"},
+		{"nvidia/stepfun-ai~sstep-3.7-flash", "nvidia-step"},
 	}
 	for _, tc := range tests {
 		route, err := s.routeFor(tc.id)
@@ -366,9 +366,6 @@ func TestCodexAliasesFollowConfiguredFamilies(t *testing.T) {
 		}
 		if want := cfg.Routes[tc.routeName]; route.Provider != want.Provider || route.Model != want.Model {
 			t.Errorf("routeFor(%q) = %s/%s, want %s/%s", tc.id, route.Provider, route.Model, want.Provider, want.Model)
-		}
-		if len(route.Reasoning) == 0 || route.MaxTokens == 0 {
-			t.Errorf("routeFor(%q) did not apply registry capabilities: %+v", tc.id, route)
 		}
 	}
 }

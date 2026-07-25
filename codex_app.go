@@ -14,6 +14,68 @@ const (
 	codexDefaultModel = "nvidia/z-ai/glm-5.2"
 )
 
+// encodeCodexSlug encodes provider/upstreamModel into exactly one slash.
+// Inner slashes become ~s and tildes become ~~ in the model portion.
+func encodeCodexSlug(provider, upstreamModel string) string {
+	encoded := strings.ReplaceAll(upstreamModel, "~", "~~")
+	encoded = strings.ReplaceAll(encoded, "/", "~s")
+	return provider + "/" + encoded
+}
+
+// decodeCodexSlug decodes a single-slash slug back to provider and upstreamModel.
+// Rejects malformed escape sequences (bare ~ not followed by s or ~).
+func decodeCodexSlug(slug string) (provider, upstreamModel string, ok bool) {
+	i := strings.Index(slug, "/")
+	if i <= 0 || i >= len(slug)-1 {
+		return "", "", false
+	}
+	provider = slug[:i]
+	modelPart := slug[i+1:]
+	var decoded strings.Builder
+	for j := 0; j < len(modelPart); j++ {
+		if modelPart[j] == '~' {
+			j++
+			if j >= len(modelPart) {
+				return "", "", false
+			}
+			switch modelPart[j] {
+			case 's':
+				decoded.WriteByte('/')
+			case '~':
+				decoded.WriteByte('~')
+			default:
+				return "", "", false
+			}
+		} else {
+			decoded.WriteByte(modelPart[j])
+		}
+	}
+	return provider, decoded.String(), true
+}
+
+// codexHomeDir returns the resolved Codex home directory.
+// Uses CODEX_HOME when set, otherwise defaults to ~/.codex.
+func codexHomeDir() (string, error) {
+	if override := os.Getenv("CODEX_HOME"); override != "" {
+		return override, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".codex"), nil
+}
+
+// invalidateCodexModelsCache removes the Codex models cache if it exists.
+// Non-fatal when the file does not exist.
+func invalidateCodexModelsCache() {
+	codexDir, err := codexHomeDir()
+	if err != nil {
+		return
+	}
+	os.Remove(filepath.Join(codexDir, "models_cache.json"))
+}
+
 type codexNamedModel struct {
 	ID         string
 	Display    string
@@ -37,7 +99,7 @@ func codexNamedModelsWithAuth(cfg *Config, auth *authManager) []codexNamedModel 
 		if err != nil {
 			continue
 		}
-		realID := route.Provider + "/" + strings.TrimPrefix(route.Model, "/")
+		realID := encodeCodexSlug(route.Provider, route.Model)
 		candidate := codexNamedModel{
 			ID: realID, Display: route.Model + " (" + route.Provider + ")",
 			Capability: capability, Route: route,

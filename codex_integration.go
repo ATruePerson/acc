@@ -28,11 +28,11 @@ func codexFrontGatewayURL(cfg *Config) string {
 }
 
 func codexPaths() (configPath, catalogPath, restorePath string, err error) {
-	home, err := os.UserHomeDir()
+	codexDir, err := codexHomeDir()
 	if err != nil {
 		return "", "", "", err
 	}
-	return filepath.Join(home, ".codex", "config.toml"), filepath.Join(home, ".codex", "acc-models.json"), filepath.Join(accDir(), "codex-restore.json"), nil
+	return filepath.Join(codexDir, "config.toml"), filepath.Join(codexDir, "acc-models.json"), filepath.Join(accDir(), "codex-restore.json"), nil
 }
 
 func codexPIDPath() string { return filepath.Join(accDir(), "codex-service.json") }
@@ -393,18 +393,31 @@ func validateCodexCatalog(body []byte) (bool, string) {
 	if len(body) == 0 || json.Unmarshal(body, &catalog) != nil {
 		return false, "missing or malformed JSON"
 	}
-	seen := map[string]bool{}
+	seenSlugs := map[string]bool{}
+	seenModels := map[string]bool{}
 	for _, model := range catalog.Models {
 		lower := strings.ToLower(model.Slug)
-		if seen[model.Slug] || !strings.Contains(model.Slug, "/") || lower == "opus" || lower == "sonnet" || lower == "haiku" {
+		if seenSlugs[model.Slug] || lower == "opus" || lower == "sonnet" || lower == "haiku" {
 			return false, "duplicate, ambiguous, or forbidden model ID: " + model.Slug
 		}
-		seen[model.Slug] = true
+		provider, upstreamModel, ok := decodeCodexSlug(model.Slug)
+		if !ok {
+			return false, "malformed slug (must contain exactly one slash with valid encoding): " + model.Slug
+		}
+		if provider == "" || upstreamModel == "" {
+			return false, "empty provider or upstream model in slug: " + model.Slug
+		}
+		modelKey := provider + "\x00" + upstreamModel
+		if seenModels[modelKey] {
+			return false, "duplicate encoded model (two different slugs decode to same provider/model): " + model.Slug
+		}
+		seenSlugs[model.Slug] = true
+		seenModels[modelKey] = true
 	}
-	if len(seen) == 0 {
+	if len(seenSlugs) == 0 {
 		return false, "catalog has no models"
 	}
-	return true, fmt.Sprintf("%d unique provider-prefixed models", len(seen))
+	return true, fmt.Sprintf("%d unique provider-prefixed models", len(seenSlugs))
 }
 
 func codexTransportSelfTest() bool {

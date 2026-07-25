@@ -297,7 +297,7 @@ func renderCodexACCConfig(original, catalogPath, baseURL, model, effort string) 
 	out.WriteString(`name = "ACC"` + newline)
 	out.WriteString("base_url = " + strconv.Quote(strings.TrimRight(baseURL, "/")) + newline)
 	out.WriteString(`wire_api = "responses"` + newline)
-	out.WriteString("requires_openai_auth = false" + newline)
+	out.WriteString("requires_openai_auth = true" + newline)
 	out.WriteString("supports_websockets = false" + newline)
 	return out.String()
 }

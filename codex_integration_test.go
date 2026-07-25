@@ -121,7 +121,7 @@ func TestCodexCatalogComesFromEnabledCapabilityRegistry(t *testing.T) {
 	if len(catalog.Models) != 3 {
 		t.Fatalf("catalog has %d models, want 3 enabled models", len(catalog.Models))
 	}
-	if catalog.Models[0].Slug != "nvidia/z-ai/glm-5.2" || catalog.Models[1].Slug != "opencode/big-pickle" || catalog.Models[2].Slug != "nvidia/stepfun-ai/step-3.7-flash" {
+	if catalog.Models[0].Slug != "nvidia/z-ai~sglm-5.2" || catalog.Models[1].Slug != "opencode/big-pickle" || catalog.Models[2].Slug != "nvidia/stepfun-ai~sstep-3.7-flash" {
 		t.Fatalf("catalog slugs are not deterministic provider-prefixed IDs: %+v", catalog.Models)
 	}
 	if !strings.Contains(catalog.Models[1].BaseInstructions, "Kabir's Second Brain") || strings.Contains(catalog.Models[1].BaseInstructions, "You are Codex") {
@@ -139,7 +139,7 @@ func TestCodexCatalogComesFromEnabledCapabilityRegistry(t *testing.T) {
 	var glm, pickle []string
 	for _, model := range catalog.Models {
 		for _, level := range model.Levels {
-			if model.Slug == "nvidia/z-ai/glm-5.2" {
+			if model.Slug == "nvidia/z-ai~sglm-5.2" {
 				glm = append(glm, level.Effort)
 			}
 			if model.Slug == "opencode/big-pickle" {
@@ -282,12 +282,12 @@ func TestCapabilityChainKeepsToolFallbackAndSeparateImageRoute(t *testing.T) {
 		ToolCallSupport: false, StreamingSupport: true, ImageInputSupport: true, Reasoning: map[string]ReasoningTarget{"max": {}},
 	}
 
-	chain, err := testServer(cfg).responseModelChain("nvidia/z-ai/glm-5.2")
+	chain, err := testServer(cfg).responseModelChain("nvidia/z-ai~sglm-5.2")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Codex strips fallback fields: chain must be exactly one model.
-	if len(chain) != 1 || chain[0].ID != "nvidia/z-ai/glm-5.2" {
+	if len(chain) != 1 || chain[0].ID != "nvidia/z-ai~sglm-5.2" {
 		t.Fatalf("Codex chain must be single-model, got: %+v", chain)
 	}
 }
@@ -306,9 +306,9 @@ func TestResponsesUseExactModelAndEffortOnEveryRequest(t *testing.T) {
 	}}}
 
 	requests := []string{
-		`{"model":"nvidia/z-ai/glm-5.2","instructions":"project rules","input":"first","reasoning":{"effort":"xhigh"}}`,
+		`{"model":"nvidia/z-ai~sglm-5.2","instructions":"project rules","input":"first","reasoning":{"effort":"xhigh"}}`,
 		`{"model":"opencode/big-pickle","instructions":"project rules","input":"second","reasoning":{"effort":"max"}}`,
-		`{"model":"nvidia/z-ai/glm-5.2","instructions":"project rules","input":"third","reasoning":{"effort":"minimal"}}`,
+		`{"model":"nvidia/z-ai~sglm-5.2","instructions":"project rules","input":"third","reasoning":{"effort":"minimal"}}`,
 	}
 	for _, body := range requests {
 		w := httptest.NewRecorder()
@@ -393,7 +393,7 @@ func TestUnsupportedEffortReturnsClearErrorWithoutCallingProvider(t *testing.T) 
 	}}}
 
 	w := httptest.NewRecorder()
-	request := `{"model":"nvidia/stepfun-ai/step-3.7-flash","input":"hello","reasoning":{"effort":"max"}}`
+	request := `{"model":"nvidia/stepfun-ai~sstep-3.7-flash","input":"hello","reasoning":{"effort":"max"}}`
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", w.Code, w.Body.String())
@@ -631,7 +631,7 @@ func TestFallbackIsReportedInHeadersAndUsesFallbackPersona(t *testing.T) {
 	}}}
 
 	w := httptest.NewRecorder()
-	request := `{"model":"nvidia/z-ai/glm-5.2","input":"hello","temperature":0.9,"top_p":0.8,"reasoning":{"effort":"high"}}`
+	request := `{"model":"nvidia/z-ai~sglm-5.2","input":"hello","temperature":0.9,"top_p":0.8,"reasoning":{"effort":"high"}}`
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
 	// With no fallback chain, the 503 propagates as the final error.
 	if w.Code != http.StatusServiceUnavailable {
@@ -683,7 +683,7 @@ func TestResponsesCustomToolRoundTripWithFunctionTool(t *testing.T) {
 	}}}
 
 	request := `{
-		"model":"nvidia/z-ai/glm-5.2",
+		"model":"nvidia/z-ai~sglm-5.2",
 		"input":"Inspect this repository",
 		"tools":[
 			{"type":"custom","name":"exec","description":"Run JavaScript code","format":{"type":"grammar","syntax":"lark","definition":"start: SOURCE\nSOURCE: /[\\s\\S]+/"},"x_codex_future":{"keep":"me"}},
@@ -733,7 +733,7 @@ func TestResponsesCustomToolResultRoundTrip(t *testing.T) {
 	}}}
 
 	request := `{
-		"model":"nvidia/z-ai/glm-5.2",
+		"model":"nvidia/z-ai~sglm-5.2",
 		"input":[
 			{"type":"custom_tool_call","id":"ctc_1","call_id":"call_exec_2","name":"exec","input":"await tools.exec_command({cmd: 'pwd'})","x_codex_future":"kept"},
 			{"type":"custom_tool_call_output","call_id":"call_exec_2","output":"command output","x_codex_future":"kept"}
@@ -789,7 +789,7 @@ func TestResponsesStreamingCustomToolUsesNativeEvents(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(stream))}, nil
 	}}}
 
-	request := `{"model":"nvidia/z-ai/glm-5.2","stream":true,"input":"run pwd","tools":[{"type":"custom","name":"exec","description":"Run JavaScript code","format":{"type":"grammar","syntax":"lark","definition":"start: SOURCE\nSOURCE: /[\\s\\S]+/"}}]}`
+	request := `{"model":"nvidia/z-ai~sglm-5.2","stream":true,"input":"run pwd","tools":[{"type":"custom","name":"exec","description":"Run JavaScript code","format":{"type":"grammar","syntax":"lark","definition":"start: SOURCE\nSOURCE: /[\\s\\S]+/"}}]}`
 	w := httptest.NewRecorder()
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
 	if w.Code != http.StatusOK {
@@ -810,7 +810,7 @@ func TestResponsesRejectsUnsupportedHostedToolWithBackend(t *testing.T) {
 		return chatSuccess("unexpected"), nil
 	}}}
 	w := httptest.NewRecorder()
-	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"nvidia/z-ai/glm-5.2","input":"hello","tools":[{"type":"web_search","external_web_access":true,"search_content_types":["text"]}]}`)))
+	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"nvidia/z-ai~sglm-5.2","input":"hello","tools":[{"type":"web_search","external_web_access":true,"search_content_types":["text"]}]}`)))
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `nvidia/z-ai/glm-5.2`) || !strings.Contains(w.Body.String(), `web_search`) {
 		t.Fatalf("hosted tool error is not actionable: status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -837,7 +837,7 @@ func TestOpusImageUsesMiniMaxAndNeverSendsImageToGLM(t *testing.T) {
 		return chatSuccess("unexpected"), nil
 	}}}
 
-	request := `{"model":"nvidia/z-ai/glm-5.2","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"what is this?"},{"type":"input_image","image_url":"data:image/png;base64,AAAA","detail":"original"}]}]}`
+	request := `{"model":"nvidia/z-ai~sglm-5.2","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"what is this?"},{"type":"input_image","image_url":"data:image/png;base64,AAAA","detail":"original"}]}]}`
 	w := httptest.NewRecorder()
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
 	// Codex strips fallback: image request on a non-image model must fail.
@@ -866,7 +866,7 @@ func TestOpusImageDoesNotSilentlyDowngradeRequestedEffort(t *testing.T) {
 		called = true
 		return chatSuccess("unexpected"), nil
 	}}}
-	request := `{"model":"nvidia/z-ai/glm-5.2","reasoning":{"effort":"high"},"input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`
+	request := `{"model":"nvidia/z-ai~sglm-5.2","reasoning":{"effort":"high"},"input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`
 	w := httptest.NewRecorder()
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
 	// Codex strips fallback: image request on a non-image model fails with
@@ -890,18 +890,18 @@ func TestOpusToolRequestsDoNotFallbackToToollessMiniMax(t *testing.T) {
 		Reasoning: map[string]ReasoningTarget{"minimal": {}},
 	}
 	s := testServer(cfg)
-	routes, err := s.responseModelChain("nvidia/z-ai/glm-5.2")
+	routes, err := s.responseModelChain("nvidia/z-ai~sglm-5.2")
 	if err != nil {
 		t.Fatal(err)
 	}
 	selected, err := selectResponseModelChain(&ResponsesRequest{
-		Model: "nvidia/z-ai/glm-5.2", Input: json.RawMessage(`"hello"`),
+		Model: "nvidia/z-ai~sglm-5.2", Input: json.RawMessage(`"hello"`),
 		Tools: []ResponsesTool{{Type: "function", Name: "exec", Parameters: json.RawMessage(`{"type":"object"}`)}},
 	}, routes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(selected) != 1 || selected[0].ID != "nvidia/z-ai/glm-5.2" {
+	if len(selected) != 1 || selected[0].ID != "nvidia/z-ai~sglm-5.2" {
 		t.Fatalf("tool request routes = %+v, want only the tool-capable Opus primary", selected)
 	}
 }
@@ -923,7 +923,7 @@ func TestOpusImageWithToolsFailsInsteadOfDroppingTools(t *testing.T) {
 		called = true
 		return chatSuccess("unexpected"), nil
 	}}}
-	request := `{"model":"nvidia/z-ai/glm-5.2","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}],"tools":[{"type":"function","name":"exec","parameters":{"type":"object"}}]}`
+	request := `{"model":"nvidia/z-ai~sglm-5.2","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}],"tools":[{"type":"function","name":"exec","parameters":{"type":"object"}}]}`
 	w := httptest.NewRecorder()
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "supports both image input and tool calls") {
@@ -943,7 +943,7 @@ func TestOpusImageFailsClearlyWhenNoImageRouteExists(t *testing.T) {
 	cfg.Models["acc-text-only"] = ModelCapability{DisplayName: "Text only", Provider: "nvidia", Model: "text-only", Enabled: true}
 	s := testServer(cfg)
 	w := httptest.NewRecorder()
-	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"nvidia/z-ai/glm-5.2","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`)))
+	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"nvidia/z-ai~sglm-5.2","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`)))
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "no configured image-capable route") {
 		t.Fatalf("image route failure is unclear: status=%d body=%s", w.Code, w.Body.String())
 	}

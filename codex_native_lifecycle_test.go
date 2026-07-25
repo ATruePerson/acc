@@ -28,8 +28,8 @@ trust_level = "trusted"
 [mcp_servers.obsidian]
 command = "obsidian-mcp"
 `
-	configured := renderCodexConfig(original, "/tmp/catalog.json", "http://127.0.0.1:8080/v1", "nvidia/real")
-	for _, want := range []string{accCodexRootBegin, accCodexRootEnd, accCodexProvider, `model = "nvidia/real"`, `wire_api = "responses"`} {
+	configured := renderCodexConfig(original, "/tmp/catalog.json", "http://127.0.0.1:8080/v1", "nvidia/real~model")
+	for _, want := range []string{accCodexRootBegin, accCodexRootEnd, accCodexProvider, `model = "nvidia/real~model"`, `wire_api = "responses"`} {
 		if !strings.Contains(configured, want) {
 			t.Fatalf("configured text missing %q:\n%s", want, configured)
 		}
@@ -59,7 +59,7 @@ func TestConfigureCreatesTimestampedBackupAndSecretFreeCatalog(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("approval_policy = \"on-request\"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := configureCodexApp(configPath, catalogPath, restorePath, "http://127.0.0.1:8080/v1", "nvidia/z-ai/glm-5.2", cfg); err != nil {
+	if err := configureCodexApp(configPath, catalogPath, restorePath, "http://127.0.0.1:8080/v1", "nvidia/z-ai~sglm-5.2", cfg); err != nil {
 		t.Fatal(err)
 	}
 	backups, _ := filepath.Glob(configPath + ".acc-backup-*")
@@ -104,7 +104,7 @@ model = "old"
 [model_providers.other]
 base_url = "https://provider.example/v1"
 `
-	configured := renderCodexConfig(original, "/tmp/catalog.json", "http://127.0.0.1:9999/v1", "nvidia/real")
+	configured := renderCodexConfig(original, "/tmp/catalog.json", "http://127.0.0.1:9999/v1", "nvidia/real~model")
 	if strings.Contains(configured, "10100") {
 		t.Fatalf("legacy OpenCodex root remained:\n%s", configured)
 	}

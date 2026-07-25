@@ -9,7 +9,7 @@ import (
 
 func TestResponsesRequestPreservesUnknownFields(t *testing.T) {
 	var req ResponsesRequest
-	if err := json.Unmarshal([]byte(`{"model":"nvidia/z-ai/glm-5.2","input":"hello","future_control":{"mode":"keep"}}`), &req); err != nil {
+	if err := json.Unmarshal([]byte(`{"model":"nvidia/z-ai~sglm-5.2","input":"hello","future_control":{"mode":"keep"}}`), &req); err != nil {
 		t.Fatal(err)
 	}
 	b, err := json.Marshal(req)
@@ -42,7 +42,7 @@ func TestPreviousResponseIDExpandsLocalConversation(t *testing.T) {
 		}},
 	})
 	req := &ResponsesRequest{
-		Model:              "nvidia/z-ai/glm-5.2",
+		Model:              "nvidia/z-ai~sglm-5.2",
 		PreviousResponseID: "resp_local",
 		Input:              json.RawMessage(`[{"type":"message","role":"user","content":"continue"}]`),
 	}
@@ -67,7 +67,7 @@ func TestResponsesReasoningSurvivesTranslation(t *testing.T) {
 		ReasoningContent: jsonString("short plan"),
 		Content:          jsonString("answer"),
 	}}}}
-	resp := translateToResponses(upstream, "nvidia/z-ai/glm-5.2")
+	resp := translateToResponses(upstream, "nvidia/z-ai~sglm-5.2")
 	if len(resp.Output) != 2 || resp.Output[0].Type != "reasoning" || resp.Output[1].Type != "message" {
 		t.Fatalf("translated output = %+v, want reasoning then message", resp.Output)
 	}
@@ -80,7 +80,7 @@ func TestResponsesStreamWithoutDoneIsIncomplete(t *testing.T) {
 	stream := `data: {"choices":[{"delta":{"content":"partial"}}]}` + "\n\n"
 	w := httptest.NewRecorder()
 	var completed *ResponsesResponse
-	streamTranslateResponsesWithCompletion(w, strings.NewReader(stream), "nvidia/z-ai/glm-5.2", func(response *ResponsesResponse) {
+	streamTranslateResponsesWithCompletion(w, strings.NewReader(stream), "nvidia/z-ai~sglm-5.2", func(response *ResponsesResponse) {
 		completed = response
 	})
 	body := w.Body.String()

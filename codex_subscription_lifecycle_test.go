@@ -61,7 +61,7 @@ func readTestFile(t *testing.T, path string) []byte {
 
 func startTestCodexConfig(t *testing.T, paths codexLifecycleTestPaths) {
 	t.Helper()
-	if err := configureCodexApp(paths.Config, paths.Catalog, paths.Baseline, "http://127.0.0.1:9999/v1", "nvidia/z-ai/glm-5.2", codexTestConfig()); err != nil {
+	if err := configureCodexApp(paths.Config, paths.Catalog, paths.Baseline, "http://127.0.0.1:9999/v1", "nvidia/z-ai~sglm-5.2", codexTestConfig()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -166,7 +166,7 @@ func TestExistingOpenCodexConfigStartThenRestoreToSubscription(t *testing.T) {
 func TestRecoveryRestoreFromExistingACCConfigWithoutBaseline(t *testing.T) {
 	paths := newCodexLifecycleTestPaths(t)
 	accConfig := `# BEGIN ACC CODEX OWNED
-model = "nvidia/z-ai/glm-5.2"
+model = "nvidia/z-ai~sglm-5.2"
 model_provider = "acc"
 model_catalog_json = "` + paths.Catalog + `"
 web_search = "disabled"
@@ -181,7 +181,7 @@ base_url = "http://127.0.0.1:9999/v1"
 wire_api = "responses"
 `
 	writeTestFile(t, paths.Config, []byte(accConfig))
-	writeTestFile(t, paths.Catalog, []byte(`{"models":[{"slug":"nvidia/z-ai/glm-5.2"}]}`))
+	writeTestFile(t, paths.Catalog, []byte(`{"models":[{"slug":"nvidia/z-ai~sglm-5.2"}]}`))
 
 	result, err := restoreCodexAppDetailed(paths.Config, paths.Catalog, paths.Baseline, paths.Restart)
 	if err != nil {
@@ -215,7 +215,7 @@ func TestRepeatedStartPreservesBaselineAndIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tx, err := beginConfigureCodexApp(paths.Config, paths.Catalog, paths.Baseline, paths.Restart, "http://127.0.0.1:9999/v1", "nvidia/z-ai/glm-5.2", codexTestConfig(), nil)
+	tx, err := beginConfigureCodexApp(paths.Config, paths.Catalog, paths.Baseline, paths.Restart, "http://127.0.0.1:9999/v1", "nvidia/z-ai~sglm-5.2", codexTestConfig(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestFailedConfigWriteRollsBackEveryMutation(t *testing.T) {
 	}
 	defer func() { codexWriteFile = oldWrite }()
 
-	err := configureCodexApp(paths.Config, paths.Catalog, paths.Baseline, "http://127.0.0.1:9999/v1", "nvidia/z-ai/glm-5.2", codexTestConfig())
+	err := configureCodexApp(paths.Config, paths.Catalog, paths.Baseline, "http://127.0.0.1:9999/v1", "nvidia/z-ai~sglm-5.2", codexTestConfig())
 	if err == nil || !strings.Contains(err.Error(), "injected config write failure") {
 		t.Fatalf("configure error = %v", err)
 	}

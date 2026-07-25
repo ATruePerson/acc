@@ -55,11 +55,29 @@ func resolveCapabilityRoute(cfg *Config, id string, capability ModelCapability) 
 
 func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
 	cfg := s.cfg.Load()
-	if capability, ok := cfg.Models[modelID]; ok {
+	// Try direct lookup first (config key may match slug directly).
+	capability, foundInModels := cfg.Models[modelID]
+	configKey := modelID
+	// If not found, decode the slug and try matching by provider/model against
+	// all configured models to find the config key.
+	if !foundInModels {
+		if provider, upstreamModel, ok := decodeCodexSlug(modelID); ok {
+			for key, cap := range cfg.Models {
+				route, err := resolveCapabilityRoute(cfg, key, cap)
+				if err == nil && route.Provider == provider && route.Model == upstreamModel {
+					capability = cap
+					configKey = key
+					foundInModels = true
+					break
+				}
+			}
+		}
+	}
+	if foundInModels {
 		if !capability.Enabled {
 			return nil, fmt.Errorf("selected model %q is disabled", modelID)
 		}
-		route, err := resolveCapabilityRoute(cfg, modelID, capability)
+		route, err := resolveCapabilityRoute(cfg, configKey, capability)
 		if err != nil {
 			return nil, err
 		}
@@ -168,6 +186,12 @@ func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
 }
 
 func splitRealCodexModelID(modelID string) (provider, model string, ok bool) {
+	p, m, ok2 := decodeCodexSlug(modelID)
+	if ok2 {
+		if _, isAlias := aliasFamily(normalizeModelID(p)); !isAlias {
+			return p, m, true
+		}
+	}
 	provider, model, ok = strings.Cut(modelID, "/")
 	if !ok || provider == "" || model == "" {
 		return "", "", false

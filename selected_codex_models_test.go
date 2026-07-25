@@ -36,9 +36,9 @@ func TestDefaultCodexSelectorContainsOnlyChosenModels(t *testing.T) {
 		slugs = append(slugs, model.ID)
 	}
 	want := []string{
-		"nvidia/nvidia/nemotron-3-ultra-550b-a55b",
-		"openrouter/poolside/laguna-s-2.1:free",
-		"nvidia/stepfun-ai/step-3.7-flash",
+		"nvidia/nvidia~snemotron-3-ultra-550b-a55b",
+		"openrouter/poolside~slaguna-s-2.1:free",
+		"nvidia/stepfun-ai~sstep-3.7-flash",
 	}
 	if !reflect.DeepEqual(slugs, want) {
 		t.Fatalf("selector models = %v, want %v", slugs, want)

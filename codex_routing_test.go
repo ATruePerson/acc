@@ -13,9 +13,9 @@ func TestRouteForUsesExactRequestedCodexModel(t *testing.T) {
 		selected string
 		want     string
 	}{
-		{"nvidia/z-ai/glm-5.2", "z-ai/glm-5.2"},
+		{"nvidia/z-ai~sglm-5.2", "z-ai/glm-5.2"},
 		{"opencode/big-pickle", "big-pickle"},
-		{"nvidia/stepfun-ai/step-3.7-flash", "stepfun-ai/step-3.7-flash"},
+		{"nvidia/stepfun-ai~sstep-3.7-flash", "stepfun-ai/step-3.7-flash"},
 	}
 
 	for _, tc := range cases {
@@ -43,9 +43,9 @@ func TestResponseModelChainAcceptsProviderModelIDs(t *testing.T) {
 	cases := []struct {
 		model string
 	}{
-		{"nvidia/z-ai/glm-5.2"},
+		{"nvidia/z-ai~sglm-5.2"},
 		{"opencode/big-pickle"},
-		{"nvidia/stepfun-ai/step-3.7-flash"},
+		{"nvidia/stepfun-ai~sstep-3.7-flash"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.model, func(t *testing.T) {
@@ -79,12 +79,12 @@ func TestResponseModelChainStripsFallbackFieldsFromCodexModels(t *testing.T) {
 	cfg.Models["nvidia/z-ai/glm-5.2"] = ModelCapability{
 		Enabled: true, Provider: "nvidia", Model: "z-ai/glm-5.2",
 		StreamingSupport: true, ToolCallSupport: true,
-		FallbackModel:        "opencode/big-pickle",
-		FallbackModels:       []string{"opencode/big-pickle"},
-		ImageFallbackModels:  []string{"opencode/big-pickle"},
+		FallbackModel:       "opencode/big-pickle",
+		FallbackModels:      []string{"opencode/big-pickle"},
+		ImageFallbackModels: []string{"opencode/big-pickle"},
 	}
 	s := testServer(cfg)
-	chain, err := s.responseModelChain("nvidia/z-ai/glm-5.2")
+	chain, err := s.responseModelChain("nvidia/z-ai~sglm-5.2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,9 +108,9 @@ func TestConfiguredSelectedCodexModelsHaveNoFallbackChains(t *testing.T) {
 		model    string
 		images   bool
 	}{
-		"nvidia/nvidia/nemotron-3-ultra-550b-a55b": {provider: "nvidia", model: "nvidia/nemotron-3-ultra-550b-a55b"},
-		"openrouter/poolside/laguna-s-2.1:free":    {provider: "openrouter", model: "poolside/laguna-s-2.1:free"},
-		"nvidia/stepfun-ai/step-3.7-flash":         {provider: "nvidia", model: "stepfun-ai/step-3.7-flash", images: true},
+		"nvidia/nvidia~snemotron-3-ultra-550b-a55b": {provider: "nvidia", model: "nvidia/nemotron-3-ultra-550b-a55b"},
+		"openrouter/poolside~slaguna-s-2.1:free":    {provider: "openrouter", model: "poolside/laguna-s-2.1:free"},
+		"nvidia/stepfun-ai~sstep-3.7-flash":         {provider: "nvidia", model: "stepfun-ai/step-3.7-flash", images: true},
 	}
 	for selected, expected := range want {
 		chain, err := s.responseModelChain(selected)

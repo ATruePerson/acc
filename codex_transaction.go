@@ -32,6 +32,7 @@ func beginConfigureCodexApp(configPath, catalogPath, baselinePath, restartPath, 
 	}
 	tx := &codexConfigTransaction{state: state}
 	rollback := func(err error) (*codexConfigTransaction, error) {
+		invalidateCodexModelsCache()
 		if rollbackErr := tx.Rollback(); rollbackErr != nil {
 			return nil, fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
 		}
@@ -108,6 +109,9 @@ func beginConfigureCodexApp(configPath, catalogPath, baselinePath, restartPath, 
 	}
 	if !authUnchanged {
 		return rollback(fmt.Errorf("Codex authentication files changed unexpectedly"))
+	}
+	if restartRequired {
+		invalidateCodexModelsCache()
 	}
 	tx.result = codexConfigureResult{BaselineCreated: created, RestartRequired: restartRequired, AuthUnchanged: true}
 	return tx, nil
@@ -239,6 +243,9 @@ func restoreCodexAppDetailed(configPath, catalogPath, baselinePath, restartPath 
 	}
 	if !authUnchanged {
 		return rollback(result, fmt.Errorf("Codex authentication files changed unexpectedly"))
+	}
+	if result.RestartRequired {
+		invalidateCodexModelsCache()
 	}
 	sort.Strings(result.DeletedCatalogs)
 	return result, nil

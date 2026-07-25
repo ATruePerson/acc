@@ -89,9 +89,9 @@ func TestCodexModelCatalogHasNamedModels(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []struct{ slug, display string }{
-		{"nvidia/z-ai/glm-5.2", "z-ai/glm-5.2 (nvidia)"},
+		{"nvidia/z-ai~sglm-5.2", "z-ai/glm-5.2 (nvidia)"},
 		{"opencode/big-pickle", "big-pickle (opencode)"},
-		{"nvidia/stepfun-ai/step-3.7-flash", "stepfun-ai/step-3.7-flash (nvidia)"},
+		{"nvidia/stepfun-ai~sstep-3.7-flash", "stepfun-ai/step-3.7-flash (nvidia)"},
 	}
 	if len(catalog.Models) != len(want) {
 		t.Fatalf("got %d models, want %d", len(catalog.Models), len(want))
@@ -131,7 +131,7 @@ func TestConfigureAndRestoreCodexApp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := configureCodexApp(configPath, catalogPath, restorePath, "http://localhost:9999/v1", "nvidia/z-ai/glm-5.2", cfg)
+	err := configureCodexApp(configPath, catalogPath, restorePath, "http://localhost:9999/v1", "nvidia/z-ai~sglm-5.2", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestConfigureAndRestoreCodexApp(t *testing.T) {
 	text := string(configured)
 	for _, required := range []string{
 		`sandbox_mode = "workspace-write"`,
-		`model = "nvidia/z-ai/glm-5.2"`,
+		`model = "nvidia/z-ai~sglm-5.2"`,
 		`model_provider = "acc"`,
 		`model_catalog_json = "` + catalogPath + `"`,
 		`web_search = "disabled"`,

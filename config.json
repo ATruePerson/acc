@@ -84,28 +84,6 @@
     }
   },
   "routes": {
-    "sol": {
-      "provider": "openrouter",
-      "model": "tencent/hy3:free",
-      "max_tokens": 65536,
-      "toolcalling": true,
-      "stream": true
-    },
-    "terra": {
-      "provider": "opencode",
-      "model": "big-pickle",
-      "max_context": 131072,
-      "max_tokens": 48000,
-      "toolcalling": true,
-      "stream": true
-    },
-    "luna": {
-      "provider": "gemini",
-      "model": "gemini-3.5-flash",
-      "max_tokens": 65536,
-      "toolcalling": true,
-      "stream": true
-    }
   },
   "alias_routes": {
     "opus": {

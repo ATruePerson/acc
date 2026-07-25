@@ -416,9 +416,9 @@ func (s *server) executeUpstream(
 		body = mergeRouteExtraBody(body, currentRoute.ExtraBody)
 		body = mergeRouteExtraBody(body, effortExtra)
 
-		maxAttempts := 10
-		if ri < len(routes)-1 {
-			maxAttempts = 1
+		maxAttempts := 1
+		if ri == len(routes)-1 && len(routes) > 1 {
+			maxAttempts = 10
 		}
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
 			if err := s.limiter.Wait(ctx, currentRoute.Provider); err != nil {
@@ -940,7 +940,6 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "parse request: "+err.Error())
 		return
 	}
-	normalizeLegacyResponsesRequest(&req)
 
 	logit := func(routeModel string, status, in, out int, effort string) {
 		AddTUILog(LogEntry{
@@ -967,6 +966,15 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, err.Error())
 		logit("error", 400, 0, 0, "")
 		return
+	}
+	// Codex resolves exactly one provider/model per request. Reject any chain
+	// that includes fallback or image-fallback entries.
+	for _, r := range routes[1:] {
+		if r.Fallback || r.ImageOnly {
+			httpErr(w, 400, fmt.Sprintf("Codex model %q must not configure fallback chains", req.Model))
+			logit("error", 400, 0, 0, "")
+			return
+		}
 	}
 	routes, err = selectResponseModelChainForInput(&req, routes, estimateResponsesInputTokens(requestForSizing))
 	if err != nil {

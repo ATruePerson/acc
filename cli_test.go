@@ -248,7 +248,7 @@ func TestDefaultConfigIsValidAndLoads(t *testing.T) {
 	if err := json.Unmarshal([]byte(defaultConfigJSON), &c); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if c.Port == 0 || len(c.Providers) == 0 || len(c.Routes) == 0 {
+	if c.Port == 0 || len(c.Providers) == 0 {
 		t.Fatalf("default config missing essentials: %+v", c)
 	}
 	if c.Models["acc-minimax-m3"].ToolCallSupport {

@@ -60,14 +60,36 @@ func TestResponseModelChainAcceptsProviderModelIDs(t *testing.T) {
 	}
 }
 
-func TestNormalizeLegacyResponsesRequestIsNoop(t *testing.T) {
-	req := &ResponsesRequest{
-		Model:     "opus",
-		Reasoning: &ResponsesReasoning{Effort: "high"},
+func TestResponseModelChainRejectsBareCodexModelIDs(t *testing.T) {
+	s := testServer(codexTestConfig())
+	for _, bare := range []string{"opus", "sonnet", "haiku", "sol", "terra", "luna", "unknown"} {
+		t.Run(bare, func(t *testing.T) {
+			_, err := s.responseModelChain(bare)
+			if err == nil {
+				t.Fatalf("bare model ID %q should be rejected", bare)
+			}
+		})
 	}
-	normalizeLegacyResponsesRequest(req)
-	if req.Model != "opus" || req.Reasoning.Effort != "high" {
-		t.Fatalf("normalized request = %+v, want model=opus effort=high", req)
+}
+
+func TestResponseModelChainStripsFallbackFieldsFromCodexModels(t *testing.T) {
+	cfg := codexTestConfig()
+	// Inject a Codex-keyed model with fallback fields. The Codex branch must
+	// strip them so no multi-model chain is built.
+	cfg.Models["nvidia/z-ai/glm-5.2"] = ModelCapability{
+		Enabled: true, Provider: "nvidia", Model: "z-ai/glm-5.2",
+		StreamingSupport: true, ToolCallSupport: true,
+		FallbackModel:        "opencode/big-pickle",
+		FallbackModels:       []string{"opencode/big-pickle"},
+		ImageFallbackModels:  []string{"opencode/big-pickle"},
+	}
+	s := testServer(cfg)
+	chain, err := s.responseModelChain("nvidia/z-ai/glm-5.2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chain) != 1 {
+		t.Fatalf("chain = %+v, want exactly one model (fallback fields must be stripped)", chain)
 	}
 }
 

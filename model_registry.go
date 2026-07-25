@@ -16,12 +16,6 @@ type resolvedModel struct {
 	ImageOnly         bool
 }
 
-func normalizeLegacyResponsesRequest(req *ResponsesRequest) {
-	if req == nil {
-		return
-	}
-}
-
 func enabledModelIDs(cfg *Config) []string {
 	ids := make([]string, 0, len(cfg.Models))
 	for id, capability := range cfg.Models {
@@ -68,6 +62,12 @@ func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
 		route, err := resolveCapabilityRoute(cfg, modelID, capability)
 		if err != nil {
 			return nil, err
+		}
+		// Codex models use provider/model IDs and must never build fallback
+		// chains. If a provider/model key exists in the Models map, resolve it
+		// as a single-item chain and skip fallback processing.
+		if provider, upstreamModel, ok := splitRealCodexModelID(modelID); ok {
+			return []resolvedModel{{ID: modelID, Capability: capability, Route: Route{Provider: provider, Model: upstreamModel}}}, nil
 		}
 		chain := []resolvedModel{{ID: modelID, Capability: capability, Route: route}}
 		seen := map[string]bool{modelID: true}
@@ -133,6 +133,11 @@ func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
 			if err == nil && route.Provider == provider && route.Model == upstreamModel {
 				capability = configured
 				capability.Provider, capability.Model, capability.Route = provider, upstreamModel, ""
+				// Codex resolves exactly one provider/model. Strip any fallback
+				// fields from the matched capability so they cannot be read.
+				capability.FallbackModel = ""
+				capability.FallbackModels = nil
+				capability.ImageFallbackModels = nil
 				break
 			}
 		}
@@ -141,6 +146,12 @@ func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
 			route.MaxTokens = capability.MaxOutput
 		}
 		return []resolvedModel{{ID: modelID, Capability: capability, Route: route}}, nil
+	}
+
+	// Codex must use provider/model IDs. Bare model names (like "opus") are
+	// Claude aliases and must not resolve through Codex routing.
+	if !strings.Contains(modelID, "/") {
+		return nil, fmt.Errorf("invalid Codex model ID %q — use provider/model format", modelID)
 	}
 
 	// Legacy non-Codex clients can still use aliases and route fallbacks. They do

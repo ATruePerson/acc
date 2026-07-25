@@ -286,25 +286,9 @@ func TestCapabilityChainKeepsToolFallbackAndSeparateImageRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	toolChain, err := selectResponseModelChain(&ResponsesRequest{
-		Model: "nvidia/z-ai/glm-5.2", Input: json.RawMessage(`"hello"`),
-		Tools: []ResponsesTool{{Type: "function", Name: "exec", Parameters: json.RawMessage(`{"type":"object"}`)}},
-	}, chain)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(toolChain) != 2 || toolChain[1].ID != "tool-fallback" {
-		t.Fatalf("tool chain dropped or included an incompatible route: %+v", toolChain)
-	}
-	imageChain, err := selectResponseModelChain(&ResponsesRequest{
-		Model: "nvidia/z-ai/glm-5.2",
-		Input: json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]`),
-	}, chain)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(imageChain) != 1 || imageChain[0].ID != "image-fallback" || !imageChain[0].CapabilityReroute {
-		t.Fatalf("image route was not selected separately: %+v", imageChain)
+	// Codex strips fallback fields: chain must be exactly one model.
+	if len(chain) != 1 || chain[0].ID != "nvidia/z-ai/glm-5.2" {
+		t.Fatalf("Codex chain must be single-model, got: %+v", chain)
 	}
 }
 
@@ -440,7 +424,7 @@ func TestUnavailableModelReturnsClearErrorWithoutCallingProvider(t *testing.T) {
 		if model == "disabled-model" && !strings.Contains(w.Body.String(), "is disabled") {
 			t.Fatalf("disabled-model error is unclear: %s", w.Body.String())
 		}
-		if model == "gpt-5.6-missing" && !strings.Contains(w.Body.String(), "unrecognized model ID") {
+		if model == "gpt-5.6-missing" && !strings.Contains(w.Body.String(), "invalid Codex model ID") {
 			t.Fatalf("missing model error is unclear: %s", w.Body.String())
 		}
 	}
@@ -642,35 +626,19 @@ func TestFallbackIsReportedInHeadersAndUsesFallbackPersona(t *testing.T) {
 	calls := 0
 	s.http = &http.Client{Transport: &mockTripper{fn: func(req *http.Request) (*http.Response, error) {
 		calls++
-		if calls == 1 {
-			return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(`{"error":"down"}`))}, nil
-		}
-		var body map[string]any
-		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-			t.Fatal(err)
-		}
-		messages := body["messages"].([]any)
-		system := messages[0].(map[string]any)["content"].(string)
-		if !strings.Contains(system, "opencode/big-pickle") || strings.Contains(system, "nvidia/z-ai/glm-5.2") {
-			t.Fatalf("fallback persona is stale: %s", system)
-		}
-		if body["max_tokens"] != float64(48000) {
-			t.Fatalf("fallback max_tokens = %v, want 48000", body["max_tokens"])
-		}
-		if body["temperature"] != 0.9 || body["top_p"] != 0.8 {
-			t.Fatalf("fallback inherited primary controls: temperature=%v top_p=%v", body["temperature"], body["top_p"])
-		}
-		return chatSuccess("fallback ok"), nil
+		// Codex strips fallback fields: only one call should happen.
+		return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(bytes.NewBufferString(`{"error":"down"}`))}, nil
 	}}}
 
 	w := httptest.NewRecorder()
 	request := `{"model":"nvidia/z-ai/glm-5.2","input":"hello","temperature":0.9,"top_p":0.8,"reasoning":{"effort":"high"}}`
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
-	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	// With no fallback chain, the 503 propagates as the final error.
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s, want 503 (no fallback to absorb it)", w.Code, w.Body.String())
 	}
-	if w.Header().Get("X-ACC-Fallback") != "true" || w.Header().Get("X-ACC-Backend-Provider") != "opencode" || w.Header().Get("X-ACC-Backend-Model") != "big-pickle" || w.Header().Get("X-ACC-Backend-Effort") != "high" {
-		t.Fatalf("fallback headers missing: %+v", w.Header())
+	if calls != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (Codex must not retry across providers)", calls)
 	}
 }
 
@@ -863,29 +831,21 @@ func TestOpusImageUsesMiniMaxAndNeverSendsImageToGLM(t *testing.T) {
 		Reasoning: map[string]ReasoningTarget{"minimal": {}},
 	}
 	s := testServer(cfg)
-	var models []string
+	called := false
 	s.http = &http.Client{Transport: &mockTripper{fn: func(req *http.Request) (*http.Response, error) {
-		var body map[string]any
-		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-			t.Fatal(err)
-		}
-		models = append(models, body["model"].(string))
-		messages := body["messages"].([]any)
-		content := messages[len(messages)-1].(map[string]any)["content"].([]any)
-		if content[0].(map[string]any)["text"] != "what is this?" || content[1].(map[string]any)["image_url"].(map[string]any)["url"] != "data:image/png;base64,AAAA" || content[1].(map[string]any)["detail"] != "original" {
-			t.Fatalf("image content changed: %+v", content)
-		}
-		return chatSuccess("image understood"), nil
+		called = true
+		return chatSuccess("unexpected"), nil
 	}}}
 
 	request := `{"model":"nvidia/z-ai/glm-5.2","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"what is this?"},{"type":"input_image","image_url":"data:image/png;base64,AAAA","detail":"original"}]}]}`
 	w := httptest.NewRecorder()
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "image understood") {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	// Codex strips fallback: image request on a non-image model must fail.
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "image") {
+		t.Fatalf("status=%d body=%s, want image-capable error", w.Code, w.Body.String())
 	}
-	if len(models) != 1 || models[0] != "minimaxai/minimax-m3" || w.Header().Get("X-ACC-Backend-Model") != "minimaxai/minimax-m3" {
-		t.Fatalf("image route = %v headers=%+v, want MiniMax only", models, w.Header())
+	if called {
+		t.Fatal("provider was called for an image request on a non-image model")
 	}
 }
 
@@ -909,11 +869,13 @@ func TestOpusImageDoesNotSilentlyDowngradeRequestedEffort(t *testing.T) {
 	request := `{"model":"nvidia/z-ai/glm-5.2","reasoning":{"effort":"high"},"input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`
 	w := httptest.NewRecorder()
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
-	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `does not support reasoning effort`) || !strings.Contains(w.Body.String(), `max`) {
-		t.Fatalf("effort error is unclear: status=%d body=%s", w.Code, w.Body.String())
+	// Codex strips fallback: image request on a non-image model fails with
+	// image error, not a confusing effort error.
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "image") {
+		t.Fatalf("error is unclear: status=%d body=%s", w.Code, w.Body.String())
 	}
 	if called {
-		t.Fatal("provider was called after the image route could not honor the requested effort")
+		t.Fatal("provider was called for an image request on a non-image model")
 	}
 }
 

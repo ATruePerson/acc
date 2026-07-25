@@ -61,7 +61,7 @@ func beginConfigureCodexApp(configPath, catalogPath, baselinePath, restartPath, 
 	if !catalogHasCodexModel(catalog, model) {
 		return rollback(fmt.Errorf("selected model %q is missing from generated catalog", model))
 	}
-	configured := renderCodexACCConfig(string(original), catalogPath, baseURL, model)
+	configured := renderCodexACCConfig(string(original), catalogPath, baseURL, model, "")
 	if err := validateCodexConfigText(configured); err != nil {
 		return rollback(fmt.Errorf("generated Codex config is invalid: %w", err))
 	}

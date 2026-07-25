@@ -54,7 +54,7 @@ through the capability registry's explicit fallback lists, and
 the response headers report requested model/effort plus actual provider,
 backend model, effort, and fallback state.
 
-Terra advertises the 262K context available through HY3. Its Big Pickle primary
+Big Pickle advertises the 262K context available through HY3. Its primary
 route remains capped at 131K. ACC estimates compacted Responses payloads at a
 conservative three bytes per token, respects a smaller client output limit, and
 skips routes that cannot safely hold the request. Requests beyond HY3's context
@@ -138,7 +138,7 @@ registry and per-request stable IDs replace that path.
 - MiniMax M3 rejects `reasoning_budget`; let it reason natively.
 - `big-pickle` is a reasoning model and can spend a small output limit entirely
   on reasoning. It completed simple tools but every repeated multi-tool coding
-  workflow failed upstream. Terra therefore puts HY3 immediately behind it.
+  workflow failed upstream. HY3 sits immediately behind it as fallback.
 - NVIDIA GLM-5.2 repeatedly timed out during the July 16 benchmark. It remains
   unassigned.
 - `tencent/hy3:free` completed all 27 curated runs at OpenRouter reasoning

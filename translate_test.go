@@ -355,9 +355,9 @@ func TestCodexAliasesFollowConfiguredFamilies(t *testing.T) {
 	tests := []struct {
 		id, routeName string
 	}{
-		{codexOpusID, "sol"},
-		{codexSonnetID, "terra"},
-		{codexHaikuID, "luna"},
+		{"nvidia/z-ai/glm-5.2", "nvidia-glm"},
+		{"opencode/big-pickle", "opencode-pickle"},
+		{"nvidia/stepfun-ai/step-3.7-flash", "nvidia-step"},
 	}
 	for _, tc := range tests {
 		route, err := s.routeFor(tc.id)

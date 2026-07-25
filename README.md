@@ -135,9 +135,8 @@ every request, so separate Codex tasks stay independent. `acc codex restore`
 removes active ACC/OpenCodex routing and writes the durable sanitized
 subscription baseline while retaining the raw snapshot for recovery.
 
-Codex real-model IDs route to that exact provider and model. They never inherit
-Claude alias fallback chains. Explicit real-model fallback configuration still
-works, and ACC never quietly lowers effort or removes tools to force a fallback.
+Codex real-model IDs route to that exact provider and model. Each request goes
+directly to the selected provider with no automatic fallback or rerouting.
 
 Codex's free-form custom tools are bridged through Chat Completions without
 changing their native Responses call or streaming shape. Provider-hosted tools

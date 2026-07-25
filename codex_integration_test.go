@@ -20,9 +20,9 @@ func codexTestConfig() *Config {
 			"openrouter": {BaseURL: "https://openrouter.test", APIKey: "openrouter-key"},
 		},
 		Routes: map[string]Route{
-			"sol":   {Provider: "nvidia", Model: "z-ai/glm-5.2", Toolcalling: boolPtr(true)},
-			"terra": {Provider: "opencode", Model: "big-pickle", MaxContext: 131072, MaxTokens: 48000, Toolcalling: boolPtr(true)},
-			"luna":  {Provider: "nvidia", Model: "stepfun-ai/step-3.7-flash", Toolcalling: boolPtr(true)},
+			"nvidia-glm":      {Provider: "nvidia", Model: "z-ai/glm-5.2", Toolcalling: boolPtr(true)},
+			"opencode-pickle": {Provider: "opencode", Model: "big-pickle", MaxContext: 131072, MaxTokens: 48000, Toolcalling: boolPtr(true)},
+			"nvidia-step":     {Provider: "nvidia", Model: "stepfun-ai/step-3.7-flash", Toolcalling: boolPtr(true)},
 		},
 		AliasRoutes: map[string]Route{
 			"opus":   {Provider: "nvidia", Model: "z-ai/glm-5.2", Toolcalling: boolPtr(true)},
@@ -30,8 +30,8 @@ func codexTestConfig() *Config {
 			"haiku":  {Provider: "nvidia", Model: "stepfun-ai/step-3.7-flash", Toolcalling: boolPtr(true)},
 		},
 		Models: map[string]ModelCapability{
-			codexOpusID: {
-				DisplayName: "5.6 Sol", CatalogPriority: 1, Route: "sol", Enabled: true,
+			"nvidia/z-ai/glm-5.2": {
+				DisplayName: "GLM 5.2 (NVIDIA)", CatalogPriority: 1, Route: "nvidia-glm", Enabled: true,
 				Reasoning: map[string]ReasoningTarget{
 					"minimal": {}, "low": {Effort: "low"}, "medium": {Effort: "medium"},
 					"high": {Effort: "high"}, "xhigh": {Effort: "xhigh"},
@@ -39,8 +39,8 @@ func codexTestConfig() *Config {
 				ToolCallSupport: true, StreamingSupport: true, ImageInputSupport: true,
 				MaxContext: 131072, MaxOutput: 131072,
 			},
-			codexSonnetID: {
-				DisplayName: "5.6 Terra", CatalogPriority: 2, Route: "terra", Enabled: true,
+			"opencode/big-pickle": {
+				DisplayName: "Big Pickle (OpenCode)", CatalogPriority: 2, Route: "opencode-pickle", Enabled: true,
 				Reasoning: map[string]ReasoningTarget{
 					"minimal": {}, "low": {Effort: "low"}, "medium": {Effort: "medium"},
 					"high": {Effort: "high"}, "xhigh": {Effort: "xhigh"}, "max": {Effort: "max"},
@@ -48,8 +48,8 @@ func codexTestConfig() *Config {
 				ToolCallSupport: true, StreamingSupport: true, FileInputSupport: true,
 				MaxContext: 262144, MaxOutput: 65536,
 			},
-			codexHaikuID: {
-				DisplayName: "5.6 Luna", CatalogPriority: 3, Route: "luna", Enabled: true,
+			"nvidia/stepfun-ai/step-3.7-flash": {
+				DisplayName: "Step 3.7 Flash (NVIDIA)", CatalogPriority: 3, Route: "nvidia-step", Enabled: true,
 				Reasoning:        map[string]ReasoningTarget{"minimal": {}, "low": {Effort: "low"}},
 				StreamingSupport: true, ImageInputSupport: true,
 				MaxContext: 131072, MaxOutput: 26000,
@@ -155,20 +155,11 @@ func TestCodexCatalogComesFromEnabledCapabilityRegistry(t *testing.T) {
 	}
 }
 
-func TestOversizedTerraRequestSkipsSmallContextRoute(t *testing.T) {
+func TestOversizedRequestUsesSelectedModel(t *testing.T) {
 	cfg := codexTestConfig()
-	terra := cfg.Models[codexSonnetID]
-	terra.MaxContext = 262144
-	terra.FallbackModels = []string{"acc-openrouter-hy3"}
-	cfg.Models[codexSonnetID] = terra
-	terraRoute := cfg.Routes["terra"]
-	terraRoute.MaxContext = 131072
-	cfg.Routes["terra"] = terraRoute
-	cfg.Models["acc-openrouter-hy3"] = ModelCapability{
-		DisplayName: "HY3", Provider: "openrouter", Model: "tencent/hy3:free", Enabled: true,
-		Reasoning:       map[string]ReasoningTarget{"max": {Effort: "high"}},
-		ToolCallSupport: true, StreamingSupport: true, MaxContext: 262144, MaxOutput: 65536,
-	}
+	pickle := cfg.Models["opencode/big-pickle"]
+	pickle.MaxContext = 262144
+	cfg.Models["opencode/big-pickle"] = pickle
 
 	s := testServer(cfg)
 	calledProvider := ""
@@ -178,7 +169,7 @@ func TestOversizedTerraRequestSkipsSmallContextRoute(t *testing.T) {
 	}}}
 
 	body, err := json.Marshal(map[string]any{
-		"model":     codexSonnetID,
+		"model":     "opencode/big-pickle",
 		"reasoning": map[string]any{"effort": "max"},
 		"input":     strings.Repeat("x", 150000),
 		"tools": []map[string]any{{
@@ -193,11 +184,8 @@ func TestOversizedTerraRequestSkipsSmallContextRoute(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	if calledProvider != "openrouter.test" {
-		t.Fatalf("oversized Terra request reached %q, want context-capable openrouter fallback", calledProvider)
-	}
-	if w.Header().Get("X-ACC-Capability-Reroute") != "true" {
-		t.Fatalf("context reroute was not reported: %+v", w.Header())
+	if calledProvider != "opencode.test" {
+		t.Fatalf("request reached %q, want opencode.test", calledProvider)
 	}
 }
 
@@ -210,12 +198,12 @@ func TestResponsesTokenEstimateUsesDenseInputSafetyMargin(t *testing.T) {
 	}
 }
 
-func TestTerraContextSelectionUsesRequestedOutputBudget(t *testing.T) {
-	req := &ResponsesRequest{Model: codexSonnetID, MaxOutputTokens: 1000}
+func TestContextSelectionUsesRequestedOutputBudget(t *testing.T) {
+	req := &ResponsesRequest{Model: "opencode/big-pickle", MaxOutputTokens: 1000}
 	routes := []resolvedModel{{
-		ID: codexSonnetID,
+		ID: "opencode/big-pickle",
 		Capability: ModelCapability{
-			DisplayName: "5.6 Terra", MaxContext: 131072, MaxOutput: 65536,
+			DisplayName: "Big Pickle (OpenCode)", MaxContext: 131072, MaxOutput: 65536,
 			StreamingSupport: true,
 		},
 		Route: Route{Provider: "opencode", Model: "big-pickle", MaxContext: 131072, MaxTokens: 48000},
@@ -226,34 +214,6 @@ func TestTerraContextSelectionUsesRequestedOutputBudget(t *testing.T) {
 	}
 	if len(selected) != 1 || selected[0].Route.Model != "big-pickle" {
 		t.Fatalf("selected routes = %+v, want the primary route", selected)
-	}
-}
-
-func TestTerraLargeContextSelectsMillionTokenFallback(t *testing.T) {
-	req := &ResponsesRequest{Model: codexSonnetID, MaxOutputTokens: 8000}
-	routes := []resolvedModel{
-		{
-			ID:         codexSonnetID,
-			Capability: ModelCapability{DisplayName: "5.6 Terra", MaxContext: 262144, MaxOutput: 65536, StreamingSupport: true},
-			Route:      Route{Provider: "opencode", Model: "big-pickle", MaxContext: 131072, MaxTokens: 48000},
-		},
-		{
-			ID: "acc-openrouter-hy3", Fallback: true,
-			Capability: ModelCapability{DisplayName: "HY3", MaxContext: 262144, MaxOutput: 65536, StreamingSupport: true},
-			Route:      Route{Provider: "openrouter", Model: "tencent/hy3:free", MaxContext: 262144, MaxTokens: 65536},
-		},
-		{
-			ID: "acc-gemini-3.5-flash", Fallback: true,
-			Capability: ModelCapability{DisplayName: "Gemini 3.5 Flash", MaxContext: 1048576, MaxOutput: 65536, StreamingSupport: true},
-			Route:      Route{Provider: "gemini", Model: "gemini-3.5-flash", MaxContext: 1048576, MaxTokens: 65536},
-		},
-	}
-	selected, err := selectResponseModelChainForInput(req, routes, 300000)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(selected) != 1 || selected[0].Route.Model != "gemini-3.5-flash" {
-		t.Fatalf("selected routes = %+v, want Gemini long-context fallback", selected)
 	}
 }
 
@@ -270,7 +230,7 @@ func TestResponsesRespectSmallerRequestedOutputLimit(t *testing.T) {
 		return chatSuccess("ok"), nil
 	}}}
 
-	body := []byte(`{"model":"gpt-5.6-terra","input":"hello","max_output_tokens":1000,"reasoning":{"effort":"max"}}`)
+	body := []byte(`{"model":"opencode/big-pickle","input":"hello","max_output_tokens":1000,"reasoning":{"effort":"max"}}`)
 	w := httptest.NewRecorder()
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body)))
 	if w.Code != http.StatusOK {
@@ -307,12 +267,12 @@ func TestHiddenBenchmarkModelIsRoutableButNotInCatalog(t *testing.T) {
 func TestCapabilityChainKeepsToolFallbackAndSeparateImageRoute(t *testing.T) {
 	cfg := codexTestConfig()
 	hidden := false
-	primary := cfg.Models[codexOpusID]
+	primary := cfg.Models["nvidia/z-ai/glm-5.2"]
 	primary.ImageInputSupport = false
 	primary.FallbackModel = ""
 	primary.FallbackModels = []string{"tool-fallback"}
 	primary.ImageModel = "image-fallback"
-	cfg.Models[codexOpusID] = primary
+	cfg.Models["nvidia/z-ai/glm-5.2"] = primary
 	cfg.Models["tool-fallback"] = ModelCapability{
 		DisplayName: "Tool fallback", CatalogVisible: &hidden, Provider: "nvidia", Model: "tool-model", Enabled: true,
 		ToolCallSupport: true, StreamingSupport: true, Reasoning: map[string]ReasoningTarget{"max": {Effort: "high"}},
@@ -322,12 +282,12 @@ func TestCapabilityChainKeepsToolFallbackAndSeparateImageRoute(t *testing.T) {
 		ToolCallSupport: false, StreamingSupport: true, ImageInputSupport: true, Reasoning: map[string]ReasoningTarget{"max": {}},
 	}
 
-	chain, err := testServer(cfg).responseModelChain(codexOpusID)
+	chain, err := testServer(cfg).responseModelChain("nvidia/z-ai/glm-5.2")
 	if err != nil {
 		t.Fatal(err)
 	}
 	toolChain, err := selectResponseModelChain(&ResponsesRequest{
-		Model: codexOpusID, Input: json.RawMessage(`"hello"`),
+		Model: "nvidia/z-ai/glm-5.2", Input: json.RawMessage(`"hello"`),
 		Tools: []ResponsesTool{{Type: "function", Name: "exec", Parameters: json.RawMessage(`{"type":"object"}`)}},
 	}, chain)
 	if err != nil {
@@ -337,7 +297,7 @@ func TestCapabilityChainKeepsToolFallbackAndSeparateImageRoute(t *testing.T) {
 		t.Fatalf("tool chain dropped or included an incompatible route: %+v", toolChain)
 	}
 	imageChain, err := selectResponseModelChain(&ResponsesRequest{
-		Model: codexOpusID,
+		Model: "nvidia/z-ai/glm-5.2",
 		Input: json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]`),
 	}, chain)
 	if err != nil {
@@ -362,9 +322,9 @@ func TestResponsesUseExactModelAndEffortOnEveryRequest(t *testing.T) {
 	}}}
 
 	requests := []string{
-		`{"model":"opus","instructions":"project rules","input":"first","reasoning":{"effort":"xhigh"}}`,
-		`{"model":"sonnet","instructions":"project rules","input":"second","reasoning":{"effort":"max"}}`,
-		`{"model":"opus","instructions":"project rules","input":"third","reasoning":{"effort":"minimal"}}`,
+		`{"model":"nvidia/z-ai/glm-5.2","instructions":"project rules","input":"first","reasoning":{"effort":"xhigh"}}`,
+		`{"model":"opencode/big-pickle","instructions":"project rules","input":"second","reasoning":{"effort":"max"}}`,
+		`{"model":"nvidia/z-ai/glm-5.2","instructions":"project rules","input":"third","reasoning":{"effort":"minimal"}}`,
 	}
 	for _, body := range requests {
 		w := httptest.NewRecorder()
@@ -415,7 +375,7 @@ func TestEveryCodexEffortProducesItsExactProviderValue(t *testing.T) {
 	}}}
 
 	for _, effort := range []string{"minimal", "low", "medium", "high", "xhigh", "max"} {
-		body := `{"model":"sonnet","input":"test","reasoning":{"effort":"` + effort + `"}}`
+		body := `{"model":"opencode/big-pickle","input":"test","reasoning":{"effort":"` + effort + `"}}`
 		w := httptest.NewRecorder()
 		s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
 		if w.Code != http.StatusOK {
@@ -433,11 +393,7 @@ func TestEveryCodexEffortProducesItsExactProviderValue(t *testing.T) {
 			}
 			continue
 		}
-		want := effort
-		if effort == "high" {
-			want = "max"
-		}
-		if actual != want {
+		if actual != effort {
 			t.Fatalf("%s sent reasoning_effort=%v", effort, actual)
 		}
 	}
@@ -453,7 +409,7 @@ func TestUnsupportedEffortReturnsClearErrorWithoutCallingProvider(t *testing.T) 
 	}}}
 
 	w := httptest.NewRecorder()
-	request := `{"model":"haiku","input":"hello","reasoning":{"effort":"max"}}`
+	request := `{"model":"nvidia/stepfun-ai/step-3.7-flash","input":"hello","reasoning":{"effort":"max"}}`
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", w.Code, w.Body.String())
@@ -539,9 +495,9 @@ func TestUnsupportedToolTypeIsRejectedInsteadOfDropped(t *testing.T) {
 
 func TestResponsesMCPToolLoopEndToEnd(t *testing.T) {
 	cfg := codexTestConfig()
-	terra := cfg.Models[codexSonnetID]
+	terra := cfg.Models["opencode/big-pickle"]
 	terra.FallbackModels = []string{"acc-openrouter-hy3"}
-	cfg.Models[codexSonnetID] = terra
+	cfg.Models["opencode/big-pickle"] = terra
 	cfg.Models["acc-openrouter-hy3"] = ModelCapability{
 		DisplayName: "HY3", Provider: "openrouter", Model: "tencent/hy3:free", Enabled: true,
 		Reasoning:       map[string]ReasoningTarget{"max": {Effort: "high"}},
@@ -555,8 +511,8 @@ func TestResponsesMCPToolLoopEndToEnd(t *testing.T) {
 		if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		if body["model"] != "tencent/hy3:free" {
-			t.Fatalf("tool loop backend = %v, want context-capable HY3", body["model"])
+		if body["model"] != "big-pickle" {
+			t.Fatalf("tool loop backend = %v, want big-pickle", body["model"])
 		}
 		if calls == 1 {
 			if body["parallel_tool_calls"] != true || body["tool_choice"] != "auto" {
@@ -595,7 +551,7 @@ func TestResponsesMCPToolLoopEndToEnd(t *testing.T) {
 	}}}
 
 	first := `{
-		"model":"sonnet",
+		"model":"opencode/big-pickle",
 		"instructions":"Plugin instruction: inspect before editing",
 		"input":"Inspect the persona",
 		"parallel_tool_calls":true,
@@ -610,7 +566,7 @@ func TestResponsesMCPToolLoopEndToEnd(t *testing.T) {
 	}
 
 	second := `{
-		"model":"sonnet",
+		"model":"opencode/big-pickle",
 		"instructions":"Plugin instruction: inspect before editing",
 		"input":[
 			{"type":"message","role":"user","content":"Inspect the persona"},
@@ -641,7 +597,7 @@ func TestChatCompletionsInjectsOnlyACCPersonaAndPreservesUnknownFields(t *testin
 	}}}
 
 	body := `{
-		"model":"sonnet",
+		"model":"opencode/big-pickle",
 		"messages":[
 			{"role":"system","content":"Private platform instruction that ACC must preserve."},
 			{"role":"user","content":"hello"}
@@ -672,16 +628,16 @@ func TestChatCompletionsInjectsOnlyACCPersonaAndPreservesUnknownFields(t *testin
 
 func TestFallbackIsReportedInHeadersAndUsesFallbackPersona(t *testing.T) {
 	cfg := codexTestConfig()
-	primary := cfg.Models[codexOpusID]
-	primary.FallbackModel = codexSonnetID
-	primary.Reasoning = map[string]ReasoningTarget{"max": {Effort: "high"}}
-	cfg.Models[codexOpusID] = primary
+	primary := cfg.Models["nvidia/z-ai/glm-5.2"]
+	primary.FallbackModel = "opencode/big-pickle"
+	primary.Reasoning = map[string]ReasoningTarget{"high": {Effort: "high"}}
+	cfg.Models["nvidia/z-ai/glm-5.2"] = primary
 	primaryTemperature := 0.2
 	primaryTopP := 0.3
-	primaryRoute := cfg.Routes["sol"]
+	primaryRoute := cfg.Routes["nvidia-glm"]
 	primaryRoute.Temperature = &primaryTemperature
 	primaryRoute.TopP = &primaryTopP
-	cfg.Routes["sol"] = primaryRoute
+	cfg.Routes["nvidia-glm"] = primaryRoute
 	s := testServer(cfg)
 	calls := 0
 	s.http = &http.Client{Transport: &mockTripper{fn: func(req *http.Request) (*http.Response, error) {
@@ -699,7 +655,7 @@ func TestFallbackIsReportedInHeadersAndUsesFallbackPersona(t *testing.T) {
 			t.Fatalf("fallback persona is stale: %s", system)
 		}
 		if body["max_tokens"] != float64(48000) {
-			t.Fatalf("fallback max_tokens = %v, want Terra route limit 48000", body["max_tokens"])
+			t.Fatalf("fallback max_tokens = %v, want 48000", body["max_tokens"])
 		}
 		if body["temperature"] != 0.9 || body["top_p"] != 0.8 {
 			t.Fatalf("fallback inherited primary controls: temperature=%v top_p=%v", body["temperature"], body["top_p"])
@@ -708,12 +664,12 @@ func TestFallbackIsReportedInHeadersAndUsesFallbackPersona(t *testing.T) {
 	}}}
 
 	w := httptest.NewRecorder()
-	request := `{"model":"opus","input":"hello","temperature":0.9,"top_p":0.8,"reasoning":{"effort":"high"}}`
+	request := `{"model":"nvidia/z-ai/glm-5.2","input":"hello","temperature":0.9,"top_p":0.8,"reasoning":{"effort":"high"}}`
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	if w.Header().Get("X-ACC-Fallback") != "true" || w.Header().Get("X-ACC-Backend-Provider") != "opencode" || w.Header().Get("X-ACC-Backend-Model") != "big-pickle" || w.Header().Get("X-ACC-Backend-Effort") != "max" {
+	if w.Header().Get("X-ACC-Fallback") != "true" || w.Header().Get("X-ACC-Backend-Provider") != "opencode" || w.Header().Get("X-ACC-Backend-Model") != "big-pickle" || w.Header().Get("X-ACC-Backend-Effort") != "high" {
 		t.Fatalf("fallback headers missing: %+v", w.Header())
 	}
 }
@@ -759,7 +715,7 @@ func TestResponsesCustomToolRoundTripWithFunctionTool(t *testing.T) {
 	}}}
 
 	request := `{
-		"model":"opus",
+		"model":"nvidia/z-ai/glm-5.2",
 		"input":"Inspect this repository",
 		"tools":[
 			{"type":"custom","name":"exec","description":"Run JavaScript code","format":{"type":"grammar","syntax":"lark","definition":"start: SOURCE\nSOURCE: /[\\s\\S]+/"},"x_codex_future":{"keep":"me"}},
@@ -809,7 +765,7 @@ func TestResponsesCustomToolResultRoundTrip(t *testing.T) {
 	}}}
 
 	request := `{
-		"model":"opus",
+		"model":"nvidia/z-ai/glm-5.2",
 		"input":[
 			{"type":"custom_tool_call","id":"ctc_1","call_id":"call_exec_2","name":"exec","input":"await tools.exec_command({cmd: 'pwd'})","x_codex_future":"kept"},
 			{"type":"custom_tool_call_output","call_id":"call_exec_2","output":"command output","x_codex_future":"kept"}
@@ -865,7 +821,7 @@ func TestResponsesStreamingCustomToolUsesNativeEvents(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(stream))}, nil
 	}}}
 
-	request := `{"model":"opus","stream":true,"input":"run pwd","tools":[{"type":"custom","name":"exec","description":"Run JavaScript code","format":{"type":"grammar","syntax":"lark","definition":"start: SOURCE\nSOURCE: /[\\s\\S]+/"}}]}`
+	request := `{"model":"nvidia/z-ai/glm-5.2","stream":true,"input":"run pwd","tools":[{"type":"custom","name":"exec","description":"Run JavaScript code","format":{"type":"grammar","syntax":"lark","definition":"start: SOURCE\nSOURCE: /[\\s\\S]+/"}}]}`
 	w := httptest.NewRecorder()
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
 	if w.Code != http.StatusOK {
@@ -886,7 +842,7 @@ func TestResponsesRejectsUnsupportedHostedToolWithBackend(t *testing.T) {
 		return chatSuccess("unexpected"), nil
 	}}}
 	w := httptest.NewRecorder()
-	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"opus","input":"hello","tools":[{"type":"web_search","external_web_access":true,"search_content_types":["text"]}]}`)))
+	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"nvidia/z-ai/glm-5.2","input":"hello","tools":[{"type":"web_search","external_web_access":true,"search_content_types":["text"]}]}`)))
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `nvidia/z-ai/glm-5.2`) || !strings.Contains(w.Body.String(), `web_search`) {
 		t.Fatalf("hosted tool error is not actionable: status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -897,10 +853,10 @@ func TestResponsesRejectsUnsupportedHostedToolWithBackend(t *testing.T) {
 
 func TestOpusImageUsesMiniMaxAndNeverSendsImageToGLM(t *testing.T) {
 	cfg := codexTestConfig()
-	opus := cfg.Models[codexOpusID]
+	opus := cfg.Models["nvidia/z-ai/glm-5.2"]
 	opus.ImageInputSupport = false
 	opus.FallbackModel = "acc-minimax-m3"
-	cfg.Models[codexOpusID] = opus
+	cfg.Models["nvidia/z-ai/glm-5.2"] = opus
 	cfg.Models["acc-minimax-m3"] = ModelCapability{
 		DisplayName: "MiniMax M3", Provider: "nvidia", Model: "minimaxai/minimax-m3", Enabled: true,
 		ToolCallSupport: true, StreamingSupport: true, ImageInputSupport: true,
@@ -922,7 +878,7 @@ func TestOpusImageUsesMiniMaxAndNeverSendsImageToGLM(t *testing.T) {
 		return chatSuccess("image understood"), nil
 	}}}
 
-	request := `{"model":"opus","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"what is this?"},{"type":"input_image","image_url":"data:image/png;base64,AAAA","detail":"original"}]}]}`
+	request := `{"model":"nvidia/z-ai/glm-5.2","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"what is this?"},{"type":"input_image","image_url":"data:image/png;base64,AAAA","detail":"original"}]}]}`
 	w := httptest.NewRecorder()
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "image understood") {
@@ -935,10 +891,10 @@ func TestOpusImageUsesMiniMaxAndNeverSendsImageToGLM(t *testing.T) {
 
 func TestOpusImageDoesNotSilentlyDowngradeRequestedEffort(t *testing.T) {
 	cfg := codexTestConfig()
-	opus := cfg.Models[codexOpusID]
+	opus := cfg.Models["nvidia/z-ai/glm-5.2"]
 	opus.ImageInputSupport = false
 	opus.FallbackModel = "acc-minimax-m3"
-	cfg.Models[codexOpusID] = opus
+	cfg.Models["nvidia/z-ai/glm-5.2"] = opus
 	cfg.Models["acc-minimax-m3"] = ModelCapability{
 		DisplayName: "MiniMax M3", Provider: "nvidia", Model: "minimaxai/minimax-m3", Enabled: true,
 		ToolCallSupport: true, StreamingSupport: true, ImageInputSupport: true,
@@ -950,7 +906,7 @@ func TestOpusImageDoesNotSilentlyDowngradeRequestedEffort(t *testing.T) {
 		called = true
 		return chatSuccess("unexpected"), nil
 	}}}
-	request := `{"model":"opus","reasoning":{"effort":"high"},"input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`
+	request := `{"model":"nvidia/z-ai/glm-5.2","reasoning":{"effort":"high"},"input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`
 	w := httptest.NewRecorder()
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `does not support reasoning effort`) || !strings.Contains(w.Body.String(), `max`) {
@@ -963,37 +919,37 @@ func TestOpusImageDoesNotSilentlyDowngradeRequestedEffort(t *testing.T) {
 
 func TestOpusToolRequestsDoNotFallbackToToollessMiniMax(t *testing.T) {
 	cfg := codexTestConfig()
-	opus := cfg.Models[codexOpusID]
+	opus := cfg.Models["nvidia/z-ai/glm-5.2"]
 	opus.FallbackModel = "acc-minimax-m3"
-	cfg.Models[codexOpusID] = opus
+	cfg.Models["nvidia/z-ai/glm-5.2"] = opus
 	cfg.Models["acc-minimax-m3"] = ModelCapability{
 		DisplayName: "MiniMax M3", Provider: "nvidia", Model: "minimaxai/minimax-m3", Enabled: true,
 		StreamingSupport: true, ImageInputSupport: true, ToolCallSupport: false,
 		Reasoning: map[string]ReasoningTarget{"minimal": {}},
 	}
 	s := testServer(cfg)
-	routes, err := s.responseModelChain(codexOpusID)
+	routes, err := s.responseModelChain("nvidia/z-ai/glm-5.2")
 	if err != nil {
 		t.Fatal(err)
 	}
 	selected, err := selectResponseModelChain(&ResponsesRequest{
-		Model: codexOpusID, Input: json.RawMessage(`"hello"`),
+		Model: "nvidia/z-ai/glm-5.2", Input: json.RawMessage(`"hello"`),
 		Tools: []ResponsesTool{{Type: "function", Name: "exec", Parameters: json.RawMessage(`{"type":"object"}`)}},
 	}, routes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(selected) != 1 || selected[0].ID != codexOpusID {
+	if len(selected) != 1 || selected[0].ID != "nvidia/z-ai/glm-5.2" {
 		t.Fatalf("tool request routes = %+v, want only the tool-capable Opus primary", selected)
 	}
 }
 
 func TestOpusImageWithToolsFailsInsteadOfDroppingTools(t *testing.T) {
 	cfg := codexTestConfig()
-	opus := cfg.Models[codexOpusID]
+	opus := cfg.Models["nvidia/z-ai/glm-5.2"]
 	opus.ImageInputSupport = false
 	opus.FallbackModel = "acc-minimax-m3"
-	cfg.Models[codexOpusID] = opus
+	cfg.Models["nvidia/z-ai/glm-5.2"] = opus
 	cfg.Models["acc-minimax-m3"] = ModelCapability{
 		DisplayName: "MiniMax M3", Provider: "nvidia", Model: "minimaxai/minimax-m3", Enabled: true,
 		StreamingSupport: true, ImageInputSupport: true, ToolCallSupport: false,
@@ -1005,7 +961,7 @@ func TestOpusImageWithToolsFailsInsteadOfDroppingTools(t *testing.T) {
 		called = true
 		return chatSuccess("unexpected"), nil
 	}}}
-	request := `{"model":"opus","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}],"tools":[{"type":"function","name":"exec","parameters":{"type":"object"}}]}`
+	request := `{"model":"nvidia/z-ai/glm-5.2","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}],"tools":[{"type":"function","name":"exec","parameters":{"type":"object"}}]}`
 	w := httptest.NewRecorder()
 	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(request)))
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "supports both image input and tool calls") {
@@ -1018,14 +974,14 @@ func TestOpusImageWithToolsFailsInsteadOfDroppingTools(t *testing.T) {
 
 func TestOpusImageFailsClearlyWhenNoImageRouteExists(t *testing.T) {
 	cfg := codexTestConfig()
-	opus := cfg.Models[codexOpusID]
+	opus := cfg.Models["nvidia/z-ai/glm-5.2"]
 	opus.ImageInputSupport = false
 	opus.FallbackModel = "acc-text-only"
-	cfg.Models[codexOpusID] = opus
+	cfg.Models["nvidia/z-ai/glm-5.2"] = opus
 	cfg.Models["acc-text-only"] = ModelCapability{DisplayName: "Text only", Provider: "nvidia", Model: "text-only", Enabled: true}
 	s := testServer(cfg)
 	w := httptest.NewRecorder()
-	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"opus","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`)))
+	s.handleResponses(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"nvidia/z-ai/glm-5.2","input":[{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`)))
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "no configured image-capable route") {
 		t.Fatalf("image route failure is unclear: status=%d body=%s", w.Code, w.Body.String())
 	}

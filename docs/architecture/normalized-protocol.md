@@ -20,7 +20,7 @@ Codex Responses response/events
 
 ## Invariants
 
-- The public model is the Codex catalog slug. ACC resolves it through `models`, then applies the configured capability and fallback chain.
+- The public model is the Codex catalog slug. ACC resolves it through `models`, then applies the configured capability and routes to the selected provider/model.
 - Requested reasoning effort is validated against that model's advertised levels. It is never silently renamed or lowered.
 - Tool calls keep their call ID, namespace, custom-tool input, and provider thought signature where the upstream supplies one.
 - Unknown request, response, item, and tool fields are retained in `Extra` and re-emitted when the normalized value is serialized. This gives newer Codex fields a forward-compatible path while ACC learns their semantics.

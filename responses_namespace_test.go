@@ -33,7 +33,7 @@ func TestResponsesNamespaceToolBridgesAndRestores(t *testing.T) {
 			ExtraContent: &OpenAIExtraContent{Google: &OpenAIGoogleExtra{ThoughtSignature: "sig_1"}},
 		}},
 	}}}}
-	got, err := translateToResponsesWithTools(upstream, codexOpusID, translation)
+	got, err := translateToResponsesWithTools(upstream, "nvidia/z-ai/glm-5.2", translation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestResponsesNamespaceStreamingRestoresNamespace(t *testing.T) {
 		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Dreams.md\"}"}}]}}]}` + "\n\n" +
 		"data: [DONE]\n\n"
 	w := httptest.NewRecorder()
-	streamTranslateResponses(w, strings.NewReader(stream), codexOpusID, translation)
+	streamTranslateResponses(w, strings.NewReader(stream), "nvidia/z-ai/glm-5.2", translation)
 	for _, want := range []string{`"namespace":"obsidian"`, `"name":"read_note"`, `"arguments":"{\"path\":\"Dreams.md\"}"`} {
 		if !strings.Contains(w.Body.String(), want) {
 			t.Fatalf("namespace stream is missing %s:\n%s", want, w.Body.String())

@@ -69,7 +69,7 @@ The shipped Codex registry contains exactly these three explicitly enabled model
 
 They resolve directly to their selected provider and upstream model. The Codex registry does not attach hidden fallback or image-reroute chains to them. Additional models appear only after they are explicitly added and enabled in `config.json`; authenticated provider discovery does not automatically flood the selector.
 
-Catalog IDs are deterministic, unique, provider-prefixed, and exclude the Claude aliases `opus`, `sonnet`, and `haiku`. Direct Codex IDs do not inherit Claude alias fallback chains.
+Catalog IDs are deterministic, unique, provider-prefixed, and exclude the Claude aliases `opus`, `sonnet`, and `haiku`. Direct Codex IDs route exactly to their selected provider/model.
 
 ## Authentication
 

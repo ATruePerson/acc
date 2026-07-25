@@ -13,9 +13,9 @@ func TestRouteForUsesExactRequestedCodexModel(t *testing.T) {
 		selected string
 		want     string
 	}{
-		{codexOpusID, "z-ai/glm-5.2"},
-		{codexSonnetID, "big-pickle"},
-		{codexHaikuID, "stepfun-ai/step-3.7-flash"},
+		{"nvidia/z-ai/glm-5.2", "z-ai/glm-5.2"},
+		{"opencode/big-pickle", "big-pickle"},
+		{"nvidia/stepfun-ai/step-3.7-flash", "stepfun-ai/step-3.7-flash"},
 	}
 
 	for _, tc := range cases {
@@ -38,38 +38,36 @@ func TestRouteForRejectsUnregisteredCodexModel(t *testing.T) {
 	}
 }
 
-func TestResponseModelChainAcceptsLegacyCodexIDs(t *testing.T) {
+func TestResponseModelChainAcceptsProviderModelIDs(t *testing.T) {
 	s := testServer(codexTestConfig())
 	cases := []struct {
-		legacy  string
-		current string
+		model string
 	}{
-		{"opus", codexOpusID},
-		{"sonnet", codexSonnetID},
-		{"haiku", codexHaikuID},
-		{"openai/codex-5.6-sol", codexOpusID},
+		{"nvidia/z-ai/glm-5.2"},
+		{"opencode/big-pickle"},
+		{"nvidia/stepfun-ai/step-3.7-flash"},
 	}
 	for _, tc := range cases {
-		t.Run(tc.legacy, func(t *testing.T) {
-			chain, err := s.responseModelChain(tc.legacy)
+		t.Run(tc.model, func(t *testing.T) {
+			chain, err := s.responseModelChain(tc.model)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(chain) == 0 || chain[0].ID != tc.current {
-				t.Fatalf("resolved chain = %+v, want primary %q", chain, tc.current)
+			if len(chain) == 0 || chain[0].ID != tc.model {
+				t.Fatalf("resolved chain = %+v, want primary %q", chain, tc.model)
 			}
 		})
 	}
 }
 
-func TestNormalizeLegacyResponsesRequestMapsOldHighEffort(t *testing.T) {
+func TestNormalizeLegacyResponsesRequestIsNoop(t *testing.T) {
 	req := &ResponsesRequest{
 		Model:     "opus",
 		Reasoning: &ResponsesReasoning{Effort: "high"},
 	}
 	normalizeLegacyResponsesRequest(req)
-	if req.Model != codexOpusID || req.Reasoning.Effort != "max" {
-		t.Fatalf("normalized request = %+v, want model=%q effort=max", req, codexOpusID)
+	if req.Model != "opus" || req.Reasoning.Effort != "high" {
+		t.Fatalf("normalized request = %+v, want model=opus effort=high", req)
 	}
 }
 

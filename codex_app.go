@@ -11,9 +11,7 @@ import (
 )
 
 const (
-	codexOpusID   = "gpt-5.6-sol"
-	codexSonnetID = "gpt-5.6-terra"
-	codexHaikuID  = "gpt-5.6-luna"
+	codexDefaultModel = "nvidia/z-ai/glm-5.2"
 )
 
 type codexNamedModel struct {
@@ -195,7 +193,7 @@ func saveCodexRestoreState(configPath, catalogPath, restorePath string) error {
 }
 
 func renderCodexConfig(original, catalogPath, baseURL, model string) string {
-	return renderCodexACCConfig(original, catalogPath, baseURL, model)
+	return renderCodexACCConfig(original, catalogPath, baseURL, model, "")
 }
 
 func isCodexModel(cfg *Config, model string) bool {

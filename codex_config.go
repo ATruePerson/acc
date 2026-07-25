@@ -258,7 +258,7 @@ func codexNewline(text string) string {
 	return "\n"
 }
 
-func renderCodexACCConfig(original, catalogPath, baseURL, model string) string {
+func renderCodexACCConfig(original, catalogPath, baseURL, model, effort string) string {
 	// ACC temporarily owns web_search while active. The durable subscription
 	// baseline keeps the user's original value and restore puts it back.
 	sanitized := sanitizeCodexConfig(original, true)
@@ -280,6 +280,7 @@ func renderCodexACCConfig(original, catalogPath, baseURL, model string) string {
 	}
 	out.WriteString(accCodexRootBegin + newline)
 	out.WriteString("model = " + strconv.Quote(model) + newline)
+	out.WriteString("model_reasoning_effort = " + strconv.Quote(effort) + newline)
 	out.WriteString(`model_provider = "acc"` + newline)
 	out.WriteString("model_catalog_json = " + strconv.Quote(catalogPath) + newline)
 	out.WriteString(`web_search = "disabled"` + newline)

@@ -16,35 +16,6 @@ type resolvedModel struct {
 	ImageOnly         bool
 }
 
-// legacyCodexModelID keeps tasks created by older ACC catalogs working. These
-// IDs remain accepted for history compatibility but are never advertised in
-// the provider-prefixed Codex catalog.
-func legacyCodexModelID(modelID string) string {
-	switch normalizeModelID(modelID) {
-	case "opus", "openai/codex-5.6-sol":
-		return codexOpusID
-	case "sonnet", "openai/codex-5.6-terra":
-		return codexSonnetID
-	case "haiku", "openai/codex-5.6-luna":
-		return codexHaikuID
-	default:
-		return modelID
-	}
-}
-
-// normalizeLegacyResponsesRequest upgrades old IDs and the retired High effort
-// name. Current public models expose only Max, including resumed older tasks.
-func normalizeLegacyResponsesRequest(req *ResponsesRequest) {
-	if req == nil {
-		return
-	}
-	req.Model = legacyCodexModelID(req.Model)
-	if req.Reasoning != nil && req.Reasoning.Effort == "high" &&
-		(req.Model == codexOpusID || req.Model == codexSonnetID || req.Model == codexHaikuID) {
-		req.Reasoning.Effort = "max"
-	}
-}
-
 func enabledModelIDs(cfg *Config) []string {
 	ids := make([]string, 0, len(cfg.Models))
 	for id, capability := range cfg.Models {
@@ -57,26 +28,23 @@ func enabledModelIDs(cfg *Config) []string {
 }
 
 func resolveCapabilityRoute(cfg *Config, id string, capability ModelCapability) (Route, error) {
-	var route Route
 	if capability.Route != "" {
-		var ok bool
-		route, ok = cfg.Routes[capability.Route]
-		if !ok {
-			return Route{}, fmt.Errorf("model %q references unavailable route %q", id, capability.Route)
-		}
-	} else {
-		route = Route{Provider: capability.Provider, Model: capability.Model}
+		return Route{}, fmt.Errorf("Codex model %q uses legacy route indirection %q; configure provider and model directly", id, capability.Route)
 	}
+	if capability.FallbackModel != "" || len(capability.FallbackModels) > 0 || capability.ImageModel != "" || len(capability.ImageFallbackModels) > 0 {
+		return Route{}, fmt.Errorf("Codex model %q configures automatic fallback or capability rerouting; register each provider/model as its own catalog entry", id)
+	}
+	route := Route{Provider: capability.Provider, Model: capability.Model}
 	if route.Provider == "" || route.Model == "" {
-		return Route{}, fmt.Errorf("model %q has no provider/model route", id)
+		return Route{}, fmt.Errorf("Codex model %q has no direct provider/model route", id)
 	}
 	if _, ok := cfg.Providers[route.Provider]; !ok {
-		return Route{}, fmt.Errorf("model %q uses unavailable provider %q", id, route.Provider)
+		return Route{}, fmt.Errorf("Codex model %q uses unavailable provider %q", id, route.Provider)
 	}
 	if len(capability.Reasoning) > 0 {
 		route.Reasoning = capability.Reasoning
 	}
-	if capability.MaxOutput > 0 && route.MaxTokens == 0 {
+	if capability.MaxOutput > 0 {
 		route.MaxTokens = capability.MaxOutput
 	}
 	return route, nil
@@ -84,100 +52,23 @@ func resolveCapabilityRoute(cfg *Config, id string, capability ModelCapability) 
 
 func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
 	cfg := s.cfg.Load()
-	resolvedID := legacyCodexModelID(modelID)
-	if capability, ok := cfg.Models[resolvedID]; ok {
-		if !capability.Enabled {
-			return nil, fmt.Errorf("selected model %q is disabled", modelID)
-		}
-		route, err := resolveCapabilityRoute(cfg, resolvedID, capability)
-		if err != nil {
-			return nil, err
-		}
-		chain := []resolvedModel{{ID: resolvedID, Capability: capability, Route: route}}
-		seen := map[string]bool{resolvedID: true}
-		for _, fallbackID := range configuredFallbackModels(capability) {
-			fallback, ok := cfg.Models[fallbackID]
-			if !ok || !fallback.Enabled {
-				return nil, fmt.Errorf("model %q configures unavailable fallback model %q", resolvedID, fallbackID)
-			}
-			fallbackRoute, err := resolveCapabilityRoute(cfg, fallbackID, fallback)
-			if err != nil {
-				return nil, err
-			}
-			chain = append(chain, resolvedModel{ID: fallbackID, Capability: fallback, Route: fallbackRoute, Fallback: true})
-			seen[fallbackID] = true
-		}
-		if capability.ImageModel != "" && !seen[capability.ImageModel] {
-			imageCapability, ok := cfg.Models[capability.ImageModel]
-			if !ok || !imageCapability.Enabled {
-				return nil, fmt.Errorf("model %q configures unavailable image model %q", resolvedID, capability.ImageModel)
-			}
-			imageRoute, err := resolveCapabilityRoute(cfg, capability.ImageModel, imageCapability)
-			if err != nil {
-				return nil, err
-			}
-			chain = append(chain, resolvedModel{ID: capability.ImageModel, Capability: imageCapability, Route: imageRoute, Fallback: true, ImageOnly: true})
-			seen[capability.ImageModel] = true
-		}
-		for _, imageFallbackID := range capability.ImageFallbackModels {
-			if imageFallbackID == "" || seen[imageFallbackID] {
-				continue
-			}
-			imageFallback, ok := cfg.Models[imageFallbackID]
-			if !ok || !imageFallback.Enabled {
-				return nil, fmt.Errorf("model %q configures unavailable image fallback model %q", resolvedID, imageFallbackID)
-			}
-			imageFallbackRoute, err := resolveCapabilityRoute(cfg, imageFallbackID, imageFallback)
-			if err != nil {
-				return nil, err
-			}
-			chain = append(chain, resolvedModel{ID: imageFallbackID, Capability: imageFallback, Route: imageFallbackRoute, Fallback: true, ImageOnly: true})
-			seen[imageFallbackID] = true
-		}
-		return chain, nil
+	provider, upstreamModel, ok := splitRealCodexModelID(modelID)
+	if !ok {
+		return nil, fmt.Errorf("Codex model %q must be an exact provider/model ID from the configured catalog", modelID)
 	}
-
-	if provider, upstreamModel, ok := splitRealCodexModelID(resolvedID); ok {
-		if _, exists := cfg.Providers[provider]; !exists {
-			return nil, fmt.Errorf("selected Codex provider %q is unavailable", provider)
-		}
-		capability := ModelCapability{
-			DisplayName: provider + "/" + upstreamModel, Provider: provider, Model: upstreamModel,
-			Enabled: true, StreamingSupport: true, ToolCallSupport: true,
-			Reasoning: map[string]ReasoningTarget{
-				"minimal": {}, "low": {Effort: "low"}, "medium": {Effort: "medium"},
-				"high": {Effort: "high"}, "xhigh": {Effort: "xhigh"}, "max": {Effort: "max"},
-			},
-		}
-		for id, configured := range cfg.Models {
-			if !configured.Enabled {
-				continue
-			}
-			route, err := resolveCapabilityRoute(cfg, id, configured)
-			if err == nil && route.Provider == provider && route.Model == upstreamModel {
-				capability = configured
-				capability.Provider, capability.Model, capability.Route = provider, upstreamModel, ""
-				break
-			}
-		}
-		route := Route{Provider: provider, Model: upstreamModel, Reasoning: capability.Reasoning}
-		if capability.MaxOutput > 0 {
-			route.MaxTokens = capability.MaxOutput
-		}
-		return []resolvedModel{{ID: resolvedID, Capability: capability, Route: route}}, nil
+	if _, exists := cfg.Providers[provider]; !exists {
+		return nil, fmt.Errorf("selected Codex provider %q is unavailable", provider)
 	}
-
-	// Legacy non-Codex clients can still use aliases and route fallbacks. They do
-	// not become selectable Codex catalog entries until explicitly registered.
-	route, err := s.routeFor(modelID)
-	if err != nil {
-		return nil, err
+	for _, model := range codexNamedModelsWithAuth(cfg, s.auth) {
+		if model.ID != modelID {
+			continue
+		}
+		if model.Route.Provider != provider || model.Route.Model != upstreamModel {
+			return nil, fmt.Errorf("Codex catalog entry %q does not match its provider/model route", modelID)
+		}
+		return []resolvedModel{{ID: model.ID, Capability: model.Capability, Route: model.Route}}, nil
 	}
-	chain := []resolvedModel{{ID: modelID, Route: route}}
-	for _, fallback := range route.Fallbacks {
-		chain = append(chain, resolvedModel{ID: fallback.Provider + "/" + fallback.Model, Route: fallback, Fallback: true})
-	}
-	return chain, nil
+	return nil, fmt.Errorf("selected Codex model %q is not in the configured catalog", modelID)
 }
 
 func splitRealCodexModelID(modelID string) (provider, model string, ok bool) {
@@ -189,22 +80,6 @@ func splitRealCodexModelID(modelID string) (provider, model string, ok bool) {
 		return "", "", false
 	}
 	return provider, model, true
-}
-
-func configuredFallbackModels(capability ModelCapability) []string {
-	ids := make([]string, 0, len(capability.FallbackModels)+1)
-	seen := map[string]bool{}
-	if capability.FallbackModel != "" {
-		ids = append(ids, capability.FallbackModel)
-		seen[capability.FallbackModel] = true
-	}
-	for _, id := range capability.FallbackModels {
-		if id != "" && !seen[id] {
-			ids = append(ids, id)
-			seen[id] = true
-		}
-	}
-	return ids
 }
 
 func supportedEfforts(capability ModelCapability) []string {
@@ -257,7 +132,7 @@ func applyReasoningTarget(req *OpenAIRequest, target resolvedModel, requested st
 
 func validateResponseCapabilities(req *ResponsesRequest, target resolvedModel) error {
 	capability := target.Capability
-	if len(capability.DisplayName) == 0 { // Legacy request without registry metadata.
+	if len(capability.DisplayName) == 0 {
 		return nil
 	}
 	if req.Stream && !capability.StreamingSupport {
@@ -326,100 +201,33 @@ func responseInputRequirements(req *ResponsesRequest) (responseInputRequirement,
 	return requirements, nil
 }
 
-// selectResponseModelChain removes only explicitly incompatible routes. For
-// Opus image input this skips text-only GLM and begins on MiniMax. It never
-// reintroduces a text-only route later in the fallback chain.
+// selectResponseModelChain validates the one model the user selected. It never
+// substitutes another provider or upstream model for capability or context reasons.
 func selectResponseModelChain(req *ResponsesRequest, routes []resolvedModel) ([]resolvedModel, error) {
 	return selectResponseModelChainForInput(req, routes, 0)
 }
 
 func selectResponseModelChainForInput(req *ResponsesRequest, routes []resolvedModel, estimatedInputTokens int) ([]resolvedModel, error) {
-	requirements, err := responseInputRequirements(req)
-	if err != nil {
+	if len(routes) != 1 {
+		return nil, fmt.Errorf("Codex requires exactly one selected provider/model route, got %d", len(routes))
+	}
+	target := routes[0]
+	if target.Fallback || target.CapabilityReroute || target.ImageOnly {
+		return nil, fmt.Errorf("Codex route %q is not a direct selected model", target.ID)
+	}
+	if err := validateResponseCapabilities(req, target); err != nil {
 		return nil, err
 	}
-	needsTools := len(req.Tools) > 0
-	needsStreaming := req.Stream
-	terraTools := legacyCodexModelID(req.Model) == codexSonnetID && needsTools
-	publicContext := 0
-	if len(routes) > 0 {
-		publicContext = routes[0].Capability.MaxContext
+	maxContext := target.Route.MaxContext
+	if maxContext == 0 {
+		maxContext = target.Capability.MaxContext
 	}
-	eligible := make([]resolvedModel, 0, len(routes))
-	skippedForContext := false
-	for _, target := range routes {
-		capability := target.Capability
-		if target.ImageOnly && !requirements.Image {
-			continue
-		}
-		if capability.DisplayName == "" { // Preserve legacy behavior where no capability metadata exists.
-			eligible = append(eligible, target)
-			continue
-		}
-		if requirements.Image && !capability.ImageInputSupport {
-			continue
-		}
-		if requirements.File && !capability.FileInputSupport {
-			continue
-		}
-		if needsTools && !capability.ToolCallSupport {
-			continue
-		}
-		if needsStreaming && !capability.StreamingSupport {
-			continue
-		}
-		maxContext := target.Route.MaxContext
-		if maxContext == 0 {
-			maxContext = capability.MaxContext
-		}
-		if terraTools && publicContext > 0 && maxContext > 0 && maxContext < publicContext {
-			skippedForContext = true
-			continue
-		}
-		if legacyCodexModelID(req.Model) == codexSonnetID && estimatedInputTokens > 0 {
-			maxOutput := responseOutputBudget(req, target)
-			if maxContext > 0 && estimatedInputTokens+maxOutput > maxContext {
-				skippedForContext = true
-				continue
-			}
-		}
-		eligible = append(eligible, target)
+	if estimatedInputTokens > 0 && maxContext > 0 && estimatedInputTokens+responseOutputBudget(req, target) > maxContext {
+		return nil, fmt.Errorf("request is too large for selected Codex model %q", target.ID)
 	}
-	if len(eligible) == 0 {
-		switch {
-		case skippedForContext:
-			return nil, fmt.Errorf("model %q request is too large for every configured route; use 5.6 Sol or 5.6 Luna, or start a fresh thread", req.Model)
-		case requirements.Image && needsTools:
-			return nil, fmt.Errorf("model %q has no configured route that supports both image input and tool calls", req.Model)
-		case requirements.File && needsTools:
-			return nil, fmt.Errorf("model %q has no configured route that supports both file input and tool calls", req.Model)
-		case requirements.Image && requirements.File:
-			return nil, fmt.Errorf("model %q has no configured route that supports both image and file input", req.Model)
-		case requirements.Image:
-			return nil, fmt.Errorf("model %q has no configured image-capable route", req.Model)
-		case requirements.File:
-			return nil, fmt.Errorf("model %q has no configured file-capable route", req.Model)
-		case needsTools:
-			return nil, fmt.Errorf("model %q has no configured route that supports tool calls", req.Model)
-		case needsStreaming:
-			return nil, fmt.Errorf("model %q has no configured route that supports streaming", req.Model)
-		default:
-			return nil, fmt.Errorf("model %q has no configured compatible route", req.Model)
-		}
-	}
-	if eligible[0].ID != routes[0].ID {
-		eligible[0].Fallback = false
-		eligible[0].CapabilityReroute = true
-	}
-	for i := 1; i < len(eligible); i++ {
-		eligible[i].Fallback = true
-	}
-	return eligible, nil
+	return routes, nil
 }
 
-// responseOutputBudget returns the output space this request can actually use
-// on one route. A smaller client limit must not be replaced by the route's
-// configured ceiling when deciding whether the request fits.
 func responseOutputBudget(req *ResponsesRequest, target resolvedModel) int {
 	requested := req.MaxOutputTokens
 	if requested == 0 {

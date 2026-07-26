@@ -301,7 +301,7 @@ func TestConfiguredAliasRoutesKeepProviderDiversityAndMaximumReasoning(t *testin
 	if err := json.Unmarshal([]byte(defaultConfigJSON), &defaults); err != nil {
 		t.Fatal(err)
 	}
-	for _, family := range []string{"opus", "sonnet", "haiku"} {
+	for _, family := range []string{"fable", "opus", "sonnet", "haiku"} {
 		configured, _ := json.Marshal(cfg.AliasRoutes[family])
 		setupDefault, _ := json.Marshal(defaults.AliasRoutes[family])
 		if string(configured) != string(setupDefault) {

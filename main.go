@@ -709,7 +709,7 @@ func publicLegacyModelIDs(cfg *Config) []string {
 	}
 	seen := map[string]bool{}
 	ids := make([]string, 0, len(cfg.AliasRoutes)+len(cfg.Aliases))
-	for _, family := range []string{"opus", "sonnet", "haiku"} {
+	for _, family := range []string{"fable", "opus", "sonnet", "haiku"} {
 		if _, ok := aliasRouteForFamily(cfg, family); ok {
 			id := "anthropic/claude-" + family
 			seen[id] = true
@@ -735,7 +735,7 @@ func normalizeModelID(model string) string {
 }
 
 func aliasFamily(normalizedModel string) (string, bool) {
-	for _, family := range []string{"opus", "sonnet", "haiku"} {
+	for _, family := range []string{"fable", "opus", "sonnet", "haiku"} {
 		base := "claude-" + family
 		if normalizedModel == family || normalizedModel == base {
 			return family, true
@@ -968,7 +968,7 @@ func validateConfig(cfg *Config) error {
 	for family, route := range cfg.AliasRoutes {
 		canonical, ok := aliasFamily(family)
 		if !ok || canonical != family {
-			return fmt.Errorf("alias route %q: expected opus, sonnet, or haiku", family)
+			return fmt.Errorf("alias route %q: expected fable, opus, sonnet, or haiku", family)
 		}
 		if err := validateRouteProviders("alias route "+strconv.Quote(family), route, cfg.Providers); err != nil {
 			return err

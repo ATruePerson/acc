@@ -86,6 +86,15 @@
   "routes": {
   },
   "alias_routes": {
+    "fable": {
+      "provider": "openrouter",
+      "model": "poolside/laguna-s-2.1:free",
+      "reasoning_effort": "high",
+      "reasoning_locked": true,
+      "max_tokens": 32768,
+      "toolcalling": true,
+      "stream": true
+    },
     "opus": {
       "provider": "nvidia",
       "model": "z-ai/glm-5.2",

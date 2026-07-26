@@ -35,7 +35,7 @@ func TestFindCodexDesktopAppUsesExistingChatGPTApp(t *testing.T) {
 
 func TestCodexOpenArgsOpenExistingAppWithoutInstaller(t *testing.T) {
 	app := "/Applications/ChatGPT.app"
-	path := "/Users/kabir/acc"
+	path := "/home/user/project"
 	want := []string{"-a", app, path}
 	if got := codexOpenArgs(app, path); !reflect.DeepEqual(got, want) {
 		t.Fatalf("open args = %#v, want %#v", got, want)

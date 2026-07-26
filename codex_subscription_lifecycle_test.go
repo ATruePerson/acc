@@ -71,7 +71,7 @@ func TestCleanSubscriptionConfigStartThenRestore(t *testing.T) {
 	original := []byte("approval_policy = \"on-request\"\n" +
 		"sandbox_mode = \"workspace-write\"\n" +
 		"web_search = \"live\"\n\n" +
-		"[projects.\"/Users/kabir/acc\"]\ntrust_level = \"trusted\"\n\n" +
+		"[projects.\"/home/user/project\"]\ntrust_level = \"trusted\"\n\n" +
 		"[mcp_servers.obsidian]\ncommand = \"obsidian-mcp\"\n")
 	auth := []byte(`{"tokens":"subscription-secret"}`)
 	writeTestFile(t, paths.Config, original)
@@ -123,7 +123,7 @@ func TestExistingOpenCodexConfigStartThenRestoreToSubscription(t *testing.T) {
 		"[model_providers.opencodex]\n" +
 		"name = \"OpenCodex\"\n" +
 		"base_url = \"http://127.0.0.1:10100/v1\"\n\n" +
-		"[projects.\"/Users/kabir/acc\"]\n" +
+		"[projects.\"/home/user/project\"]\n" +
 		"trust_level = \"trusted\"\n"
 	writeTestFile(t, paths.Config, []byte(original))
 	writeTestFile(t, openCodexCatalog, []byte(`{"models":[{"slug":"nvidia/old-model"}]}`))
@@ -153,7 +153,7 @@ func TestExistingOpenCodexConfigStartThenRestoreToSubscription(t *testing.T) {
 			t.Fatalf("restored config still contains active custom routing %q:\n%s", forbidden, restored)
 		}
 	}
-	for _, preserved := range []string{`approval_policy = "on-request"`, `[projects."/Users/kabir/acc"]`, `trust_level = "trusted"`} {
+	for _, preserved := range []string{`approval_policy = "on-request"`, `[projects."/home/user/project"]`, `trust_level = "trusted"`} {
 		if !strings.Contains(restored, preserved) {
 			t.Fatalf("restore lost unrelated setting %q:\n%s", preserved, restored)
 		}
@@ -269,8 +269,8 @@ func TestMixedMCPTrustAndHarmlessOpenCodexTextArePreserved(t *testing.T) {
 		"approval_policy = \"on-request\"\n" +
 		"sandbox_mode = \"workspace-write\"\n\n" +
 		"[mcp_servers.docs]\n" +
-		"command = \"/Users/kabir/tools/opencodex-helper\"\n\n" +
-		"[projects.\"/Users/kabir/Second Brain\"]\n" +
+		"command = \"/home/user/.local/bin/helper\"\n\n" +
+		"[projects.\"/home/user/notes\"]\n" +
 		"trust_level = \"trusted\"\n")
 	writeTestFile(t, paths.Config, original)
 	if legacyOpenCodexDetected(string(original)) {
@@ -349,7 +349,7 @@ func TestDoctorIgnoresHarmlessOpenCodexTextAndInactiveProvider(t *testing.T) {
 approval_policy = "on-request"
 
 [mcp_servers.docs]
-command = "/Users/kabir/tools/opencodex-helper"
+command = "/home/user/.local/bin/helper"
 
 [model_providers.opencodex_archive]
 base_url = "http://127.0.0.1:10100/v1"

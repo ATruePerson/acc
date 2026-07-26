@@ -358,7 +358,7 @@ func translateToResponsesWithTools(or *OpenAIResponse, model string, translation
 	return resp, nil
 }
 
-// executeUpstream runs the request retry/fallback loop against upstreams.
+// executeUpstream runs the request against a single route with same-model retries capped at 2 attempts.
 func (s *server) executeUpstream(
 	ctx context.Context,
 	or *OpenAIRequest,
@@ -367,156 +367,145 @@ func (s *server) executeUpstream(
 	logit func(routeModel string, status, in, out int, effort string),
 	w http.ResponseWriter,
 ) (*http.Response, resolvedModel, error) {
-	var (
-		resp        *http.Response
-		activeRoute resolvedModel
-	)
-	requestedReasoningEffort := or.ReasoningEffort
+	// Use only the first route - no fallbacks
+	if len(routes) == 0 {
+		return nil, resolvedModel{}, fmt.Errorf("no routes available")
+	}
 
-	for ri, target := range routes {
-		activeRoute = target
-		currentRoute := target.Route
-		runtime, runtimeErr := resolveProviderRuntime(ctx, cfg, s.auth, currentRoute.Provider, false)
-		if runtimeErr != nil {
-			if ri == len(routes)-1 {
-				httpErr(w, 500, runtimeErr.Error())
-				logit(currentRoute.Model, 500, 0, 0, "")
-				return nil, resolvedModel{}, runtimeErr
-			}
-			log.Printf("provider %q unavailable for route %d, trying fallback: %v", currentRoute.Provider, ri, runtimeErr)
-			continue
-		}
+	activeRoute := routes[0]
+	currentRoute := activeRoute.Route
+	runtime, runtimeErr := resolveProviderRuntime(ctx, cfg, s.auth, currentRoute.Provider, false)
+	if runtimeErr != nil {
+		httpErr(w, 500, runtimeErr.Error())
+		logit(currentRoute.Model, 500, 0, 0, "")
+		return nil, resolvedModel{}, runtimeErr
+	}
 
-		requestForRoute, err := requestWithACCPersona(or, currentRoute)
-		if err != nil {
-			httpErr(w, 500, "prepare request: "+err.Error())
+	requestForRoute, err := requestWithACCPersona(or, currentRoute)
+	if err != nil {
+		httpErr(w, 500, "prepare request: "+err.Error())
+		return nil, resolvedModel{}, err
+	}
+	requestForRoute.Model = currentRoute.Model
+	if currentRoute.Temperature != nil {
+		requestForRoute.Temperature = currentRoute.Temperature
+	}
+	if currentRoute.TopP != nil {
+		requestForRoute.TopP = currentRoute.TopP
+	}
+	requestForRoute.MaxTokens = boundedOutputTokens(or.MaxTokens, currentRoute.MaxTokens)
+	requestForRoute.ReasoningEffort = ""
+	effortExtra, err := applyReasoningTarget(requestForRoute, activeRoute, requestedReasoningEffort)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		logit(currentRoute.Model, http.StatusBadRequest, 0, 0, "")
+		return nil, resolvedModel{}, err
+	}
+
+	body, _ := json.Marshal(requestForRoute)
+	body = mergeRouteExtraBody(body, currentRoute.ExtraBody)
+	body = mergeRouteExtraBody(body, effortExtra)
+
+	// Same-model retries capped at 2 attempts for transient failures
+	maxAttempts := 2
+
+	var resp *http.Response
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if err := s.limiter.Wait(ctx, currentRoute.Provider); err != nil {
+			httpErr(w, 504, fmt.Sprintf("rate limiter interrupted for %s/%s: %v", currentRoute.Provider, currentRoute.Model, err))
+			logit(currentRoute.Model, 504, 0, 0, requestForRoute.ReasoningEffort)
 			return nil, resolvedModel{}, err
 		}
-		requestForRoute.Model = currentRoute.Model
-		if currentRoute.Temperature != nil {
-			requestForRoute.Temperature = currentRoute.Temperature
-		}
-		if currentRoute.TopP != nil {
-			requestForRoute.TopP = currentRoute.TopP
-		}
-		requestForRoute.MaxTokens = boundedOutputTokens(or.MaxTokens, currentRoute.MaxTokens)
-		requestForRoute.ReasoningEffort = ""
-		effortExtra, err := applyReasoningTarget(requestForRoute, target, requestedReasoningEffort)
+
+		resp, err = doProviderRequestWithBody(ctx, s.http, s.auth, runtime, requestForRoute, body)
 		if err != nil {
-			status := http.StatusBadRequest
-			if ri > 0 {
-				status = http.StatusBadGateway
-			}
-			httpErr(w, status, err.Error())
-			logit(currentRoute.Model, status, 0, 0, "")
-			return nil, resolvedModel{}, err
-		}
-
-		body, _ := json.Marshal(requestForRoute)
-		body = mergeRouteExtraBody(body, currentRoute.ExtraBody)
-		body = mergeRouteExtraBody(body, effortExtra)
-
-		maxAttempts := 1
-		if ri == len(routes)-1 && len(routes) > 1 {
-			maxAttempts = 10
-		}
-		for attempt := 1; attempt <= maxAttempts; attempt++ {
-			if err := s.limiter.Wait(ctx, currentRoute.Provider); err != nil {
-				httpErr(w, 504, fmt.Sprintf("rate limiter interrupted for %s/%s: %v", currentRoute.Provider, currentRoute.Model, err))
-				logit(currentRoute.Model, 504, 0, 0, requestForRoute.ReasoningEffort)
+			if attempt == maxAttempts {
+				httpErr(w, 502, "upstream: "+err.Error())
+				logit(currentRoute.Model, 502, 0, 0, requestForRoute.ReasoningEffort)
 				return nil, resolvedModel{}, err
 			}
-
-			resp, err = doProviderRequestWithBody(ctx, s.http, s.auth, runtime, requestForRoute, body)
-			if err != nil {
-				if ri == len(routes)-1 {
-					httpErr(w, 502, "upstream: "+err.Error())
-					logit(currentRoute.Model, 502, 0, 0, requestForRoute.ReasoningEffort)
-					return nil, resolvedModel{}, err
-				}
-				log.Printf("upstream connection failed for %s/%s, trying fallback: %v", currentRoute.Provider, currentRoute.Model, err)
-				break
-			}
-
-			if resp.StatusCode == 503 && attempt < maxAttempts {
-				// Exponential backoff with jitter
-				baseInt := 1 << attempt
-				base := float64(baseInt)
-				jitter := base * 0.5 * (float64(time.Now().UnixNano()%1000) / 1000.0)
-				sleepSecs := base + jitter
-				if sleepSecs > 30 {
-					sleepSecs = 30
-				}
-				sleepDuration := time.Duration(sleepSecs * float64(time.Second))
-
-				log.Printf("upstream 503 for model=%s/%s: retrying in %v (attempt %d/%d)", currentRoute.Provider, currentRoute.Model, sleepDuration.Round(100*time.Millisecond), attempt, maxAttempts)
-				resp.Body.Close()
-
-				select {
-				case <-ctx.Done():
-					log.Printf("client disconnected during retry backoff")
-					return nil, resolvedModel{}, ctx.Err()
-				case <-time.After(sleepDuration):
-				}
-				continue
-			}
-			break
-		}
-
-		if resp == nil {
+			log.Printf("upstream connection failed for %s/%s, retrying (%d/%d): %v", currentRoute.Provider, currentRoute.Model, attempt, maxAttempts, err)
 			continue
 		}
 
-		// On 429 or 5xx, try next fallback. Some providers also wrap their own
-		// backend outage as a generic 400, which is not a bad client request and
-		// should use the configured backup route.
-		shouldFallback := resp.StatusCode == 429 || resp.StatusCode >= 500
-		var failureBody []byte
-		if !shouldFallback && resp.StatusCode == 400 {
-			failureBody, _ = io.ReadAll(resp.Body)
-			resp.Body.Close()
-			resp.Body = io.NopCloser(bytes.NewReader(failureBody))
-			if recoverableProvider400(failureBody) {
-				shouldFallback = true
+		if resp.StatusCode == 503 && attempt < maxAttempts {
+			// Exponential backoff with jitter for 503 errors
+			baseInt := 1 << attempt
+			base := float64(baseInt)
+			// Add 0-50% jitter
+			jitter := base * 0.5 * (float64(time.Now().UnixNano()%1000) / 1000.0)
+			sleepSecs := base + jitter
+			if sleepSecs > 30 {
+				sleepSecs = 30
 			}
-		}
-		if shouldFallback && ri < len(routes)-1 {
-			status := resp.StatusCode
-			b := failureBody
-			if b == nil {
-				b, _ = io.ReadAll(resp.Body)
-			}
+			sleepDuration := time.Duration(sleepSecs * float64(time.Second))
+
+			log.Printf("upstream 503 for model=%s/%s: retrying in %v (attempt %d/%d)", currentRoute.Provider, currentRoute.Model, sleepDuration.Round(100*time.Millisecond), attempt, maxAttempts)
 			resp.Body.Close()
-			resp = nil
-			log.Printf("upstream %d on %s/%s, falling back: %s", status, currentRoute.Provider, currentRoute.Model, truncate(string(b), 200))
-			logit(currentRoute.Model, status, 0, 0, requestForRoute.ReasoningEffort)
+
+			select {
+			case <-ctx.Done():
+				log.Printf("client disconnected during retry backoff")
+				return nil, resolvedModel{}, ctx.Err()
+			case <-time.After(sleepDuration):
+			}
 			continue
 		}
-
-		// Time-to-first-token guard (streaming only): a route that returns 200
-		// but emits no token within firstTokenTimeout is treated as stalled.
-		// Fall back if a route remains, otherwise fail — never hang.
-		if requestForRoute.Stream && resp != nil && resp.StatusCode < 400 {
-			reader, timedOut := awaitFirstByte(resp.Body, firstTokenTimeout)
-			if timedOut {
-				resp.Body.Close()
-				resp = nil
-				log.Printf("no token from %s/%s within %s", currentRoute.Provider, currentRoute.Model, firstTokenTimeout)
-				logit(currentRoute.Model, 504, 0, 0, requestForRoute.ReasoningEffort)
-				if ri < len(routes)-1 {
-					continue
-				}
-				httpErr(w, 504, fmt.Sprintf("%s and its configured fallback gave no response in time", target.ID))
-				return nil, resolvedModel{}, fmt.Errorf("timeout on all routes")
-			}
-			resp.Body = io.NopCloser(reader)
-		}
-
-		break
+		break // got a response (success or non-503 error)
 	}
 
 	if resp == nil {
-		return nil, resolvedModel{}, fmt.Errorf("all routes failed")
+		// This shouldn't happen, but just in case
+		httpErr(w, 502, "upstream: no response")
+		logit(currentRoute.Model, 502, 0, 0, requestForRoute.ReasoningEffort)
+		return nil, resolvedModel{}, fmt.Errorf("upstream: no response")
+	}
+
+	// On provider failures, return real upstream error (no fallback)
+	shouldFallback := resp.StatusCode == 429 || resp.StatusCode >= 500
+	var failureBody []byte
+	if !shouldFallback && resp.StatusCode == 400 {
+		failureBody, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		resp.Body = io.NopCloser(bytes.NewReader(failureBody))
+		if recoverableProvider400(failureBody) {
+			shouldFallback = true
+		}
+	}
+	if shouldFallback {
+		status := resp.StatusCode
+		b := failureBody
+		if b == nil {
+			b, _ = io.ReadAll(resp.Body)
+		}
+		resp.Body.Close()
+		// Return real upstream error instead of falling back
+		log.Printf("upstream %d on %s/%s: %s", status, currentRoute.Provider, currentRoute.Model, truncate(string(b), 200))
+		logit(currentRoute.Model, status, 0, 0, requestForRoute.ReasoningEffort)
+		msg := fmt.Sprintf("upstream %s/%s: %s", currentRoute.Provider, currentRoute.Model, truncate(string(b), 300))
+		switch {
+		case resp.StatusCode == 429:
+			msg = fmt.Sprintf("🪫 You're out of free usage on %s right now (rate-limited / quota hit). Wait a bit, or switch to another model.", currentRoute.Model)
+		case resp.StatusCode >= 500:
+			msg = fmt.Sprintf("⚠️ %s (provider %s) is down right now — server error %d. Try again in a moment or switch models.", currentRoute.Model, currentRoute.Provider, resp.StatusCode)
+		}
+		httpErr(w, resp.StatusCode, msg)
+		return nil, resolvedModel{}, fmt.Errorf("upstream error: %s", msg)
+	}
+
+	// Time-to-first-token guard (streaming only): a route that returns 200
+	// but emits no token within firstTokenTimeout is treated as stalled.
+	if requestForRoute.Stream && resp != nil && resp.StatusCode < 400 {
+		reader, timedOut := awaitFirstByte(resp.Body, firstTokenTimeout)
+		if timedOut {
+			resp.Body.Close()
+			resp = nil
+			log.Printf("no token from %s/%s within %s", currentRoute.Provider, currentRoute.Model, firstTokenTimeout)
+			logit(currentRoute.Model, 504, 0, 0, requestForRoute.ReasoningEffort)
+			httpErr(w, 504, fmt.Sprintf("⌛ %s gave no response in time. Try again or switch models.", currentRoute.Model))
+			return nil, resolvedModel{}, fmt.Errorf("upstream timeout")
+		}
+		resp.Body = io.NopCloser(reader)
 	}
 
 	return resp, activeRoute, nil

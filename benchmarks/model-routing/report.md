@@ -26,7 +26,7 @@ and catalog/restore paths live. A pre-repair checkpoint exists as Git stash comm
 
 Core repair files: `cli.go`, `cli_test.go`, `codex_app.go`,
 `codex_integration_test.go`, `model_registry.go`, `types.go`, `main.go`,
-`persona.go`, routing/translation tests, `config.json`, `ACC.md`, and `README.md`.
+`persona.go`, routing/translation tests, `config.json`, and `README.md`.
 The full race-enabled Go suite passed before benchmarking. The final rerun is
 recorded in section 26.
 
@@ -143,7 +143,7 @@ tests, safe in-memory fixture repository, raw result JSON files, `results.json`,
 this report, and `recommended-routing.yaml`.
 
 Changed for this work: `config.json`, `types.go`, `model_registry.go`, `main.go`,
-`codex_app.go`, `cli.go`, `persona.go`, their related tests, `ACC.md`, and
+`codex_app.go`, `cli.go`, `persona.go`, their related tests, and
 `README.md`. The ACC persona is now explicitly split into core behavior,
 Claude Code runtime/tool-adapter rules, and Kabir's personal instructions.
 

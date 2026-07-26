@@ -25,6 +25,27 @@ import (
 	"time"
 )
 
+// fallbackForbiddenKeys lists legacy fallback fields that must not appear in a
+// live config after the fallback-free routing redesign. Returning the offending
+// key gives the operator a direct migration hint.
+var fallbackForbiddenKeys = []string{
+	"fallbacks", "fallback_model", "fallback_models",
+	"image_model", "image_fallback_models",
+}
+
+func rejectForbiddenConfigKeys(raw []byte) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	lower := bytes.ToLower(raw)
+	for _, key := range fallbackForbiddenKeys {
+		if bytes.Contains(lower, []byte(key)) {
+			return fmt.Errorf("config contains unsupported fallback key %q — remove it from alias_routes, routes, and models", key)
+		}
+	}
+	return nil
+}
+
 func main() {
 	// Subcommands (setup, doctor, models, claude, help) run and exit before the
 	// flag-based server path.
@@ -241,162 +262,145 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	routes := append([]Route{route}, route.Fallbacks...)
+	// Single route only - no fallbacks
+	activeRoute := route
+	prov, ok := cfg.Providers[activeRoute.Provider]
+	if !ok {
+		httpErr(w, 500, "unknown provider: "+activeRoute.Provider)
+		logit(activeRoute.Model, 500, 0, 0, 0, "")
+		return
+	}
 
-	var (
-		or           *OpenAIRequest
-		resp         *http.Response
-		activeRoute  Route
-		streamReader io.Reader
-	)
+	or, err = translateRequest(&ar, activeRoute, cfg)
+	if err != nil {
+		httpErr(w, 400, "translate: "+err.Error())
+		logit(activeRoute.Model, 400, 0, 0, 0, "")
+		return
+	}
 
-	for ri, currentRoute := range routes {
-		activeRoute = currentRoute
-		prov, ok := cfg.Providers[currentRoute.Provider]
-		if !ok {
-			if ri == len(routes)-1 {
-				httpErr(w, 500, "unknown provider: "+currentRoute.Provider)
-				logit(currentRoute.Model, 500, 0, 0, 0, "")
-				return
+	body, _ := json.Marshal(or)
+	if len(activeRoute.ExtraBody) > 0 {
+		var merged map[string]any
+		if err := json.Unmarshal(body, &merged); err == nil {
+			for k, v := range activeRoute.ExtraBody {
+				merged[k] = v
 			}
-			log.Printf("unknown provider %q for route %d, trying fallback", currentRoute.Provider, ri)
-			continue
+			if newBody, err := json.Marshal(merged); err == nil {
+				body = newBody
+			}
 		}
+	}
 
-		or, err = translateRequest(&ar, currentRoute, cfg)
+	// Same-model retries capped at 2 attempts for transient failures
+	maxAttempts := 2
+
+	var resp *http.Response
+	var streamReader io.Reader
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		upstream, err := http.NewRequestWithContext(r.Context(), "POST", prov.BaseURL+"/chat/completions", bytes.NewReader(body))
 		if err != nil {
-			if ri == len(routes)-1 {
-				httpErr(w, 400, "translate: "+err.Error())
-				logit(currentRoute.Model, 400, 0, 0, 0, "")
+			httpErr(w, 500, err.Error())
+			logit(activeRoute.Model, 500, 0, 0, 0, or.ReasoningEffort)
+			return
+		}
+		upstream.Header.Set("Content-Type", "application/json")
+		upstream.Header.Set("Authorization", "Bearer "+prov.APIKey)
+
+		if err := s.limiter.Wait(r.Context(), activeRoute.Provider); err != nil {
+			httpErr(w, 504, fmt.Sprintf("rate limiter interrupted for %s/%s: %v", activeRoute.Provider, activeRoute.Model, err))
+			logit(activeRoute.Model, 504, 0, 0, 0, or.ReasoningEffort)
+			return
+		}
+
+		resp, err = s.http.Do(upstream)
+		if err != nil {
+			if attempt == maxAttempts {
+				httpErr(w, 502, "upstream: "+err.Error())
+				logit(activeRoute.Model, 502, 0, 0, 0, or.ReasoningEffort)
 				return
 			}
-			log.Printf("translate failed for %s/%s, trying fallback: %v", currentRoute.Provider, currentRoute.Model, err)
+			log.Printf("upstream connection failed for %s/%s, retrying (%d/%d): %v", activeRoute.Provider, activeRoute.Model, attempt, maxAttempts, err)
 			continue
 		}
 
-		body, _ := json.Marshal(or)
-		if len(currentRoute.ExtraBody) > 0 {
-			var merged map[string]any
-			if err := json.Unmarshal(body, &merged); err == nil {
-				for k, v := range currentRoute.ExtraBody {
-					merged[k] = v
-				}
-				if newBody, err := json.Marshal(merged); err == nil {
-					body = newBody
-				}
+		if resp.StatusCode == 503 && attempt < maxAttempts {
+			// Exponential backoff with jitter for 503 errors
+			baseInt := 1 << attempt
+			base := float64(baseInt)
+			// Add 0-50% jitter
+			jitter := base * 0.5 * (float64(time.Now().UnixNano()%1000) / 1000.0)
+			sleepSecs := base + jitter
+			if sleepSecs > 30 {
+				sleepSecs = 30
 			}
-		}
-		// When a fallback route exists, don't hammer a 503ing model for minutes —
-		// bail after a couple quick tries so latency-sensitive callers (e.g. the
-		// Agent safety classifier) fall through to a healthy route instead of
-		// timing out. Only the last route gets the full retry budget.
-		maxAttempts := 10
-		if ri < len(routes)-1 {
-			maxAttempts = 2
-		}
+			sleepDuration := time.Duration(sleepSecs * float64(time.Second))
 
-		for attempt := 1; attempt <= maxAttempts; attempt++ {
-			var err error
-			upstream, err := http.NewRequestWithContext(r.Context(), "POST", prov.BaseURL+"/chat/completions", bytes.NewReader(body))
-			if err != nil {
-				httpErr(w, 500, err.Error())
-				logit(currentRoute.Model, 500, 0, 0, 0, or.ReasoningEffort)
-				return
-			}
-			upstream.Header.Set("Content-Type", "application/json")
-			upstream.Header.Set("Authorization", "Bearer "+prov.APIKey)
-
-			if err := s.limiter.Wait(r.Context(), currentRoute.Provider); err != nil {
-				httpErr(w, 504, fmt.Sprintf("rate limiter interrupted for %s/%s: %v", currentRoute.Provider, currentRoute.Model, err))
-				logit(currentRoute.Model, 504, 0, 0, 0, or.ReasoningEffort)
-				return
-			}
-
-			resp, err = s.http.Do(upstream)
-			if err != nil {
-				if ri == len(routes)-1 {
-					httpErr(w, 502, "upstream: "+err.Error())
-					logit(currentRoute.Model, 502, 0, 0, 0, or.ReasoningEffort)
-					return
-				}
-				log.Printf("upstream connection failed for %s/%s, trying fallback: %v", currentRoute.Provider, currentRoute.Model, err)
-				break
-			}
-
-			if resp.StatusCode == 503 && attempt < maxAttempts {
-				// Exponential backoff with jitter
-				baseInt := 1 << attempt
-				base := float64(baseInt)
-				// Add 0-50% jitter
-				jitter := base * 0.5 * (float64(time.Now().UnixNano()%1000) / 1000.0)
-				sleepSecs := base + jitter
-				if sleepSecs > 30 {
-					sleepSecs = 30
-				}
-				sleepDuration := time.Duration(sleepSecs * float64(time.Second))
-
-				log.Printf("upstream %d for model=%s->%s/%s: retrying in %v (attempt %d/10)", resp.StatusCode, ar.Model, currentRoute.Provider, currentRoute.Model, sleepDuration.Round(100*time.Millisecond), attempt)
-				resp.Body.Close()
-
-				select {
-				case <-r.Context().Done():
-					log.Printf("client disconnected during retry backoff for model=%s", ar.Model)
-					return
-				case <-time.After(sleepDuration):
-				}
-				continue
-			}
-			break
-		}
-		if resp == nil {
-			continue
-		}
-
-		// On provider failures, try the next configured fallback. This includes a
-		// provider's own generic 400, which is different from a bad client request.
-		shouldFallback := resp.StatusCode == 429 || resp.StatusCode >= 500
-		var degradedBody []byte
-		if !shouldFallback && resp.StatusCode == 400 {
-			degradedBody, _ = io.ReadAll(resp.Body)
+			log.Printf("upstream %d for model=%s->%s/%s: retrying in %v (attempt %d/%d)", resp.StatusCode, ar.Model, activeRoute.Provider, activeRoute.Model, sleepDuration.Round(100*time.Millisecond), attempt, maxAttempts)
 			resp.Body.Close()
-			resp.Body = io.NopCloser(bytes.NewReader(degradedBody))
-			if recoverableProvider400(degradedBody) {
-				shouldFallback = true
+
+			select {
+			case <-r.Context().Done():
+				log.Printf("client disconnected during retry backoff for model=%s", ar.Model)
+				return
+			case <-time.After(sleepDuration):
 			}
+			continue
 		}
-		if shouldFallback && ri < len(routes)-1 {
-			status := resp.StatusCode
-			b := degradedBody
-			if b == nil {
-				b, _ = io.ReadAll(resp.Body)
-			}
+		break // got a response (success or non-503 error)
+	}
+
+	if resp == nil {
+		// This shouldn't happen, but just in case
+		httpErr(w, 502, "upstream: no response")
+		logit(activeRoute.Model, 502, 0, 0, 0, or.ReasoningEffort)
+		return
+	}
+
+	// On provider failures, return real upstream error (no fallback)
+	shouldFallback := resp.StatusCode == 429 || resp.StatusCode >= 500
+	var degradedBody []byte
+	if !shouldFallback && resp.StatusCode == 400 {
+		degradedBody, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		resp.Body = io.NopCloser(bytes.NewReader(degradedBody))
+		if recoverableProvider400(degradedBody) {
+			shouldFallback = true
+		}
+	}
+	if shouldFallback {
+		status := resp.StatusCode
+		b := degradedBody
+		if b == nil {
+			b, _ = io.ReadAll(resp.Body)
+		}
+		resp.Body.Close()
+		// Return real upstream error instead of falling back
+		log.Printf("upstream %d on %s/%s: %s", status, activeRoute.Provider, activeRoute.Model, truncate(string(b), 200))
+		logit(activeRoute.Model, status, 0, 0, 0, or.ReasoningEffort)
+		msg := fmt.Sprintf("upstream %s/%s: %s", activeRoute.Provider, activeRoute.Model, truncate(string(b), 300))
+		switch {
+		case resp.StatusCode == 429:
+			msg = fmt.Sprintf("🪫 You're out of free usage on %s right now (rate-limited / quota hit). Wait a bit, or switch to another model.", activeRoute.Model)
+		case resp.StatusCode >= 500:
+			msg = fmt.Sprintf("⚠️ %s (provider %s) is down right now — server error %d. Try again in a moment or switch models.", activeRoute.Model, activeRoute.Provider, resp.StatusCode)
+		}
+		httpErr(w, resp.StatusCode, msg)
+		return
+	}
+
+	// Time-to-first-token guard (streaming only): a route that returns 200
+	// but emits no token within firstTokenTimeout is treated as stalled.
+	if ar.Stream && resp.StatusCode < 400 {
+		reader, timedOut := awaitFirstByte(resp.Body, firstTokenTimeout)
+		if timedOut {
 			resp.Body.Close()
 			resp = nil
-			log.Printf("upstream %d on %s/%s, falling back: %s", status, currentRoute.Provider, currentRoute.Model, truncate(string(b), 200))
-			logit(currentRoute.Model, status, 0, 0, 0, or.ReasoningEffort)
-			continue
+			log.Printf("no token from %s/%s within %s", activeRoute.Provider, activeRoute.Model, firstTokenTimeout)
+			logit(activeRoute.Model, 504, 0, 0, 0, or.ReasoningEffort)
+			httpErr(w, 504, fmt.Sprintf("⌛ %s gave no response in time. Try again or switch models.", ar.Model))
+			return
 		}
-
-		// Time-to-first-token guard (streaming only): a route that returns 200
-		// but emits no token within firstTokenTimeout is treated as stalled.
-		// Fall back if a route remains, otherwise fail — never hang.
-		if ar.Stream && resp.StatusCode < 400 {
-			reader, timedOut := awaitFirstByte(resp.Body, firstTokenTimeout)
-			if timedOut {
-				resp.Body.Close()
-				resp = nil
-				log.Printf("no token from %s/%s within %s", currentRoute.Provider, currentRoute.Model, firstTokenTimeout)
-				logit(currentRoute.Model, 504, 0, 0, 0, or.ReasoningEffort)
-				if ri < len(routes)-1 {
-					continue
-				}
-				httpErr(w, 504, fmt.Sprintf("⌛ %s and its fallback gave no response in time. Try again or switch models.", ar.Model))
-				return
-			}
-			streamReader = reader
-		}
-
-		break // got a definitive response (success or final route exhausted)
+		streamReader = reader
 	}
 
 	defer func() {
@@ -490,135 +494,138 @@ func (s *server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	routes := append([]Route{route}, route.Fallbacks...)
+	// Single route only - no fallbacks
+	activeRoute := route
+	prov, ok := cfg.Providers[activeRoute.Provider]
+	if !ok {
+		httpErr(w, 500, "unknown provider: "+activeRoute.Provider)
+		logit(activeRoute.Model, 500, 0, 0, 0, "")
+		return
+	}
 
-	var (
-		resp         *http.Response
-		activeRoute  Route
-		streamReader io.Reader
-	)
-
-	for ri, currentRoute := range routes {
-		activeRoute = currentRoute
-		prov, ok := cfg.Providers[currentRoute.Provider]
-		if !ok {
-			if ri == len(routes)-1 {
-				httpErr(w, 500, "unknown provider: "+currentRoute.Provider)
-				logit(currentRoute.Model, 500, 0, 0, 0, "")
-				return
-			}
-			log.Printf("unknown provider %q for route %d, trying fallback", currentRoute.Provider, ri)
-			continue
+	body, err := chatJSONWithACCPersona(raw, activeRoute)
+	if err != nil {
+		httpErr(w, 400, "prepare request: "+err.Error())
+		logit(activeRoute.Model, 400, 0, 0, 0, "")
+		return
+	}
+	// Rewrite model name to the actual upstream model. The client sends
+	// "anthropic/claude-haiku" but the upstream expects "stepfun-ai/step-3.7-flash".
+	var merged map[string]any
+	if err := json.Unmarshal(body, &merged); err == nil {
+		merged["model"] = activeRoute.Model
+		for k, v := range activeRoute.ExtraBody {
+			merged[k] = v
 		}
+		if newBody, err := json.Marshal(merged); err == nil {
+			body = newBody
+		}
+	}
 
-		body, err := chatJSONWithACCPersona(raw, currentRoute)
+	// Same-model retries capped at 2 attempts for transient failures
+	maxAttempts := 2
+
+	var resp *http.Response
+	var streamReader io.Reader
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		upstream, err := http.NewRequestWithContext(r.Context(), "POST", prov.BaseURL+"/chat/completions", bytes.NewReader(body))
 		if err != nil {
-			httpErr(w, 400, "prepare request: "+err.Error())
-			logit(currentRoute.Model, 400, 0, 0, 0, "")
+			httpErr(w, 500, err.Error())
+			logit(activeRoute.Model, 500, 0, 0, 0, "")
 			return
 		}
-		// Rewrite model name to the actual upstream model. The client sends
-		// "anthropic/claude-haiku" but the upstream expects "stepfun-ai/step-3.7-flash".
-		var merged map[string]any
-		if err := json.Unmarshal(body, &merged); err == nil {
-			merged["model"] = currentRoute.Model
-			for k, v := range currentRoute.ExtraBody {
-				merged[k] = v
-			}
-			if newBody, err := json.Marshal(merged); err == nil {
-				body = newBody
-			}
+		upstream.Header.Set("Content-Type", "application/json")
+		upstream.Header.Set("Authorization", "Bearer "+prov.APIKey)
+
+		if err := s.limiter.Wait(r.Context(), activeRoute.Provider); err != nil {
+			httpErr(w, 504, fmt.Sprintf("rate limiter interrupted for %s/%s: %v", activeRoute.Provider, activeRoute.Model, err))
+			logit(activeRoute.Model, 504, 0, 0, 0, "")
+			return
 		}
 
-		maxAttempts := 10
-		if ri < len(routes)-1 {
-			maxAttempts = 2
-		}
-
-		for attempt := 1; attempt <= maxAttempts; attempt++ {
-			upstream, err := http.NewRequestWithContext(r.Context(), "POST", prov.BaseURL+"/chat/completions", bytes.NewReader(body))
-			if err != nil {
-				httpErr(w, 500, err.Error())
-				logit(currentRoute.Model, 500, 0, 0, 0, "")
-				return
-			}
-			upstream.Header.Set("Content-Type", "application/json")
-			upstream.Header.Set("Authorization", "Bearer "+prov.APIKey)
-
-			if err := s.limiter.Wait(r.Context(), currentRoute.Provider); err != nil {
-				httpErr(w, 504, fmt.Sprintf("rate limiter interrupted for %s/%s: %v", currentRoute.Provider, currentRoute.Model, err))
-				logit(currentRoute.Model, 504, 0, 0, 0, "")
-				return
-			}
-
-			resp, err = s.http.Do(upstream)
-			if err != nil {
+		resp, err = s.http.Do(upstream)
+		if err != nil {
+			if attempt == maxAttempts {
 				httpErr(w, 502, "upstream: "+err.Error())
-				logit(currentRoute.Model, 502, 0, 0, 0, "")
+				logit(activeRoute.Model, 502, 0, 0, 0, "")
 				return
 			}
-
-			if resp.StatusCode == 503 && attempt < maxAttempts {
-				baseInt := 1 << attempt
-				base := float64(baseInt)
-				jitter := base * 0.5 * (float64(time.Now().UnixNano()%1000) / 1000.0)
-				sleepSecs := base + jitter
-				if sleepSecs > 30 {
-					sleepSecs = 30
-				}
-				sleepDuration := time.Duration(sleepSecs * float64(time.Second))
-				log.Printf("openai: upstream %d for model=%s->%s/%s: retrying in %v (attempt %d/%d)", resp.StatusCode, meta.Model, currentRoute.Provider, currentRoute.Model, sleepDuration.Round(100*time.Millisecond), attempt, maxAttempts)
-				resp.Body.Close()
-				select {
-				case <-r.Context().Done():
-					log.Printf("openai: client disconnected during retry backoff for model=%s", meta.Model)
-					return
-				case <-time.After(sleepDuration):
-				}
-				continue
-			}
-			break
-		}
-
-		shouldFallback := resp.StatusCode == 429 || resp.StatusCode >= 500
-		var degradedBody []byte
-		if !shouldFallback && resp.StatusCode == 400 {
-			degradedBody, _ = io.ReadAll(resp.Body)
-			resp.Body.Close()
-			resp.Body = io.NopCloser(bytes.NewReader(degradedBody))
-			if recoverableProvider400(degradedBody) {
-				shouldFallback = true
-			}
-		}
-		if shouldFallback && ri < len(routes)-1 {
-			status := resp.StatusCode
-			b := degradedBody
-			if b == nil {
-				b, _ = io.ReadAll(resp.Body)
-			}
-			resp.Body.Close()
-			resp = nil
-			log.Printf("openai: upstream %d on %s/%s, falling back: %s", status, currentRoute.Provider, currentRoute.Model, truncate(string(b), 200))
-			logit(currentRoute.Model, status, 0, 0, 0, "")
+			log.Printf("upstream connection failed for %s/%s, retrying (%d/%d): %v", activeRoute.Provider, activeRoute.Model, attempt, maxAttempts, err)
 			continue
 		}
 
-		if meta.Stream && resp.StatusCode < 400 {
-			sr, timedOut := awaitFirstByte(resp.Body, firstTokenTimeout)
-			if timedOut {
-				resp.Body.Close()
-				resp = nil
-				log.Printf("openai: no token from %s/%s within %s", currentRoute.Provider, currentRoute.Model, firstTokenTimeout)
-				logit(currentRoute.Model, 504, 0, 0, 0, "")
-				if ri < len(routes)-1 {
-					continue
-				}
-				httpErr(w, 504, fmt.Sprintf("%s and its fallback gave no response in time. Try again or switch models.", meta.Model))
-				return
+		if resp.StatusCode == 503 && attempt < maxAttempts {
+			baseInt := 1 << attempt
+			base := float64(baseInt)
+			jitter := base * 0.5 * (float64(time.Now().UnixNano()%1000) / 1000.0)
+			sleepSecs := base + jitter
+			if sleepSecs > 30 {
+				sleepSecs = 30
 			}
-			streamReader = sr
+			sleepDuration := time.Duration(sleepSecs * float64(time.Second))
+			log.Printf("openai: upstream %d for model=%s->%s/%s: retrying in %v (attempt %d/%d)", resp.StatusCode, meta.Model, activeRoute.Provider, activeRoute.Model, sleepDuration.Round(100*time.Millisecond), attempt, maxAttempts)
+			resp.Body.Close()
+			select {
+			case <-r.Context().Done():
+				log.Printf("openai: client disconnected during retry backoff for model=%s", meta.Model)
+				return
+			case <-time.After(sleepDuration):
+			}
+			continue
 		}
-		break
+		break // got a response (success or non-503 error)
+	}
+
+	if resp == nil {
+		// This shouldn't happen, but just in case
+		httpErr(w, 502, "upstream: no response")
+		logit(activeRoute.Model, 502, 0, 0, 0, "")
+		return
+	}
+
+	// On provider failures, return real upstream error (no fallback)
+	shouldFallback := resp.StatusCode == 429 || resp.StatusCode >= 500
+	var degradedBody []byte
+	if !shouldFallback && resp.StatusCode == 400 {
+		degradedBody, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		resp.Body = io.NopCloser(bytes.NewReader(degradedBody))
+		if recoverableProvider400(degradedBody) {
+			shouldFallback = true
+		}
+	}
+	if shouldFallback {
+		status := resp.StatusCode
+		b := degradedBody
+		if b == nil {
+			b, _ = io.ReadAll(resp.Body)
+		}
+		resp.Body.Close()
+		// Return real upstream error instead of falling back
+		log.Printf("openai: upstream %d on %s/%s: %s", status, activeRoute.Provider, activeRoute.Model, truncate(string(b), 200))
+		logit(activeRoute.Model, status, 0, 0, 0, "")
+		msg := fmt.Sprintf("upstream %s/%s: %s", activeRoute.Provider, activeRoute.Model, truncate(string(b), 300))
+		switch {
+		case resp.StatusCode == 429:
+			msg = fmt.Sprintf("Rate-limited on %s. Wait a bit or switch models.", activeRoute.Model)
+		case resp.StatusCode >= 500:
+			msg = fmt.Sprintf("%s (provider %s) is down — server error %d. Try again or switch models.", activeRoute.Model, activeRoute.Provider, resp.StatusCode)
+		}
+		httpErr(w, resp.StatusCode, msg)
+		return
+	}
+
+	if meta.Stream && resp.StatusCode < 400 {
+		sr, timedOut := awaitFirstByte(resp.Body, firstTokenTimeout)
+		if timedOut {
+			resp.Body.Close()
+			resp = nil
+			log.Printf("openai: no token from %s/%s within %s", activeRoute.Provider, activeRoute.Model, firstTokenTimeout)
+			logit(activeRoute.Model, 504, 0, 0, 0, "")
+			httpErr(w, 504, fmt.Sprintf("%s gave no response in time. Try again or switch models.", meta.Model))
+			return
+		}
+		streamReader = sr
 	}
 
 	defer func() {
@@ -709,7 +716,7 @@ func publicLegacyModelIDs(cfg *Config) []string {
 	}
 	seen := map[string]bool{}
 	ids := make([]string, 0, len(cfg.AliasRoutes)+len(cfg.Aliases))
-	for _, family := range []string{"opus", "sonnet", "haiku"} {
+	for _, family := range []string{"fable", "opus", "sonnet", "haiku"} {
 		if _, ok := aliasRouteForFamily(cfg, family); ok {
 			id := "anthropic/claude-" + family
 			seen[id] = true
@@ -735,7 +742,7 @@ func normalizeModelID(model string) string {
 }
 
 func aliasFamily(normalizedModel string) (string, bool) {
-	for _, family := range []string{"opus", "sonnet", "haiku"} {
+	for _, family := range []string{"fable", "opus", "sonnet", "haiku"} {
 		base := "claude-" + family
 		if normalizedModel == family || normalizedModel == base {
 			return family, true
@@ -754,11 +761,7 @@ func aliasRouteForFamily(cfg *Config, family string) (Route, bool) {
 	if cfg == nil {
 		return Route{}, false
 	}
-	if route, ok := cfg.AliasRoutes[family]; ok {
-		return route, true
-	}
-	// Backward compatibility for configs written before alias_routes existed.
-	route, ok := cfg.Routes[family]
+	route, ok := cfg.AliasRoutes[family]
 	return route, ok
 }
 
@@ -968,7 +971,7 @@ func validateConfig(cfg *Config) error {
 	for family, route := range cfg.AliasRoutes {
 		canonical, ok := aliasFamily(family)
 		if !ok || canonical != family {
-			return fmt.Errorf("alias route %q: expected opus, sonnet, or haiku", family)
+			return fmt.Errorf("alias route %q: expected fable, opus, sonnet, or haiku", family)
 		}
 		if err := validateRouteProviders("alias route "+strconv.Quote(family), route, cfg.Providers); err != nil {
 			return err
@@ -986,21 +989,6 @@ func validateConfig(cfg *Config) error {
 		if _, err := resolveCapabilityRoute(cfg, id, capability); err != nil {
 			return err
 		}
-		for _, fallbackID := range configuredFallbackModels(capability) {
-			fallback, ok := cfg.Models[fallbackID]
-			if !ok || !fallback.Enabled {
-				return fmt.Errorf("model %q: fallback model %q is unavailable", id, fallbackID)
-			}
-		}
-		if capability.ImageModel != "" {
-			imageModel, ok := cfg.Models[capability.ImageModel]
-			if !ok || !imageModel.Enabled {
-				return fmt.Errorf("model %q: image model %q is unavailable", id, capability.ImageModel)
-			}
-			if !imageModel.ImageInputSupport {
-				return fmt.Errorf("model %q: image model %q does not support image input", id, capability.ImageModel)
-			}
-		}
 		for effort := range capability.Reasoning {
 			switch effort {
 			case "minimal", "low", "medium", "high", "xhigh", "max":
@@ -1015,11 +1003,6 @@ func validateConfig(cfg *Config) error {
 func validateRouteProviders(label string, route Route, providers map[string]Provider) error {
 	if _, ok := providers[route.Provider]; !ok {
 		return fmt.Errorf("%s: provider %q not defined", label, route.Provider)
-	}
-	for i, fallback := range route.Fallbacks {
-		if err := validateRouteProviders(fmt.Sprintf("%s fallback %d", label, i+1), fallback, providers); err != nil {
-			return err
-		}
 	}
 	return nil
 }

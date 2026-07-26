@@ -35,5 +35,10 @@ codex-restore.json
 *.codex-backup
 
 # Local project context (not for repo)
+AGENTS.md
 CLAUDE.md
 docs/gemini.md
+
+# Configuration backups
+*.bak
+.backups/

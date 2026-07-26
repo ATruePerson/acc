@@ -22,7 +22,7 @@ func TestRenderAndRemoveOwnedCodexConfigPreservesUnrelatedTOML(t *testing.T) {
 	original := `approval_policy = "on-request"
 sandbox_mode = "workspace-write"
 
-[projects."/Users/kabir/acc"]
+[projects."/home/user/project"]
 trust_level = "trusted"
 
 [mcp_servers.obsidian]
@@ -34,7 +34,7 @@ command = "obsidian-mcp"
 			t.Fatalf("configured text missing %q:\n%s", want, configured)
 		}
 	}
-	for _, preserved := range []string{`approval_policy = "on-request"`, `[projects."/Users/kabir/acc"]`, `trust_level = "trusted"`, `[mcp_servers.obsidian]`} {
+	for _, preserved := range []string{`approval_policy = "on-request"`, `[projects."/home/user/project"]`, `trust_level = "trusted"`, `[mcp_servers.obsidian]`} {
 		if !strings.Contains(configured, preserved) {
 			t.Fatalf("unrelated TOML was lost: %q\n%s", preserved, configured)
 		}
@@ -43,7 +43,7 @@ command = "obsidian-mcp"
 	if strings.Contains(removed, "model_providers.acc") || strings.Contains(removed, accCodexRootBegin) {
 		t.Fatalf("ACC-owned config remains:\n%s", removed)
 	}
-	for _, preserved := range []string{`approval_policy = "on-request"`, `[projects."/Users/kabir/acc"]`, `[mcp_servers.obsidian]`} {
+	for _, preserved := range []string{`approval_policy = "on-request"`, `[projects."/home/user/project"]`, `[mcp_servers.obsidian]`} {
 		if !strings.Contains(removed, preserved) {
 			t.Fatalf("remove lost unrelated TOML %q:\n%s", preserved, removed)
 		}
@@ -88,7 +88,7 @@ func TestLegacyOpenCodexDetectionUsesActiveRoutingOnly(t *testing.T) {
 	}
 	for _, harmless := range []string{
 		`# OpenCodex owned`,
-		"[mcp_servers.docs]\ncommand = \"/Users/kabir/tools/opencodex-helper\"\n",
+		"[mcp_servers.docs]\ncommand = \"/home/user/.local/bin/helper\"\n",
 		`base_url = "http://127.0.0.1:8080/v1"`,
 	} {
 		if legacyOpenCodexDetected(harmless) {

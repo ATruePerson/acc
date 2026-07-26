@@ -62,11 +62,8 @@ type Route struct {
 	// Reasoning maps a Codex effort name to the exact provider request value.
 	// An empty target intentionally omits reasoning_effort (Minimal).
 	Reasoning map[string]ReasoningTarget `json:"reasoning,omitempty"`
-	// Fallbacks is an ordered list of routes to try when this route returns 429
-	// (rate limited). The proxy tries each in sequence and stops after the first
-	// success or after the last fallback fails.
+	// Toolcalling indicates whether the route supports tool calls.
 	Toolcalling *bool   `json:"toolcalling,omitempty"`
-	Fallbacks   []Route `json:"fallbacks,omitempty"`
 }
 
 type ModelCapability struct {
@@ -92,12 +89,6 @@ type ModelCapability struct {
 	MaxContext        int      `json:"max_context"`
 	MaxOutput         int      `json:"max_output"`
 	Enabled           bool     `json:"enabled"`
-	FallbackModel     string   `json:"fallback_model,omitempty"`
-	FallbackModels    []string `json:"fallback_models,omitempty"`
-	// ImageModel is considered only when the request actually contains an image.
-	ImageModel string `json:"image_model,omitempty"`
-	// ImageFallbackModels are tried after ImageModel and only for image requests.
-	ImageFallbackModels []string `json:"image_fallback_models,omitempty"`
 }
 
 type ReasoningTarget struct {

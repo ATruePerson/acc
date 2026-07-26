@@ -119,8 +119,8 @@ subscription connection.
 `acc codex setup` generates a deterministic catalog of real, provider-prefixed
 IDs such as `nvidia/z-ai/glm-5.2`, `opencode/big-pickle`, or an authenticated
 provider's discovered IDs. Codex connects directly to ACC's `/v1/responses`
-endpoint. The Codex catalog never advertises the Claude aliases `opus`,
-`sonnet`, or `haiku`; those remain available only to Claude Code.
+endpoint. The Codex catalog never advertises Claude aliases (`fable`, `opus`,
+`sonnet`, `haiku`); those remain available only to Claude Code.
 
 Choose one directly when scripting:
 
@@ -170,9 +170,11 @@ preserving unrelated Codex providers; it does not read or move OpenCodex auth.
 
 ## Configuration
 
-ACC reads `~/.config/acc/config.json` by default. Routes are yours to control:
-`opus`, `sonnet`, and `haiku` each point to a provider, model, optional fallback,
-and request settings. Restart ACC after changing the file.
+ACC reads `~/.config/acc/config.json` by default. Claude aliases (`fable`,
+`opus`, `sonnet`, `haiku`) each point to one direct provider/model route with no
+automatic fallbacks. Provider errors return directly to the client — no silent
+model or provider switching. ACC hot-reloads the config file on every request;
+no restart needed for config-only changes.
 
 Provider keys belong in `~/.config/acc/.env`, never in `config.json` or Git.
 You can name any provider in `providers` as long as it exposes an
@@ -205,9 +207,56 @@ Thinking budgets map to the closest `reasoning_effort` value in your config:
 - Anthropic Messages, OpenAI Responses, and OpenAI Chat Completions endpoints.
 - Streaming responses, parallel tool calls, tool results, images, and file parts.
 - Codex model discovery and multi-turn tool calls.
-- Per-provider rate limiting, retrying, and configured fallbacks.
+- Per-provider rate limiting and retrying.
 - Live terminal and web dashboards with request logs.
 - Config validation before the gateway starts.
+
+## Model traits
+
+Known provider and model behaviors to be aware of:
+
+- **nemotron-ultra (550B) is slow.** A 32000-token reasoning budget can hang 6+
+  minutes on a trivial prompt. At 8000 it answers in ~99s. Only a model swap
+  fixes the speed.
+- **big-pickle** (opencode) is a codename for `deepseek-v4-flash` — a reasoning
+  model that returns EMPTY content if `max_tokens` is too low (it spends the
+  entire budget on `reasoning_content`). Always set `max_tokens` high enough to
+  leave room for visible output.
+- **NVIDIA reasoning models** (nemotron, deepseek, glm) are text-only. Do not
+  send images to these routes.
+- **Gemini 3.x multi-turn tools work** — the proxy injects
+  `skip_thought_signature_validator` automatically. The old rule restricting
+  Gemini to single-turn requests is obsolete.
+- **MiniMax M3** rejects `reasoning_budget` — it reasons natively without one.
+  Its tool support is partial (`DEGRADED function cannot be invoked`), so it is
+  excluded from requests carrying tools.
+
+## Routing architecture
+
+ACC supports two routing paths:
+
+**Claude aliases** (`anthropic/claude-fable`, `anthropic/claude-opus`,
+`anthropic/claude-sonnet`, `anthropic/claude-haiku`). Each alias maps to one
+direct provider and model. Provider errors are returned as-is — no automatic
+fallback or model switching. These four are the only Claude aliases;
+`claude-writer` is obsolete.
+
+**Codex model IDs** (e.g. `nvidia/z-ai~sglm-5.2`, `opencode/big-pickle`). Codex
+uses exact provider-prefixed stable IDs from the `models` section of
+`config.json`. Each ID routes to exactly one provider/model with no alias lookup
+or fallback chain. Codex never uses Claude aliases.
+
+**Direct provider path.** Any request to
+`anthropic/<provider>/<model>` (e.g. `anthropic/nvidia/z-ai/glm-5.2`) bypasses
+alias and family routing and uses the named provider directly.
+
+## Identity
+
+ACC identifies itself as `I'm Kabir's Second Brain.` It does not inject
+provider-specific imitation prompts. The current provider and model are included
+in the prompt visible to the model so they can be disclosed only when the user
+explicitly asks. Codex and Claude Code each receive their own client-specific
+adapter — neither receives the other's identity wrapper.
 
 ## Security
 

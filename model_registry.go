@@ -87,48 +87,8 @@ func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
 		if provider, upstreamModel, ok := splitRealCodexModelID(modelID); ok {
 			return []resolvedModel{{ID: modelID, Capability: capability, Route: Route{Provider: provider, Model: upstreamModel}}}, nil
 		}
-		chain := []resolvedModel{{ID: modelID, Capability: capability, Route: route}}
-		seen := map[string]bool{modelID: true}
-		for _, fallbackID := range configuredFallbackModels(capability) {
-			fallback, ok := cfg.Models[fallbackID]
-			if !ok || !fallback.Enabled {
-				return nil, fmt.Errorf("model %q configures unavailable fallback model %q", modelID, fallbackID)
-			}
-			fallbackRoute, err := resolveCapabilityRoute(cfg, fallbackID, fallback)
-			if err != nil {
-				return nil, err
-			}
-			chain = append(chain, resolvedModel{ID: fallbackID, Capability: fallback, Route: fallbackRoute, Fallback: true})
-			seen[fallbackID] = true
-		}
-		if capability.ImageModel != "" && !seen[capability.ImageModel] {
-			imageCapability, ok := cfg.Models[capability.ImageModel]
-			if !ok || !imageCapability.Enabled {
-				return nil, fmt.Errorf("model %q configures unavailable image model %q", modelID, capability.ImageModel)
-			}
-			imageRoute, err := resolveCapabilityRoute(cfg, capability.ImageModel, imageCapability)
-			if err != nil {
-				return nil, err
-			}
-			chain = append(chain, resolvedModel{ID: capability.ImageModel, Capability: imageCapability, Route: imageRoute, Fallback: true, ImageOnly: true})
-			seen[capability.ImageModel] = true
-		}
-		for _, imageFallbackID := range capability.ImageFallbackModels {
-			if imageFallbackID == "" || seen[imageFallbackID] {
-				continue
-			}
-			imageFallback, ok := cfg.Models[imageFallbackID]
-			if !ok || !imageFallback.Enabled {
-				return nil, fmt.Errorf("model %q configures unavailable image fallback model %q", modelID, imageFallbackID)
-			}
-			imageFallbackRoute, err := resolveCapabilityRoute(cfg, imageFallbackID, imageFallback)
-			if err != nil {
-				return nil, err
-			}
-			chain = append(chain, resolvedModel{ID: imageFallbackID, Capability: imageFallback, Route: imageFallbackRoute, Fallback: true, ImageOnly: true})
-			seen[imageFallbackID] = true
-		}
-		return chain, nil
+		// For alias/route models, return a single resolved model (no fallbacks)
+		return []resolvedModel{{ID: modelID, Capability: capability, Route: route}}, nil
 	}
 
 	if provider, upstreamModel, ok := splitRealCodexModelID(modelID); ok {
@@ -172,17 +132,12 @@ func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
 		return nil, fmt.Errorf("invalid Codex model ID %q — use provider/model format", modelID)
 	}
 
-	// Legacy non-Codex clients can still use aliases and route fallbacks. They do
-	// not become selectable Codex catalog entries until explicitly registered.
+	// Legacy non-Codex clients can still use aliases (no fallbacks).
 	route, err := s.routeFor(modelID)
 	if err != nil {
 		return nil, err
 	}
-	chain := []resolvedModel{{ID: modelID, Route: route}}
-	for _, fallback := range route.Fallbacks {
-		chain = append(chain, resolvedModel{ID: fallback.Provider + "/" + fallback.Model, Route: fallback, Fallback: true})
-	}
-	return chain, nil
+	return []resolvedModel{{ID: modelID, Route: route}}, nil
 }
 
 func splitRealCodexModelID(modelID string) (provider, model string, ok bool) {

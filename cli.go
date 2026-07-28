@@ -77,7 +77,7 @@ Usage:
   acc setup           Interactive first-time setup (keys + config)
   acc doctor          Test that your provider keys work
   acc models          List the model names you can use
-  acc bench           Benchmark every persona + fallback, judged for quality
+  acc bench           Benchmark every persona, judged for quality
   acc claude [args]   Start the proxy and launch Claude Code through it
 	acc codex setup      Back up Codex and point it directly at ACC
 	acc codex start      Start an owned ACC service and verify Responses

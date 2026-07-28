@@ -13,16 +13,26 @@ import (
 )
 
 // firstTokenTimeout is how long a route has to emit its first response byte
-// before the proxy abandons it and tries the next fallback. A reasoning model
+// before the proxy treats it as stalled. A reasoning model
 // that goes silent (stalled / overloaded) trips this; a model that streams
 // promptly does not. Package var so tests can shorten it.
 var firstTokenTimeout = 15 * time.Second
+
+// responseHeaderTimeout is how long to wait for the upstream's HTTP response
+// headers before giving up. This is separate from firstTokenTimeout because
+// slow reasoning models (GLM-5.2) can take >15s to even begin responding.
+var responseHeaderTimeout = 30 * time.Second
 
 // awaitFirstByte blocks until the first byte is readable from src or d passes.
 // On success it returns a reader that re-emits that first byte followed by the
 // rest of src, so no streamed data is lost. On timeout it returns (nil, true);
 // the caller must Close the underlying body to unblock the pending read.
-func awaitFirstByte(src io.Reader, d time.Duration) (io.Reader, bool) {
+// awaitFirstByte blocks until the first byte is readable from src or d passes.
+// On success it returns a reader that re-emits that first byte followed by the
+// rest of src, so no streamed data is lost. On timeout it returns (nil, true).
+// On immediate EOF it returns (nil, false, error) — the caller must treat this
+// as an empty-response failure, not a successful stream.
+func awaitFirstByte(src io.Reader, d time.Duration) (io.Reader, bool, error) {
 	type res struct {
 		n   int
 		err error
@@ -39,11 +49,11 @@ func awaitFirstByte(src io.Reader, d time.Duration) (io.Reader, bool) {
 	select {
 	case got := <-ch:
 		if got.n == 0 {
-			return src, false // EOF before any byte; let the caller drain it
+			return nil, false, got.err // EOF before any byte
 		}
-		return io.MultiReader(bytes.NewReader(buf[:got.n]), src), false
+		return io.MultiReader(bytes.NewReader(buf[:got.n]), src), false, nil
 	case <-timer.C:
-		return nil, true
+		return nil, true, nil
 	}
 }
 
@@ -74,6 +84,8 @@ func streamTranslate(w http.ResponseWriter, body io.Reader, model string) (int, 
 	textOpen := false
 	nextIndex := 0
 	textIndex := -1
+	sawDone := false
+	sawUsableOutput := false
 	// map openai tool_call index -> anthropic block index
 	toolBlocks := map[int]int{}
 	stopReason := "end_turn"
@@ -96,7 +108,7 @@ func streamTranslate(w http.ResponseWriter, body io.Reader, model string) (int, 
 			continue
 		}
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "[DONE]" {
+		if payload == "[DONE]" { sawDone = true
 			break
 		}
 
@@ -134,6 +146,7 @@ func streamTranslate(w http.ResponseWriter, body io.Reader, model string) (int, 
 
 		// text delta
 		if txt := decodeStringContent(ch.Delta.Content); txt != "" {
+			sawUsableOutput = true
 			if !textOpen {
 				textIndex = nextIndex
 				nextIndex++
@@ -157,6 +170,7 @@ func streamTranslate(w http.ResponseWriter, body io.Reader, model string) (int, 
 				bi = nextIndex
 				nextIndex++
 				toolBlocks[tc.Index] = bi
+			sawUsableOutput = true
 				thoughtSig := tc.Function.ThoughtSignature
 				if tc.ExtraContent != nil && tc.ExtraContent.Google != nil && tc.ExtraContent.Google.ThoughtSignature != "" {
 					thoughtSig = tc.ExtraContent.Google.ThoughtSignature
@@ -182,8 +196,39 @@ func streamTranslate(w http.ResponseWriter, body io.Reader, model string) (int, 
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		log.Printf("stream scan error: %v", err)
+	scanErr := scanner.Err()
+	if scanErr != nil {
+		log.Printf("stream scan error: %v", scanErr)
+		closeText()
+		send("error", map[string]any{
+			"type": "error",
+			"error": map[string]any{
+				"type":    "api_error",
+				"message": fmt.Sprintf("Upstream stream error: %v", scanErr),
+			},
+		})
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return inputTokens, outputTokens, reasoningTokens
+	}
+
+	if !sawDone || !sawUsableOutput {
+		msg := "The upstream model returned an empty response, which never happens in normal operation. Retry the request."
+		if sawUsableOutput && !sawDone {
+			msg = "Upstream stream ended unexpectedly without a completion signal."
+		} else if sawDone && !sawUsableOutput {
+			msg = "Upstream returned only usage information with no usable output."
+		}
+		closeText()
+		send("error", map[string]any{
+			"type": "error",
+			"error": map[string]any{
+				"type":    "api_error",
+				"message": msg,
+			},
+		})
+		return inputTokens, outputTokens, reasoningTokens
 	}
 
 	closeText()

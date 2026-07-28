@@ -268,33 +268,18 @@ func TestConfiguredAliasRoutesKeepProviderDiversityAndMaximumReasoning(t *testin
 		t.Fatalf("haiku route = %+v", haiku)
 	}
 
-	if len(opus.Fallbacks) != 1 || opus.Fallbacks[0].Provider != "openrouter" || opus.Fallbacks[0].Model != "nvidia/nemotron-3-ultra-550b-a55b:free" {
-		t.Fatalf("opus fallback = %+v", opus.Fallbacks)
-	}
-	if len(sonnet.Fallbacks) != 2 || sonnet.Fallbacks[0].Provider != "openrouter" || sonnet.Fallbacks[0].Model != "tencent/hy3:free" || sonnet.Fallbacks[1].Provider != "nvidia" || sonnet.Fallbacks[1].Model != "nvidia/nemotron-3-super-120b-a12b" {
-		t.Fatalf("sonnet fallback = %+v", sonnet.Fallbacks)
-	}
-	if len(haiku.Fallbacks) != 0 {
-		t.Fatalf("haiku fallback = %+v", haiku.Fallbacks)
-	}
-	for name, route := range map[string]Route{
-		"opus": opus, "opus fallback": opus.Fallbacks[0],
-		"sonnet": sonnet, "sonnet fallback 1": sonnet.Fallbacks[0], "sonnet fallback 2": sonnet.Fallbacks[1],
-		"haiku": haiku,
-	} {
-		if !route.ReasoningLocked {
+	for _, name := range []string{"opus", "sonnet", "haiku"} {
+		if !cfg.AliasRoutes[name].ReasoningLocked {
 			t.Errorf("%s reasoning is not locked to provider maximum", name)
 		}
 	}
 
-	for name, route := range map[string]Route{"opus": opus, "sonnet fallback": sonnet.Fallbacks[1]} {
-		if got := route.ExtraBody["reasoning_budget"]; got != float64(32000) {
-			t.Fatalf("%s reasoning budget = %v, want 32000", name, got)
-		}
-		thinking, ok := route.ExtraBody["chat_template_kwargs"].(map[string]any)
-		if !ok || thinking["enable_thinking"] != true {
-			t.Fatalf("%s does not enable NVIDIA thinking: %v", name, route.ExtraBody)
-		}
+	if got := opus.ExtraBody["reasoning_budget"]; got != float64(32000) {
+		t.Fatalf("opus reasoning budget = %v, want 32000", got)
+	}
+	thinking, ok := opus.ExtraBody["chat_template_kwargs"].(map[string]any)
+	if !ok || thinking["enable_thinking"] != true {
+		t.Fatalf("opus does not enable NVIDIA thinking: %v", opus.ExtraBody)
 	}
 
 	var defaults Config
@@ -331,17 +316,11 @@ func TestReasoningLockedKeepsProviderMaximum(t *testing.T) {
 	}
 }
 
-func TestValidateConfigChecksAliasRouteFallbackProviders(t *testing.T) {
+func TestValidateConfigChecksAliasRouteProviders(t *testing.T) {
 	cfg := &Config{
-		Providers: map[string]Provider{"openrouter": {}},
+		Providers:   map[string]Provider{"openrouter": {}},
 		AliasRoutes: map[string]Route{
-			"opus": {
-				Provider: "openrouter",
-				Model:    "tencent/hy3:free",
-				Fallbacks: []Route{
-					{Provider: "missing", Model: "fallback"},
-				},
-			},
+			"opus": {Provider: "missing", Model: "x"},
 		},
 	}
 	if err := validateConfig(cfg); err == nil || !strings.Contains(err.Error(), "provider \"missing\" not defined") {
@@ -353,19 +332,19 @@ func TestCodexAliasesFollowConfiguredFamilies(t *testing.T) {
 	cfg := codexTestConfig()
 	s := testServer(cfg)
 	tests := []struct {
-		id, routeName string
+		id, wantProvider, wantModel string
 	}{
-		{"nvidia/z-ai~sglm-5.2", "nvidia-glm"},
-		{"opencode/big-pickle", "opencode-pickle"},
-		{"nvidia/stepfun-ai~sstep-3.7-flash", "nvidia-step"},
+		{"nvidia/z-ai~sglm-5.2", "nvidia", "z-ai/glm-5.2"},
+		{"opencode/big-pickle", "opencode", "big-pickle"},
+		{"nvidia/stepfun-ai~sstep-3.7-flash", "nvidia", "stepfun-ai/step-3.7-flash"},
 	}
 	for _, tc := range tests {
 		route, err := s.routeFor(tc.id)
 		if err != nil {
 			t.Fatalf("routeFor(%q): %v", tc.id, err)
 		}
-		if want := cfg.Routes[tc.routeName]; route.Provider != want.Provider || route.Model != want.Model {
-			t.Errorf("routeFor(%q) = %s/%s, want %s/%s", tc.id, route.Provider, route.Model, want.Provider, want.Model)
+		if route.Provider != tc.wantProvider || route.Model != tc.wantModel {
+			t.Errorf("routeFor(%q) = %s/%s, want %s/%s", tc.id, route.Provider, route.Model, tc.wantProvider, tc.wantModel)
 		}
 	}
 }
@@ -391,6 +370,50 @@ func TestCatalogModelsAllRoute(t *testing.T) {
 		if _, err := s.routeFor("anthropic/" + d.Canonical); err != nil {
 			t.Errorf("catalog canonical %q does not route: %v", d.Canonical, err)
 		}
+	}
+}
+
+func TestRouteForCustomAliasPreservesExactProviderAndModel(t *testing.T) {
+	s := testServer(&Config{
+		Providers: map[string]Provider{
+			"nvidia":   {BaseURL: "https://integrate.api.nvidia.com/v1", APIKey: "fake"},
+			"opencode": {BaseURL: "https://opencode.ai/zen/v1", APIKey: "fake"},
+			"kilo":     {BaseURL: "https://kilo.test", APIKey: "fake"},
+		},
+		AliasRoutes: map[string]Route{
+			"fable": {Provider: "opencode", Model: "big-pickle", ReasoningEffort: "high"},
+		},
+		Aliases: map[string]Route{
+			"anthropic/claude-mythos": {Provider: "kilo", Model: "kilo-free"},
+		},
+	})
+
+	route, err := s.routeFor("anthropic/claude-fable")
+	if err != nil {
+		t.Fatalf("routeFor fable failed: %v", err)
+	}
+	if route.Provider != "opencode" {
+		t.Errorf("fable provider = %q, want opencode", route.Provider)
+	}
+	if route.Model != "big-pickle" {
+		t.Errorf("fable model = %q, want big-pickle", route.Model)
+	}
+	if route.ReasoningEffort != "high" {
+		t.Errorf("fable effort = %q, want high", route.ReasoningEffort)
+	}
+
+	route, err = s.routeFor("anthropic/claude-mythos")
+	if err != nil {
+		t.Fatalf("routeFor mythos failed: %v", err)
+	}
+	if route.Provider != "kilo" {
+		t.Errorf("mythos provider = %q, want kilo", route.Provider)
+	}
+	if route.Model != "kilo-free" {
+		t.Errorf("mythos model = %q, want kilo-free", route.Model)
+	}
+	if route.ReasoningEffort != "" {
+		t.Errorf("mythos effort = %q, want empty", route.ReasoningEffort)
 	}
 }
 

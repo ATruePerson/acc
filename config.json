@@ -107,18 +107,7 @@
           "enable_thinking": true
         },
         "reasoning_budget": 32000
-      },
-      "fallbacks": [
-        {
-          "provider": "openrouter",
-          "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
-          "reasoning_effort": "high",
-          "reasoning_locked": true,
-          "max_tokens": 65536,
-          "toolcalling": true,
-          "stream": true
-        }
-      ]
+      }
     },
     "sonnet": {
       "provider": "opencode",
@@ -127,32 +116,7 @@
       "reasoning_locked": true,
       "max_tokens": 48000,
       "toolcalling": true,
-      "stream": true,
-      "fallbacks": [
-        {
-          "provider": "openrouter",
-          "model": "tencent/hy3:free",
-          "reasoning_effort": "high",
-          "reasoning_locked": true,
-          "max_tokens": 65536,
-          "toolcalling": true,
-          "stream": true
-        },
-        {
-          "provider": "nvidia",
-          "model": "nvidia/nemotron-3-super-120b-a12b",
-          "reasoning_locked": true,
-          "max_tokens": 48000,
-          "toolcalling": true,
-          "stream": true,
-          "extra_body": {
-            "chat_template_kwargs": {
-              "enable_thinking": true
-            },
-            "reasoning_budget": 32000
-          }
-        }
-      ]
+      "stream": true
     },
     "haiku": {
       "provider": "nvidia",

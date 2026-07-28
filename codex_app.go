@@ -153,7 +153,7 @@ func codexModelCatalogEntriesWithAuth(cfg *Config, auth *authManager) []map[stri
 			}
 		}
 		modalities := []string{"text"}
-		supportsImages := model.Capability.ImageInputSupport || model.Capability.ImageModel != "" || len(model.Capability.ImageFallbackModels) > 0
+		supportsImages := model.Capability.ImageInputSupport
 		if supportsImages {
 			modalities = append(modalities, "image")
 		}

@@ -18,53 +18,31 @@ import (
 
 // ---------- bench targets ----------
 
-// benchTarget is one model configuration under test: a persona identity,
-// which variant (primary or fallback) of that persona's alias, and how to
-// resolve it from the live config.
+// benchTarget is one model configuration under test.
 type benchTarget struct {
-	Identity      string
-	Variant       string // "primary" or "fallback"
-	AliasKey      string
-	FallbackIndex int // -1 selects the primary route, >=0 selects Fallbacks[i]
+	Identity string
+	AliasKey string
 }
 
-// benchTargets is the full cross-matrix test matrix: every persona's
-// primary and (where configured) fallback model, read live from
-// config.json at run time so a config edit (e.g. a temperature tweak) is
-// picked up on the next `acc bench` run with no code change. fable and
+// benchTargets is the full test matrix: every persona's model, read live
+// from config.json at run time so a config edit (e.g. a temperature tweak)
+// is picked up on the next `acc bench` run with no code change. fable and
 // mythos are byte-identical in config.json today, so only "fable" is
 // tested, labeled "fable/mythos" — see the design doc for why.
 var benchTargets = []benchTarget{
-	{Identity: "opus", Variant: "primary", AliasKey: "anthropic/claude-opus", FallbackIndex: -1},
-	{Identity: "opus", Variant: "fallback", AliasKey: "anthropic/claude-opus", FallbackIndex: 0},
-	{Identity: "sonnet", Variant: "primary", AliasKey: "anthropic/claude-sonnet", FallbackIndex: -1},
-	{Identity: "sonnet", Variant: "fallback", AliasKey: "anthropic/claude-sonnet", FallbackIndex: 0},
-	// glm-5.1 is a sonnet-class candidate: 256k context (too small for the
-	// opus tier, ample for the middle slot) and reasons natively, so it needs
-	// no reasoning_budget (adding one 400s on NVIDIA). Bench output gives it
-	// its own row so its scores sit directly next to sonnet/primary and
-	// sonnet/fallback for comparison.
-	{Identity: "glm", Variant: "primary", AliasKey: "anthropic/claude-glm", FallbackIndex: -1},
-	{Identity: "haiku", Variant: "primary", AliasKey: "anthropic/claude-haiku", FallbackIndex: -1},
-	{Identity: "fable/mythos", Variant: "primary", AliasKey: "anthropic/claude-fable", FallbackIndex: -1},
-	{Identity: "fable/mythos", Variant: "fallback", AliasKey: "anthropic/claude-fable", FallbackIndex: 0},
+	{Identity: "opus", AliasKey: "anthropic/claude-opus"},
+	{Identity: "sonnet", AliasKey: "anthropic/claude-sonnet"},
+	{Identity: "glm", AliasKey: "anthropic/claude-glm"},
+	{Identity: "haiku", AliasKey: "anthropic/claude-haiku"},
+	{Identity: "fable/mythos", AliasKey: "anthropic/claude-fable"},
 }
 
-// routeForTarget resolves a benchTarget to a standalone Route with
-// Fallbacks cleared, so calling it never triggers the live proxy's
-// automatic fallback-chaining — each variant is tested in isolation.
+// routeForTarget resolves a benchTarget to a single Route.
 func routeForTarget(cfg *Config, t benchTarget) (Route, error) {
 	r, ok := cfg.Aliases[t.AliasKey]
 	if !ok {
 		return Route{}, fmt.Errorf("alias %q not found in config", t.AliasKey)
 	}
-	if t.FallbackIndex >= 0 {
-		if t.FallbackIndex >= len(r.Fallbacks) {
-			return Route{}, fmt.Errorf("alias %q has no fallback[%d]", t.AliasKey, t.FallbackIndex)
-		}
-		r = r.Fallbacks[t.FallbackIndex]
-	}
-	r.Fallbacks = nil
 	return r, nil
 }
 
@@ -340,7 +318,6 @@ type benchJobResult struct {
 	RunID        string `json:"run_id"`
 	Timestamp    string `json:"timestamp"`
 	Identity     string `json:"identity"`
-	Variant      string `json:"variant"`
 	Model        string `json:"model"`
 	Provider     string `json:"provider"`
 	Category     string `json:"category"`
@@ -379,7 +356,6 @@ func runBenchJob(ctx context.Context, httpClient *http.Client, cfg *Config, runI
 	result := benchJobResult{
 		RunID:    runID,
 		Identity: job.Target.Identity,
-		Variant:  job.Target.Variant,
 		Category: job.Prompt.Category,
 		PromptID: job.Prompt.ID,
 	}
@@ -459,11 +435,11 @@ func mostRecentRunID(results []benchJobResult, excludeRunID string) string {
 }
 
 // avgScoreFor averages the score of every scored (non-error) result
-// matching identity+variant+category. ok is false when nothing matches.
-func avgScoreFor(results []benchJobResult, identity, variant, category string) (avg float64, ok bool) {
+// matching identity+category. ok is false when nothing matches.
+func avgScoreFor(results []benchJobResult, identity, category string) (avg float64, ok bool) {
 	sum, count := 0, 0
 	for _, r := range results {
-		if r.Identity == identity && r.Variant == variant && r.Category == category && r.Score != nil {
+		if r.Identity == identity && r.Category == category && r.Score != nil {
 			sum += *r.Score
 			count++
 		}
@@ -498,13 +474,13 @@ func buildDiffLines(history []benchJobResult, current []benchJobResult, currentR
 	var lines []string
 	seen := map[string]bool{}
 	for _, r := range current {
-		key := r.Identity + "/" + r.Variant + " " + r.Category
+		key := r.Identity + " " + r.Category
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
-		curAvg, curOK := avgScoreFor(current, r.Identity, r.Variant, r.Category)
-		prevAvg, prevOK := avgScoreFor(previous, r.Identity, r.Variant, r.Category)
+		curAvg, curOK := avgScoreFor(current, r.Identity, r.Category)
+		prevAvg, prevOK := avgScoreFor(previous, r.Identity, r.Category)
 		if !curOK || !prevOK {
 			continue
 		}
@@ -535,7 +511,7 @@ func buildSummaryTable(results []benchJobResult) string {
 	seen := map[string]bool{}
 
 	for _, r := range results {
-		key := r.Identity + "/" + r.Variant
+		key := r.Identity
 		if !seen[key] {
 			seen[key] = true
 			order = append(order, key)
@@ -581,7 +557,7 @@ func buildMarkdownReport(runID string, jobs []benchJob, results []benchJobResult
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Bench run %s\n\n", runID)
 	for i, r := range results {
-		fmt.Fprintf(&b, "## %s/%s · %s\n\n", r.Identity, r.Variant, r.PromptID)
+		fmt.Fprintf(&b, "## %s · %s\n\n", r.Identity, r.PromptID)
 		fmt.Fprintf(&b, "**Model:** %s (%s)\n\n", r.Model, r.Provider)
 		fmt.Fprintf(&b, "**Prompt:**\n\n%s\n\n", jobs[i].Prompt.Text)
 		if r.Error != "" {
@@ -676,8 +652,8 @@ func cmdBench() {
 			if result.Error == "" {
 				status = fmt.Sprintf("score %d/10", *result.Score)
 			}
-			fmt.Printf("  [%d/%d] %s/%s · %s ... %dms, %s\n",
-				n, len(jobs), result.Identity, result.Variant, result.PromptID, result.LatencyMs, status)
+			fmt.Printf("  [%d/%d] %s · %s ... %dms, %s\n",
+				n, len(jobs), result.Identity, result.PromptID, result.LatencyMs, status)
 		}(i, job)
 	}
 	wg.Wait()

@@ -11,9 +11,7 @@ type resolvedModel struct {
 	ID                string
 	Capability        ModelCapability
 	Route             Route
-	Fallback          bool
 	CapabilityReroute bool
-	ImageOnly         bool
 }
 
 func enabledModelIDs(cfg *Config) []string {
@@ -81,13 +79,11 @@ func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Codex models use provider/model IDs and must never build fallback
-		// chains. If a provider/model key exists in the Models map, resolve it
-		// as a single-item chain and skip fallback processing.
+		// Codex models use provider/model IDs. Resolve as a single-item chain.
 		if provider, upstreamModel, ok := splitRealCodexModelID(modelID); ok {
 			return []resolvedModel{{ID: modelID, Capability: capability, Route: Route{Provider: provider, Model: upstreamModel}}}, nil
 		}
-		// For alias/route models, return a single resolved model (no fallbacks)
+		// Return a single resolved model per request
 		return []resolvedModel{{ID: modelID, Capability: capability, Route: route}}, nil
 	}
 
@@ -111,11 +107,6 @@ func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
 			if err == nil && route.Provider == provider && route.Model == upstreamModel {
 				capability = configured
 				capability.Provider, capability.Model, capability.Route = provider, upstreamModel, ""
-				// Codex resolves exactly one provider/model. Strip any fallback
-				// fields from the matched capability so they cannot be read.
-				capability.FallbackModel = ""
-				capability.FallbackModels = nil
-				capability.ImageFallbackModels = nil
 				break
 			}
 		}
@@ -132,7 +123,7 @@ func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
 		return nil, fmt.Errorf("invalid Codex model ID %q — use provider/model format", modelID)
 	}
 
-	// Legacy non-Codex clients can still use aliases (no fallbacks).
+	// Legacy non-Codex clients use alias routes.
 	route, err := s.routeFor(modelID)
 	if err != nil {
 		return nil, err
@@ -155,22 +146,6 @@ func splitRealCodexModelID(modelID string) (provider, model string, ok bool) {
 		return "", "", false
 	}
 	return provider, model, true
-}
-
-func configuredFallbackModels(capability ModelCapability) []string {
-	ids := make([]string, 0, len(capability.FallbackModels)+1)
-	seen := map[string]bool{}
-	if capability.FallbackModel != "" {
-		ids = append(ids, capability.FallbackModel)
-		seen[capability.FallbackModel] = true
-	}
-	for _, id := range capability.FallbackModels {
-		if id != "" && !seen[id] {
-			ids = append(ids, id)
-			seen[id] = true
-		}
-	}
-	return ids
 }
 
 func supportedEfforts(capability ModelCapability) []string {
@@ -292,9 +267,8 @@ func responseInputRequirements(req *ResponsesRequest) (responseInputRequirement,
 	return requirements, nil
 }
 
-// selectResponseModelChain removes only explicitly incompatible routes. For
-// Opus image input this skips text-only GLM and begins on MiniMax. It never
-// reintroduces a text-only route later in the fallback chain.
+// selectResponseModelChain validates the single resolved route against request
+// requirements such as image, tool, and streaming support.
 func selectResponseModelChain(req *ResponsesRequest, routes []resolvedModel) ([]resolvedModel, error) {
 	return selectResponseModelChainForInput(req, routes, 0)
 }
@@ -309,9 +283,6 @@ func selectResponseModelChainForInput(req *ResponsesRequest, routes []resolvedMo
 	eligible := make([]resolvedModel, 0, len(routes))
 	for _, target := range routes {
 		capability := target.Capability
-		if target.ImageOnly && !requirements.Image {
-			continue
-		}
 		if capability.DisplayName == "" { // Preserve legacy behavior where no capability metadata exists.
 			eligible = append(eligible, target)
 			continue
@@ -349,13 +320,6 @@ func selectResponseModelChainForInput(req *ResponsesRequest, routes []resolvedMo
 		default:
 			return nil, fmt.Errorf("model %q has no configured compatible route", req.Model)
 		}
-	}
-	if eligible[0].ID != routes[0].ID {
-		eligible[0].Fallback = false
-		eligible[0].CapabilityReroute = true
-	}
-	for i := 1; i < len(eligible); i++ {
-		eligible[i].Fallback = true
 	}
 	return eligible, nil
 }

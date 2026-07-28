@@ -71,7 +71,6 @@ type RunResult struct {
 	ReadBeforeWrite, TestsRun, TestsPassed     bool
 	RequestedModel, RequestedEffort            string
 	ActualProvider, ActualModel, ActualEffort  string
-	Fallback                                   bool
 	Output                                     string
 }
 
@@ -474,7 +473,6 @@ func fillHeaders(result *RunResult, h http.Header) {
 	result.ActualProvider = h.Get("X-ACC-Backend-Provider")
 	result.ActualModel = h.Get("X-ACC-Backend-Model")
 	result.ActualEffort = h.Get("X-ACC-Backend-Effort")
-	result.Fallback = strings.EqualFold(h.Get("X-ACC-Fallback"), "true")
 }
 
 func classify(status int, message string) string {

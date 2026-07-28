@@ -216,7 +216,7 @@ func refreshCatalogAfterLogin(ctx context.Context, out io.Writer, manager *authM
 	discoveryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	if err := refreshProviderModelCache(discoveryCtx, &http.Client{Timeout: 15 * time.Second}, cfg, manager, provider); err != nil {
-		fmt.Fprintf(out, "  Login saved. Live model refresh failed, so ACC will use its static fallback catalog: %v\n", err)
+		fmt.Fprintf(out, "  Login saved. live model refresh failed, so ACC will use its local model catalog: %v\n", err)
 		return nil
 	}
 	fmt.Fprintln(out, "  Refreshed the provider's real-model catalog.")

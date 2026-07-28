@@ -25,22 +25,58 @@ import (
 	"time"
 )
 
-// fallbackForbiddenKeys lists legacy fallback fields that must not appear in a
-// live config after the fallback-free routing redesign. Returning the offending
-// key gives the operator a direct migration hint.
-var fallbackForbiddenKeys = []string{
+// legacyRoutingKeys are field names from the old fallback system that must not
+// appear in a config after the zero-fallback redesign. Each entry is validated
+// by walking the raw JSON per-route/alias/model so the check works even after
+// the target struct fields have been removed.
+var legacyRoutingKeys = []string{
 	"fallbacks", "fallback_model", "fallback_models",
 	"image_model", "image_fallback_models",
 }
 
-func rejectForbiddenConfigKeys(raw []byte) error {
-	if len(raw) == 0 {
+func validateNoLegacyRoutingKeys(raw []byte) error {
+	var cfg struct {
+		Routes      map[string]json.RawMessage `json:"routes"`
+		AliasRoutes map[string]json.RawMessage `json:"alias_routes"`
+		Aliases     map[string]json.RawMessage `json:"aliases"`
+		Models      map[string]json.RawMessage `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil // malformed JSON caught by main unmarshal
+	}
+	check := func(context string, raw json.RawMessage) error {
+		var m map[string]any
+		if json.Unmarshal(raw, &m) != nil {
+			return nil
+		}
+		for k := range m {
+			lower := strings.ToLower(k)
+			for _, key := range legacyRoutingKeys {
+				if lower == key {
+					return fmt.Errorf("%s contains unsupported key %q — remove legacy routing entries", context, k)
+				}
+			}
+		}
 		return nil
 	}
-	lower := bytes.ToLower(raw)
-	for _, key := range fallbackForbiddenKeys {
-		if bytes.Contains(lower, []byte(key)) {
-			return fmt.Errorf("config contains unsupported fallback key %q — remove it from alias_routes, routes, and models", key)
+	for name, rawRoute := range cfg.Routes {
+		if err := check("route "+name, rawRoute); err != nil {
+			return err
+		}
+	}
+	for name, rawRoute := range cfg.AliasRoutes {
+		if err := check("alias_route "+name, rawRoute); err != nil {
+			return err
+		}
+	}
+	for name, rawAlias := range cfg.Aliases {
+		if err := check("alias "+name, rawAlias); err != nil {
+			return err
+		}
+	}
+	for name, rawModel := range cfg.Models {
+		if err := check("model "+name, rawModel); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -164,8 +200,8 @@ func newUpstreamHTTPClient() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	// A dead model can stall before sending HTTP headers, which happens before
 	// the streaming first-token guard gets a chance to run. Bound that phase to
-	// the same window so the normal route fallback can take over.
-	transport.ResponseHeaderTimeout = firstTokenTimeout
+	// the same window before reporting a stalled upstream.
+	transport.ResponseHeaderTimeout = responseHeaderTimeout
 	return &http.Client{Timeout: 5 * time.Minute, Transport: transport}
 }
 
@@ -262,7 +298,6 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Single route only - no fallbacks
 	activeRoute := route
 	prov, ok := cfg.Providers[activeRoute.Provider]
 	if !ok {
@@ -271,6 +306,7 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var or *OpenAIRequest
 	or, err = translateRequest(&ar, activeRoute, cfg)
 	if err != nil {
 		httpErr(w, 400, "translate: "+err.Error())
@@ -319,6 +355,14 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 				logit(activeRoute.Model, 502, 0, 0, 0, or.ReasoningEffort)
 				return
 			}
+			// Don't retry if the client disconnected — the next attempt
+			// would use the same canceled context and fail immediately.
+			if r.Context().Err() != nil {
+				log.Printf("client disconnected, stopping retries for model=%s", ar.Model)
+				httpErr(w, 499, "client disconnected during request")
+				logit(activeRoute.Model, 499, 0, 0, 0, or.ReasoningEffort)
+				return
+			}
 			log.Printf("upstream connection failed for %s/%s, retrying (%d/%d): %v", activeRoute.Provider, activeRoute.Model, attempt, maxAttempts, err)
 			continue
 		}
@@ -356,25 +400,25 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// On provider failures, return real upstream error (no fallback)
-	shouldFallback := resp.StatusCode == 429 || resp.StatusCode >= 500
+	// Return user-friendly upstream error
+	isDegraded := resp.StatusCode == 429 || resp.StatusCode >= 500
 	var degradedBody []byte
-	if !shouldFallback && resp.StatusCode == 400 {
+	if !isDegraded && resp.StatusCode == 400 {
 		degradedBody, _ = io.ReadAll(resp.Body)
 		resp.Body.Close()
 		resp.Body = io.NopCloser(bytes.NewReader(degradedBody))
 		if recoverableProvider400(degradedBody) {
-			shouldFallback = true
+			isDegraded = true
 		}
 	}
-	if shouldFallback {
+	if isDegraded {
 		status := resp.StatusCode
 		b := degradedBody
 		if b == nil {
 			b, _ = io.ReadAll(resp.Body)
 		}
 		resp.Body.Close()
-		// Return real upstream error instead of falling back
+		// Return user-friendly upstream error
 		log.Printf("upstream %d on %s/%s: %s", status, activeRoute.Provider, activeRoute.Model, truncate(string(b), 200))
 		logit(activeRoute.Model, status, 0, 0, 0, or.ReasoningEffort)
 		msg := fmt.Sprintf("upstream %s/%s: %s", activeRoute.Provider, activeRoute.Model, truncate(string(b), 300))
@@ -391,13 +435,21 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	// Time-to-first-token guard (streaming only): a route that returns 200
 	// but emits no token within firstTokenTimeout is treated as stalled.
 	if ar.Stream && resp.StatusCode < 400 {
-		reader, timedOut := awaitFirstByte(resp.Body, firstTokenTimeout)
+		reader, timedOut, streamErr := awaitFirstByte(resp.Body, firstTokenTimeout)
 		if timedOut {
 			resp.Body.Close()
 			resp = nil
 			log.Printf("no token from %s/%s within %s", activeRoute.Provider, activeRoute.Model, firstTokenTimeout)
 			logit(activeRoute.Model, 504, 0, 0, 0, or.ReasoningEffort)
 			httpErr(w, 504, fmt.Sprintf("⌛ %s gave no response in time. Try again or switch models.", ar.Model))
+			return
+		}
+		if streamErr != nil {
+			resp.Body.Close()
+			resp = nil
+			log.Printf("empty stream from %s/%s: %v", activeRoute.Provider, activeRoute.Model, streamErr)
+			logit(activeRoute.Model, 502, 0, 0, 0, or.ReasoningEffort)
+			httpErr(w, 502, fmt.Sprintf("⚠️ %s returned an empty response. Try again or switch models.", ar.Model))
 			return
 		}
 		streamReader = reader
@@ -494,7 +546,6 @@ func (s *server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Single route only - no fallbacks
 	activeRoute := route
 	prov, ok := cfg.Providers[activeRoute.Provider]
 	if !ok {
@@ -550,7 +601,15 @@ func (s *server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				logit(activeRoute.Model, 502, 0, 0, 0, "")
 				return
 			}
-			log.Printf("upstream connection failed for %s/%s, retrying (%d/%d): %v", activeRoute.Provider, activeRoute.Model, attempt, maxAttempts, err)
+			// Don't retry if the client disconnected — the next attempt
+			// would use the same canceled context and fail immediately.
+			if r.Context().Err() != nil {
+				log.Printf("openai: client disconnected, stopping retries for model=%s", meta.Model)
+				httpErr(w, 499, "client disconnected during request")
+				logit(activeRoute.Model, 499, 0, 0, 0, "")
+				return
+			}
+			log.Printf("openai: upstream connection failed for %s/%s, retrying (%d/%d): %v", activeRoute.Provider, activeRoute.Model, attempt, maxAttempts, err)
 			continue
 		}
 
@@ -583,25 +642,25 @@ func (s *server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// On provider failures, return real upstream error (no fallback)
-	shouldFallback := resp.StatusCode == 429 || resp.StatusCode >= 500
+	// Return user-friendly upstream error
+	isDegraded := resp.StatusCode == 429 || resp.StatusCode >= 500
 	var degradedBody []byte
-	if !shouldFallback && resp.StatusCode == 400 {
+	if !isDegraded && resp.StatusCode == 400 {
 		degradedBody, _ = io.ReadAll(resp.Body)
 		resp.Body.Close()
 		resp.Body = io.NopCloser(bytes.NewReader(degradedBody))
 		if recoverableProvider400(degradedBody) {
-			shouldFallback = true
+			isDegraded = true
 		}
 	}
-	if shouldFallback {
+	if isDegraded {
 		status := resp.StatusCode
 		b := degradedBody
 		if b == nil {
 			b, _ = io.ReadAll(resp.Body)
 		}
 		resp.Body.Close()
-		// Return real upstream error instead of falling back
+		// Return user-friendly upstream error
 		log.Printf("openai: upstream %d on %s/%s: %s", status, activeRoute.Provider, activeRoute.Model, truncate(string(b), 200))
 		logit(activeRoute.Model, status, 0, 0, 0, "")
 		msg := fmt.Sprintf("upstream %s/%s: %s", activeRoute.Provider, activeRoute.Model, truncate(string(b), 300))
@@ -616,13 +675,21 @@ func (s *server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if meta.Stream && resp.StatusCode < 400 {
-		sr, timedOut := awaitFirstByte(resp.Body, firstTokenTimeout)
+		sr, timedOut, streamErr := awaitFirstByte(resp.Body, firstTokenTimeout)
 		if timedOut {
 			resp.Body.Close()
 			resp = nil
 			log.Printf("openai: no token from %s/%s within %s", activeRoute.Provider, activeRoute.Model, firstTokenTimeout)
 			logit(activeRoute.Model, 504, 0, 0, 0, "")
 			httpErr(w, 504, fmt.Sprintf("%s gave no response in time. Try again or switch models.", meta.Model))
+			return
+		}
+		if streamErr != nil {
+			resp.Body.Close()
+			resp = nil
+			log.Printf("openai: empty stream from %s/%s: %v", activeRoute.Provider, activeRoute.Model, streamErr)
+			logit(activeRoute.Model, 502, 0, 0, 0, "")
+			httpErr(w, 502, fmt.Sprintf("%s returned an empty response. Try again or switch models.", meta.Model))
 			return
 		}
 		streamReader = sr
@@ -829,17 +896,6 @@ func (s *server) routeFor(model string) (Route, error) {
 	aliases := s.effectiveAliases()
 
 	if r, ok := aliases[normalizedModel]; ok {
-		// Enforce NVIDIA-only for fable/mythos aliases to avoid Gemini fallbacks
-		if strings.Contains(normalizedModel, "fable") || strings.Contains(normalizedModel, "mythos") {
-			if r.Provider != "nvidia" {
-				log.Printf("forcing NVIDIA provider for alias %s (was %s/%s)", normalizedModel, r.Provider, r.Model)
-				r.Provider = "nvidia"
-				// If the model previously pointed at Gemini, prefer minimax-m3
-				if strings.Contains(strings.ToLower(r.Model), "gemini") {
-					r.Model = "minimaxai/minimax-m3"
-				}
-			}
-		}
 		return r, nil
 	}
 
@@ -878,9 +934,8 @@ func mergeRouteExtraBody(body []byte, extra map[string]any) []byte {
 	return body
 }
 
-// recoverableProvider400 distinguishes a malformed client request from a
-// provider admitting that its own backend rejected the request. The latter can
-// safely try the next configured route.
+// recoverableProvider400 distinguishes a provider-backend-declined (recoverable
+// with the same model) from a truly bad client request (must not retry).
 func recoverableProvider400(body []byte) bool {
 	lower := bytes.ToLower(body)
 	return bytes.Contains(lower, []byte("degraded")) ||
@@ -916,6 +971,9 @@ func loadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 	b = expandEnv(b)
+	if err := validateNoLegacyRoutingKeys(b); err != nil {
+		return nil, err
+	}
 	var c Config
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, err
@@ -938,24 +996,15 @@ func loadConfig(path string) (*Config, error) {
 		// are intentionally retired so provider imitation prompts can never
 		// override the central Kabir's Second Brain identity.
 		r.SystemPrepend = ""
-		for i := range r.Fallbacks {
-			r.Fallbacks[i].SystemPrepend = ""
-		}
 		c.Routes[k] = r
 	}
 	for k, r := range c.AliasRoutes {
 		r.SystemPrepend = ""
-		for i := range r.Fallbacks {
-			r.Fallbacks[i].SystemPrepend = ""
-		}
 		c.AliasRoutes[k] = r
 	}
 
 	for k, r := range c.Aliases {
 		r.SystemPrepend = ""
-		for i := range r.Fallbacks {
-			r.Fallbacks[i].SystemPrepend = ""
-		}
 		c.Aliases[k] = r
 	}
 

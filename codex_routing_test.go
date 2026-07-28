@@ -62,7 +62,7 @@ func TestResponseModelChainAcceptsProviderModelIDs(t *testing.T) {
 
 func TestResponseModelChainRejectsBareCodexModelIDs(t *testing.T) {
 	s := testServer(codexTestConfig())
-	for _, bare := range []string{"opus", "sonnet", "haiku", "sol", "terra", "luna", "unknown"} {
+	for _, bare := range []string{"sol", "terra", "luna", "unknown"} {
 		t.Run(bare, func(t *testing.T) {
 			_, err := s.responseModelChain(bare)
 			if err == nil {
@@ -72,28 +72,19 @@ func TestResponseModelChainRejectsBareCodexModelIDs(t *testing.T) {
 	}
 }
 
-func TestResponseModelChainStripsFallbackFieldsFromCodexModels(t *testing.T) {
+func TestResponseModelChainReturnsExactlyOneModel(t *testing.T) {
 	cfg := codexTestConfig()
-	// Inject a Codex-keyed model with fallback fields. The Codex branch must
-	// strip them so no multi-model chain is built.
-	cfg.Models["nvidia/z-ai/glm-5.2"] = ModelCapability{
-		Enabled: true, Provider: "nvidia", Model: "z-ai/glm-5.2",
-		StreamingSupport: true, ToolCallSupport: true,
-		FallbackModel:       "opencode/big-pickle",
-		FallbackModels:      []string{"opencode/big-pickle"},
-		ImageFallbackModels: []string{"opencode/big-pickle"},
-	}
 	s := testServer(cfg)
 	chain, err := s.responseModelChain("nvidia/z-ai~sglm-5.2")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(chain) != 1 {
-		t.Fatalf("chain = %+v, want exactly one model (fallback fields must be stripped)", chain)
+		t.Fatalf("chain = %+v, want exactly one model", chain)
 	}
 }
 
-func TestConfiguredSelectedCodexModelsHaveNoFallbackChains(t *testing.T) {
+func TestConfiguredSelectedCodexModelsRouteExactly(t *testing.T) {
 	raw, err := os.ReadFile("config.json")
 	if err != nil {
 		t.Fatal(err)
@@ -126,8 +117,6 @@ func TestConfiguredSelectedCodexModelsHaveNoFallbackChains(t *testing.T) {
 		if chain[0].Capability.ImageInputSupport != expected.images {
 			t.Fatalf("%s image support = %v, want %v", selected, chain[0].Capability.ImageInputSupport, expected.images)
 		}
-		if chain[0].Fallback || chain[0].ImageOnly {
-			t.Fatalf("%s was unexpectedly marked as an internal fallback: %+v", selected, chain[0])
-		}
+		_ = chain
 	}
 }

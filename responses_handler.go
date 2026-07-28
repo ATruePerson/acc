@@ -367,7 +367,6 @@ func (s *server) executeUpstream(
 	logit func(routeModel string, status, in, out int, effort string),
 	w http.ResponseWriter,
 ) (*http.Response, resolvedModel, error) {
-	// Use only the first route - no fallbacks
 	if len(routes) == 0 {
 		return nil, resolvedModel{}, fmt.Errorf("no routes available")
 	}
@@ -395,7 +394,7 @@ func (s *server) executeUpstream(
 	}
 	requestForRoute.MaxTokens = boundedOutputTokens(or.MaxTokens, currentRoute.MaxTokens)
 	requestForRoute.ReasoningEffort = ""
-	effortExtra, err := applyReasoningTarget(requestForRoute, activeRoute, requestedReasoningEffort)
+	effortExtra, err := applyReasoningTarget(requestForRoute, activeRoute, or.ReasoningEffort)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		logit(currentRoute.Model, http.StatusBadRequest, 0, 0, "")
@@ -461,18 +460,18 @@ func (s *server) executeUpstream(
 		return nil, resolvedModel{}, fmt.Errorf("upstream: no response")
 	}
 
-	// On provider failures, return real upstream error (no fallback)
-	shouldFallback := resp.StatusCode == 429 || resp.StatusCode >= 500
+	// Return user-friendly upstream error
+	isDegraded := resp.StatusCode == 429 || resp.StatusCode >= 500
 	var failureBody []byte
-	if !shouldFallback && resp.StatusCode == 400 {
+	if !isDegraded && resp.StatusCode == 400 {
 		failureBody, _ = io.ReadAll(resp.Body)
 		resp.Body.Close()
 		resp.Body = io.NopCloser(bytes.NewReader(failureBody))
 		if recoverableProvider400(failureBody) {
-			shouldFallback = true
+			isDegraded = true
 		}
 	}
-	if shouldFallback {
+	if isDegraded {
 		status := resp.StatusCode
 		b := failureBody
 		if b == nil {
@@ -496,7 +495,7 @@ func (s *server) executeUpstream(
 	// Time-to-first-token guard (streaming only): a route that returns 200
 	// but emits no token within firstTokenTimeout is treated as stalled.
 	if requestForRoute.Stream && resp != nil && resp.StatusCode < 400 {
-		reader, timedOut := awaitFirstByte(resp.Body, firstTokenTimeout)
+		reader, timedOut, streamErr := awaitFirstByte(resp.Body, firstTokenTimeout)
 		if timedOut {
 			resp.Body.Close()
 			resp = nil
@@ -504,6 +503,14 @@ func (s *server) executeUpstream(
 			logit(currentRoute.Model, 504, 0, 0, requestForRoute.ReasoningEffort)
 			httpErr(w, 504, fmt.Sprintf("⌛ %s gave no response in time. Try again or switch models.", currentRoute.Model))
 			return nil, resolvedModel{}, fmt.Errorf("upstream timeout")
+		}
+		if streamErr != nil {
+			resp.Body.Close()
+			resp = nil
+			log.Printf("empty stream from %s/%s: %v", currentRoute.Provider, currentRoute.Model, streamErr)
+			logit(currentRoute.Model, 502, 0, 0, requestForRoute.ReasoningEffort)
+			httpErr(w, 502, fmt.Sprintf("⚠️ %s returned an empty response. Try again or switch models.", currentRoute.Model))
+			return nil, resolvedModel{}, fmt.Errorf("upstream: empty response")
 		}
 		resp.Body = io.NopCloser(reader)
 	}
@@ -880,7 +887,7 @@ func streamTranslateResponsesWithCompletion(w http.ResponseWriter, body io.Reade
 
 	status := "completed"
 	event := "response.completed"
-	if scanErr != nil || !sawDone {
+	if scanErr != nil || !sawDone || len(completedItems) == 0 {
 		status = "incomplete"
 		event = "response.incomplete"
 	}
@@ -956,15 +963,6 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		logit("error", 400, 0, 0, "")
 		return
 	}
-	// Codex resolves exactly one provider/model per request. Reject any chain
-	// that includes fallback or image-fallback entries.
-	for _, r := range routes[1:] {
-		if r.Fallback || r.ImageOnly {
-			httpErr(w, 400, fmt.Sprintf("Codex model %q must not configure fallback chains", req.Model))
-			logit("error", 400, 0, 0, "")
-			return
-		}
-	}
 	routes, err = selectResponseModelChainForInput(&req, routes, estimateResponsesInputTokens(requestForSizing))
 	if err != nil {
 		httpErr(w, 400, err.Error())
@@ -994,8 +992,8 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		logit(primary.Route.Model, 400, 0, 0, "")
 		return
 	}
-	// executeUpstream applies each concrete route's overrides. Restore the
-	// client controls here so a fallback cannot inherit primary-only settings.
+	// executeUpstream applies each concrete route's overrides. Restore
+	// client controls after the route's defaults are applied.
 	or.Temperature = req.Temperature
 	or.TopP = req.TopP
 	or.MaxTokens = req.MaxOutputTokens
@@ -1008,7 +1006,7 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setBackendHeaders(w, req.Model, activeRoute, requestedEffort)
-	log.Printf("responses: model=%s -> %s/%s effort=%s fallback=%t", req.Model, activeRoute.Route.Provider, activeRoute.Route.Model, backendEffort(activeRoute, requestedEffort), activeRoute.Fallback)
+	log.Printf("responses: model=%s -> %s/%s effort=%s", req.Model, activeRoute.Route.Provider, activeRoute.Route.Model, backendEffort(activeRoute, requestedEffort))
 	defer func() {
 		if resp != nil && resp.Body != nil {
 			resp.Body.Close()
@@ -1099,7 +1097,6 @@ func setBackendHeaders(w http.ResponseWriter, requestedModel string, active reso
 	w.Header().Set("X-ACC-Requested-Model", requestedModel)
 	w.Header().Set("X-ACC-Backend-Provider", active.Route.Provider)
 	w.Header().Set("X-ACC-Backend-Model", active.Route.Model)
-	w.Header().Set("X-ACC-Fallback", fmt.Sprintf("%t", active.Fallback))
 	w.Header().Set("X-ACC-Capability-Reroute", fmt.Sprintf("%t", active.CapabilityReroute))
 	if requestedEffort != "" {
 		w.Header().Set("X-ACC-Requested-Effort", requestedEffort)

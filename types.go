@@ -63,7 +63,7 @@ type Route struct {
 	// An empty target intentionally omits reasoning_effort (Minimal).
 	Reasoning map[string]ReasoningTarget `json:"reasoning,omitempty"`
 	// Toolcalling indicates whether the route supports tool calls.
-	Toolcalling *bool   `json:"toolcalling,omitempty"`
+	Toolcalling *bool `json:"toolcalling,omitempty"`
 }
 
 type ModelCapability struct {
@@ -71,8 +71,8 @@ type ModelCapability struct {
 	Description string `json:"description,omitempty"`
 	// CatalogPriority controls the model picker order. Lower values appear first.
 	CatalogPriority int `json:"catalog_priority,omitempty"`
-	// CatalogVisible defaults to true. Benchmark and fallback-only candidates
-	// remain directly routable when false without cluttering the client menu.
+	// CatalogVisible defaults to true. Invisible models remain routable
+	// without cluttering the client menu.
 	CatalogVisible *bool `json:"catalog_visible,omitempty"`
 	// Route references Config.Routes. Provider+Model can instead define a direct
 	// selectable model without duplicating a named family route.
@@ -82,13 +82,13 @@ type ModelCapability struct {
 
 	Reasoning map[string]ReasoningTarget `json:"reasoning,omitempty"`
 
-	ToolCallSupport   bool     `json:"tool_call_support"`
-	StreamingSupport  bool     `json:"streaming_support"`
-	ImageInputSupport bool     `json:"image_input_support"`
-	FileInputSupport  bool     `json:"file_input_support"`
-	MaxContext        int      `json:"max_context"`
-	MaxOutput         int      `json:"max_output"`
-	Enabled           bool     `json:"enabled"`
+	ToolCallSupport      bool     `json:"tool_call_support"`
+	StreamingSupport     bool     `json:"streaming_support"`
+	ImageInputSupport    bool     `json:"image_input_support"`
+	FileInputSupport     bool     `json:"file_input_support"`
+	MaxContext           int      `json:"max_context"`
+	MaxOutput            int      `json:"max_output"`
+	Enabled              bool     `json:"enabled"`
 }
 
 type ReasoningTarget struct {

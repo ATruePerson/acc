@@ -48,13 +48,13 @@ func TestCodexCatalogKeepsSameUpstreamModelDistinctAcrossProviders(t *testing.T)
 	}
 }
 
-func TestResponsesRealModelIDRoutesExactlyWithoutClaudeFallback(t *testing.T) {
+func TestResponsesRealModelIDRoutesExactly(t *testing.T) {
 	s := testServer(codexTestConfig())
 	chain, err := s.responseModelChain("nvidia/z-ai~sglm-5.2")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(chain) != 1 || chain[0].Route.Provider != "nvidia" || chain[0].Route.Model != "z-ai/glm-5.2" || chain[0].Fallback {
+	if len(chain) != 1 || chain[0].Route.Provider != "nvidia" || chain[0].Route.Model != "z-ai/glm-5.2" {
 		t.Fatalf("exact real-model chain = %+v", chain)
 	}
 }

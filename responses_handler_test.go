@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,9 +18,9 @@ type mockTripper struct {
 }
 
 func TestUpstreamHTTPClientTimesOutWaitingForHeaders(t *testing.T) {
-	oldTimeout := firstTokenTimeout
-	firstTokenTimeout = 40 * time.Millisecond
-	defer func() { firstTokenTimeout = oldTimeout }()
+	oldTimeout := responseHeaderTimeout
+	responseHeaderTimeout = 40 * time.Millisecond
+	defer func() { responseHeaderTimeout = oldTimeout }()
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(250 * time.Millisecond)
@@ -186,6 +187,77 @@ func TestStreamTranslateResponsesUsesCodexEvents(t *testing.T) {
 	}
 	if in != 3 || out != 4 {
 		t.Fatalf("usage = %d/%d, want 3/4", in, out)
+	}
+}
+
+func TestStreamTranslateResponsesEmptyBodyEmitsIncomplete(t *testing.T) {
+	w := httptest.NewRecorder()
+	_, _ = streamTranslateResponses(w, strings.NewReader(""), "test-model")
+	body := w.Body.String()
+
+	if !strings.Contains(body, "event: response.created") {
+		t.Fatal("expected response.created even on empty body")
+	}
+	if !strings.Contains(body, "event: response.in_progress") {
+		t.Fatal("expected response.in_progress even on empty body")
+	}
+	if !strings.Contains(body, `"status":"incomplete"`) {
+		t.Fatalf("expected incomplete status on empty body:\n%s", body)
+	}
+	if !strings.Contains(body, "event: response.incomplete") {
+		t.Fatalf("expected response.incomplete event on empty body:\n%s", body)
+	}
+	if strings.Contains(body, "event: response.completed") {
+		t.Fatal("unexpected response.completed on empty body")
+	}
+}
+
+func TestStreamTranslateResponsesScannerErrorEmitsIncomplete(t *testing.T) {
+	partial := `data: {"choices":[{"delta":{"content":"partial"}}]}` + "\n\n"
+	body := io.MultiReader(
+		strings.NewReader(partial),
+		&errReader{err: errors.New("simulated scan failure")},
+	)
+
+	w := httptest.NewRecorder()
+	_, _ = streamTranslateResponses(w, body, "test-model")
+	out := w.Body.String()
+
+	if !strings.Contains(out, "event: response.incomplete") {
+		t.Fatalf("expected response.incomplete after scanner error:\n%s", out)
+	}
+	if !strings.Contains(out, `"status":"incomplete"`) {
+		t.Fatalf("expected status incomplete after scanner error:\n%s", out)
+	}
+	if !strings.Contains(out, `"delta":"partial"`) {
+		t.Fatalf("expected partial text delta:\n%s", out)
+	}
+	if strings.Contains(out, "event: response.completed") {
+		t.Fatal("unexpected response.completed after scanner error")
+	}
+}
+
+
+
+func TestStreamTranslateResponsesDoneOnlyEmitsIncomplete(t *testing.T) {
+	w := httptest.NewRecorder()
+	_, _ = streamTranslateResponses(w, strings.NewReader("data: [DONE]\n\n"), "test-model")
+	body := w.Body.String()
+
+	if !strings.Contains(body, "event: response.created") {
+		t.Fatal("expected response.created")
+	}
+	if !strings.Contains(body, "event: response.in_progress") {
+		t.Fatal("expected response.in_progress")
+	}
+	if !strings.Contains(body, "event: response.incomplete") {
+		t.Fatalf("expected response.incomplete for DONE-only stream:\n%s", body)
+	}
+	if !strings.Contains(body, `"status":"incomplete"`) {
+		t.Fatalf("expected incomplete status for DONE-only stream:\n%s", body)
+	}
+	if strings.Contains(body, "event: response.completed") {
+		t.Fatal("unexpected response.completed for DONE-only stream")
 	}
 }
 

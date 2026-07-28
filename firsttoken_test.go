@@ -11,7 +11,10 @@ import (
 // replays every byte (nothing lost) and does not report a timeout.
 func TestAwaitFirstByteFast(t *testing.T) {
 	src := strings.NewReader("data: {\"hello\":1}\n\n")
-	r, timedOut := awaitFirstByte(src, 2*time.Second)
+	r, timedOut, err := awaitFirstByte(src, 2*time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if timedOut {
 		t.Fatal("did not expect timeout for an immediately-readable source")
 	}
@@ -31,7 +34,10 @@ func TestAwaitFirstByteTimeout(t *testing.T) {
 	defer pw.Close()
 
 	start := time.Now()
-	r, timedOut := awaitFirstByte(pr, 50*time.Millisecond)
+	r, timedOut, err := awaitFirstByte(pr, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if !timedOut {
 		t.Fatal("expected timeout when source produces no byte")
 	}
@@ -52,7 +58,10 @@ func TestAwaitFirstByteJustInTime(t *testing.T) {
 		pw.Write([]byte("x"))
 		pw.Close()
 	}()
-	r, timedOut := awaitFirstByte(pr, 500*time.Millisecond)
+	r, timedOut, err := awaitFirstByte(pr, 500*time.Millisecond)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if timedOut {
 		t.Fatal("byte arrived before deadline; should not time out")
 	}

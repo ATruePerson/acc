@@ -14,7 +14,9 @@ By default, ACC updates the executable currently running when it is a normal `ac
 ACC_BINDIR="$HOME/bin" acc update
 ```
 
-The updater changes only the ACC executable. It does not edit `~/.config/acc/config.json`, provider keys, Codex settings, subscription baselines, login files, or authentication state.
+The updater changes only the ACC executable. It does not edit `~/.config/acc/`
+config files (`providers.json`, `claude/`, `codex/`), provider keys, Codex
+settings, subscription baselines, login files, or authentication state.
 
 ACC release binaries are currently provided for:
 

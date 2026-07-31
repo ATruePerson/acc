@@ -14,6 +14,7 @@ before changing `acc codex`.
 | :--- | :--- | :--- |
 | `main.go` | HTTP server, routers, model listings, command lifecycle | `handleMessages`, `handleModels`, `routeFor` |
 | `model_registry.go` | Codex capabilities, exact effort validation, explicit fallback chain | `responseModelChain`, `applyReasoningTarget` |
+| `config_load.go` | Split config merge (`providers` + `claude` + `codex`) | `loadConfig`, `writeDefaultSplitConfig` |
 | `persona.go` / `system_prompts/persona.md` | ACC Second Brain identity (markdown source + loader) | `accPersona`, `requestWithACCPersona` |
 | `translate.go` | Protocol translation (messages, tools, images) | `translateRequest`, `translateMessage`, `translateResponse`, `bucketForBudget` |
 | `stream.go` | Real-time SSE translator for streaming requests | `streamTranslate` (extracts usage from final chunks) |
@@ -24,7 +25,12 @@ before changing `acc codex`.
 ## Active environment & paths
 
 - **Binary**: `/Users/kabir/.local/bin/acc-proxy`
-- **Config**: `/Users/kabir/.config/acc/config.json`
+- **Config root**: `/Users/kabir/.config/acc/`
+  - `providers.json` — port, providers, global `system_prepend`
+  - `claude/config.json` — Claude Code `alias_routes`
+  - `claude/system_prompts/` — Fable / Opus / Sonnet / Haiku prompts
+  - `codex/config.json` — Codex `models` catalog
+  - `system_prompts/persona.md` — Second Brain persona
 - **API keys / env**: `/Users/kabir/.config/acc/.env`
 - **Proxy log**: `/Users/kabir/.config/acc/proxy.log`
 - **Persistent runs log**: `/Users/kabir/acc/test_runs.jsonl`
@@ -43,8 +49,10 @@ The streaming SSE translator extracts `PromptTokens` and `CompletionTokens` in r
 ```
 
 ### 2. Effort & reasoning mapping
-Anthropic requests with a `thinking` block map through `bucketForBudget` for
-legacy clients. Codex Responses requests use the selected model's exact
+Anthropic requests with a `thinking` block can map through `bucketForBudget`
+when an optional top-level `effort` table exists. Locked Claude aliases ignore
+that and use the route's fixed `reasoning_effort` / `extra_body` instead.
+Codex Responses requests use the selected model's exact
 `models.<id>.reasoning` entry. Unsupported values must return an error. Never
 silently lower, rename, or ignore a requested Codex effort.
 
@@ -71,17 +79,16 @@ A route's `extra_body` is **flat-merged to the top level** of the outgoing reque
 - **MiniMax tools:** MiniMax M3 returns `DEGRADED function cannot be invoked` for function calls. Keep its Codex `tool_call_support` false and exclude it from any request carrying tools; never silently strip tools to make the fallback work.
 - **big-pickle** (opencode) is a codename for `deepseek-v4-flash` — a reasoning model that returns EMPTY content if `max_tokens` is too low (spends it all in `reasoning_content`).
 
-### 6. Routing: `models`, `routes`, and `aliases`
+### 6. Routing: split Claude vs Codex config
 
-- `models` is the Codex-visible capability registry and exact stable-ID route.
-- `routes` remain reusable family definitions.
-- `alias_routes` (`fable`/`opus`/`sonnet`/`haiku`) are Claude Code aliases. Each
-  may set `system_prepend` to a file under `system_prompts/` (e.g.
-  `@system_prompts/Fable`). When set, ACC skips its Second Brain persona for
-  that alias and injects the file instead.
-- Only ACC's central persona (`system_prompts/persona.md`) plus user-owned
-  global `system_prepend` apply outside those alias files.
-- Config is hot-reloaded per request (no restart needed for config-only edits); Go source changes need a rebuild.
+- `providers.json` holds shared `port`, `providers`, and global `system_prepend`.
+- `codex/config.json` `models` is the Codex-visible capability registry.
+- `claude/config.json` `alias_routes` (`fable`/`opus`/`sonnet`/`haiku`) are Claude
+  Code aliases. Each may set `system_prepend` to `@system_prompts/...` resolved
+  under `claude/`. When set, ACC skips its Second Brain persona for that alias.
+- Shared persona remains `system_prompts/persona.md` at the config root.
+- Config is hot-reloaded per request across all three files; Go source changes
+  need a rebuild.
 
 ## Dev cheat sheet
 

@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
+
+	"github.com/ATruePerson/acc/claude"
+	"github.com/ATruePerson/acc/codex"
 )
 
 type resolvedModel struct {
@@ -12,43 +14,6 @@ type resolvedModel struct {
 	Capability        ModelCapability
 	Route             Route
 	CapabilityReroute bool
-}
-
-func enabledModelIDs(cfg *Config) []string {
-	ids := make([]string, 0, len(cfg.Models))
-	for id, capability := range cfg.Models {
-		if capability.Enabled {
-			ids = append(ids, id)
-		}
-	}
-	sort.Strings(ids)
-	return ids
-}
-
-func resolveCapabilityRoute(cfg *Config, id string, capability ModelCapability) (Route, error) {
-	var route Route
-	if capability.Route != "" {
-		var ok bool
-		route, ok = cfg.Routes[capability.Route]
-		if !ok {
-			return Route{}, fmt.Errorf("model %q references unavailable route %q", id, capability.Route)
-		}
-	} else {
-		route = Route{Provider: capability.Provider, Model: capability.Model}
-	}
-	if route.Provider == "" || route.Model == "" {
-		return Route{}, fmt.Errorf("model %q has no provider/model route", id)
-	}
-	if _, ok := cfg.Providers[route.Provider]; !ok {
-		return Route{}, fmt.Errorf("model %q uses unavailable provider %q", id, route.Provider)
-	}
-	if len(capability.Reasoning) > 0 {
-		route.Reasoning = capability.Reasoning
-	}
-	if capability.MaxOutput > 0 && route.MaxTokens == 0 {
-		route.MaxTokens = capability.MaxOutput
-	}
-	return route, nil
 }
 
 func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
@@ -59,9 +24,9 @@ func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
 	// If not found, decode the slug and try matching by provider/model against
 	// all configured models to find the config key.
 	if !foundInModels {
-		if provider, upstreamModel, ok := decodeCodexSlug(modelID); ok {
+		if provider, upstreamModel, ok := codex.DecodeCodexSlug(modelID); ok {
 			for key, cap := range cfg.Models {
-				route, err := resolveCapabilityRoute(cfg, key, cap)
+				route, err := codex.ResolveCapabilityRoute(cfg, key, cap)
 				if err == nil && route.Provider == provider && route.Model == upstreamModel {
 					capability = cap
 					configKey = key
@@ -75,7 +40,7 @@ func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
 		if !capability.Enabled {
 			return nil, fmt.Errorf("selected model %q is disabled", modelID)
 		}
-		route, err := resolveCapabilityRoute(cfg, configKey, capability)
+		route, err := codex.ResolveCapabilityRoute(cfg, configKey, capability)
 		if err != nil {
 			return nil, err
 		}
@@ -103,7 +68,7 @@ func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
 			if !configured.Enabled {
 				continue
 			}
-			route, err := resolveCapabilityRoute(cfg, id, configured)
+			route, err := codex.ResolveCapabilityRoute(cfg, id, configured)
 			if err == nil && route.Provider == provider && route.Model == upstreamModel {
 				capability = configured
 				capability.Provider, capability.Model, capability.Route = provider, upstreamModel, ""
@@ -132,7 +97,7 @@ func (s *server) responseModelChain(modelID string) ([]resolvedModel, error) {
 }
 
 func splitRealCodexModelID(modelID string) (provider, model string, ok bool) {
-	p, m, ok2 := decodeCodexSlug(modelID)
+	p, m, ok2 := codex.DecodeCodexSlug(modelID)
 	if ok2 {
 		if _, isAlias := aliasFamily(normalizeModelID(p)); !isAlias {
 			return p, m, true
@@ -148,23 +113,12 @@ func splitRealCodexModelID(modelID string) (provider, model string, ok bool) {
 	return provider, model, true
 }
 
-func supportedEfforts(capability ModelCapability) []string {
-	order := []string{"minimal", "low", "medium", "high", "xhigh", "max"}
-	levels := make([]string, 0, len(capability.Reasoning))
-	for _, effort := range order {
-		if _, ok := capability.Reasoning[effort]; ok {
-			levels = append(levels, effort)
-		}
-	}
-	return levels
-}
-
 func validateRequestedEffort(target resolvedModel, effort string) error {
 	if effort == "" {
 		return nil
 	}
 	if target.Capability.DisplayName == "" {
-		_, err := exactProviderReasoningEffort(target.Route.Provider, effort)
+		_, err := claude.ExactProviderReasoningEffort(target.Route.Provider, effort)
 		return err
 	}
 	if _, ok := target.Capability.Reasoning[effort]; !ok {
@@ -181,7 +135,7 @@ func applyReasoningTarget(req *OpenAIRequest, target resolvedModel, requested st
 		return nil, nil
 	}
 	if target.Capability.DisplayName == "" {
-		effort, err := exactProviderReasoningEffort(target.Route.Provider, requested)
+		effort, err := claude.ExactProviderReasoningEffort(target.Route.Provider, requested)
 		if err != nil {
 			return nil, err
 		}

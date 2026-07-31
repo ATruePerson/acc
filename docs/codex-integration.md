@@ -67,7 +67,7 @@ The shipped Codex registry contains exactly these three explicitly enabled model
 2. `openrouter/poolside/laguna-s-2.1:free` — Poolside Laguna S 2.1 through OpenRouter, configured for coding and creative writing.
 3. `nvidia/stepfun-ai/step-3.7-flash` — Step 3.7 Flash through NVIDIA, with text and image input.
 
-They resolve directly to their selected provider and upstream model. The Codex registry does not attach hidden fallback or image-reroute chains to them. Additional models appear only after they are explicitly added and enabled in `config.json`; authenticated provider discovery does not automatically flood the selector.
+They resolve directly to their selected provider and upstream model. The Codex registry does not attach hidden fallback or image-reroute chains to them. Additional models appear only after they are explicitly added and enabled in `codex/config.json`; authenticated provider discovery does not automatically flood the selector.
 
 Catalog IDs are deterministic, unique, provider-prefixed, and exclude the Claude aliases `opus`, `sonnet`, and `haiku`. Direct Codex IDs route exactly to their selected provider/model.
 
@@ -85,4 +85,4 @@ acc auth logout PROVIDER
 
 OAuth credentials are isolated by provider in macOS Keychain. ACC verifies that Codex authentication-like files are unchanged across lifecycle mutations and never prints their contents.
 
-For provider trouble, run `acc auth status PROVIDER`, then log out and log in again. For an API-key rotation, revoke the old key at the provider, update the private `~/.config/acc/.env`, and restart ACC. Never paste a key into `config.json`, `config.toml`, a model catalog, logs, an issue, or a commit.
+For provider trouble, run `acc auth status PROVIDER`, then log out and log in again. For an API-key rotation, revoke the old key at the provider, update the private `~/.config/acc/.env`, and restart ACC. Never paste a key into JSON config, `config.toml`, a model catalog, logs, an issue, or a commit.

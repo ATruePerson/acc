@@ -1,4 +1,4 @@
-package main
+package codex
 
 import (
 	"encoding/json"
@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/ATruePerson/acc/claude"
 )
 
 const (
@@ -20,6 +22,16 @@ func encodeCodexSlug(provider, upstreamModel string) string {
 	encoded := strings.ReplaceAll(upstreamModel, "~", "~~")
 	encoded = strings.ReplaceAll(encoded, "/", "~s")
 	return provider + "/" + encoded
+}
+
+// DecodeCodexSlug decodes a single-slash slug back to provider and upstreamModel.
+func DecodeCodexSlug(slug string) (provider, upstreamModel string, ok bool) {
+	return decodeCodexSlug(slug)
+}
+
+// EncodeCodexSlug encodes provider/upstreamModel into exactly one slash.
+func EncodeCodexSlug(provider, upstreamModel string) string {
+	return encodeCodexSlug(provider, upstreamModel)
 }
 
 // decodeCodexSlug decodes a single-slash slug back to provider and upstreamModel.
@@ -76,6 +88,32 @@ func invalidateCodexModelsCache() {
 	os.Remove(filepath.Join(codexDir, "models_cache.json"))
 }
 
+type NamedModel = codexNamedModel
+
+func NamedModels(cfg *Config) []NamedModel {
+	return NamedModelsWithAuth(cfg, nil)
+}
+
+func NamedModelsWithAuth(cfg *Config, auth AuthManager) []NamedModel {
+	return codexNamedModelsWithAuth(cfg, auth)
+}
+
+func ConfigureApp(configPath, catalogPath, restorePath, baseURL, model string, cfg *Config) error {
+	return configureCodexApp(configPath, catalogPath, restorePath, baseURL, model, cfg)
+}
+
+func ConfigureAppWithAuth(configPath, catalogPath, restorePath, baseURL, model string, cfg *Config, auth AuthManager) error {
+	return configureCodexAppWithAuth(configPath, catalogPath, restorePath, baseURL, model, cfg, auth)
+}
+
+func IsModel(cfg *Config, model string) bool {
+	return isCodexModel(cfg, model)
+}
+
+func IsModelWithAuth(cfg *Config, auth AuthManager, model string) bool {
+	return isCodexModelWithAuth(cfg, auth, model)
+}
+
 type codexNamedModel struct {
 	ID         string
 	Display    string
@@ -87,7 +125,7 @@ func codexNamedModels(cfg *Config) []codexNamedModel {
 	return codexNamedModelsWithAuth(cfg, nil)
 }
 
-func codexNamedModelsWithAuth(cfg *Config, auth *authManager) []codexNamedModel {
+func codexNamedModelsWithAuth(cfg *Config, auth AuthManager) []codexNamedModel {
 	_ = auth
 	byID := make(map[string]codexNamedModel, len(cfg.Models))
 	for _, id := range enabledModelIDs(cfg) {
@@ -95,7 +133,7 @@ func codexNamedModelsWithAuth(cfg *Config, auth *authManager) []codexNamedModel 
 		if capability.CatalogVisible != nil && !*capability.CatalogVisible {
 			continue
 		}
-		route, err := resolveCapabilityRoute(cfg, id, capability)
+		route, err := ResolveCapabilityRoute(cfg, id, capability)
 		if err != nil {
 			continue
 		}
@@ -134,7 +172,7 @@ func codexModelCatalogEntries(cfg *Config) []map[string]any {
 	return codexModelCatalogEntriesWithAuth(cfg, nil)
 }
 
-func codexModelCatalogEntriesWithAuth(cfg *Config, auth *authManager) []map[string]any {
+func codexModelCatalogEntriesWithAuth(cfg *Config, auth AuthManager) []map[string]any {
 	models := codexNamedModelsWithAuth(cfg, auth)
 	entries := make([]map[string]any, 0, len(models))
 	for i, model := range models {
@@ -172,7 +210,7 @@ func codexModelCatalogEntriesWithAuth(cfg *Config, auth *authManager) []map[stri
 			"visibility": "list", "supported_in_api": true, "priority": i + 1,
 			"additional_speed_tiers": []string{}, "service_tiers": []any{},
 			"availability_nux": nil, "upgrade": nil,
-			"base_instructions": accPersonaForRuntime(model.Route.Provider, model.Route.Model, personaRuntimeCodex),
+			"base_instructions": claude.AccPersonaForRuntime(model.Route.Provider, model.Route.Model, claude.PersonaRuntimeCodex),
 			"model_messages": map[string]any{
 				"instructions_template": nil, "instructions_variables": nil, "approvals": nil,
 			},
@@ -216,7 +254,7 @@ func codexModelCatalogJSON(cfg *Config) []byte {
 	return codexModelCatalogJSONWithAuth(cfg, nil)
 }
 
-func codexModelCatalogJSONWithAuth(cfg *Config, auth *authManager) []byte {
+func codexModelCatalogJSONWithAuth(cfg *Config, auth AuthManager) []byte {
 	b, _ := json.MarshalIndent(map[string]any{"models": codexModelCatalogEntriesWithAuth(cfg, auth)}, "", "  ")
 	return append(b, '\n')
 }
@@ -235,13 +273,17 @@ func configureCodexApp(configPath, catalogPath, restorePath, baseURL, model stri
 	return configureCodexAppWithAuth(configPath, catalogPath, restorePath, baseURL, model, cfg, nil)
 }
 
-func configureCodexAppWithAuth(configPath, catalogPath, restorePath, baseURL, model string, cfg *Config, auth *authManager) error {
+func configureCodexAppWithAuth(configPath, catalogPath, restorePath, baseURL, model string, cfg *Config, auth AuthManager) error {
 	tx, err := beginConfigureCodexApp(configPath, catalogPath, restorePath, codexRestartPathForBaseline(restorePath), baseURL, model, cfg, auth)
 	if err != nil {
 		return err
 	}
 	tx.Commit()
 	return nil
+}
+
+func RestoreApp(configPath, catalogPath, restorePath string) error {
+	return restoreCodexApp(configPath, catalogPath, restorePath)
 }
 
 func restoreCodexApp(configPath, catalogPath, restorePath string) error {
@@ -262,7 +304,7 @@ func isCodexModel(cfg *Config, model string) bool {
 	return isCodexModelWithAuth(cfg, nil, model)
 }
 
-func isCodexModelWithAuth(cfg *Config, auth *authManager, model string) bool {
+func isCodexModelWithAuth(cfg *Config, auth AuthManager, model string) bool {
 	for _, candidate := range codexNamedModelsWithAuth(cfg, auth) {
 		if model == candidate.ID {
 			return true
@@ -308,6 +350,10 @@ func removeACCFromCodexConfig(original string) string {
 
 func legacyOpenCodexDetected(config string) bool {
 	return inspectCodexRouting(config).ActiveOpenCodex
+}
+
+func AtomicWriteFile(path string, data []byte, mode os.FileMode) error {
+	return atomicWriteFile(path, data, mode)
 }
 
 func atomicWriteFile(path string, data []byte, mode os.FileMode) error {

@@ -1,4 +1,4 @@
-package main
+package claude
 
 import (
 	"bufio"
@@ -126,7 +126,7 @@ func streamTranslate(w http.ResponseWriter, body io.Reader, model string) (int, 
 			if chunk.Usage.CompletionTokens > 0 {
 				outputTokens = chunk.Usage.CompletionTokens
 			}
-			if r := chunk.Usage.reasoningTokens(); r > 0 {
+			if r := chunk.Usage.ReasoningTokens(); r > 0 {
 				reasoningTokens = r
 			}
 		}

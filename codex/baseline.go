@@ -1,4 +1,4 @@
-package main
+package codex
 
 import (
 	"encoding/json"
@@ -31,6 +31,12 @@ type codexConfigureResult struct {
 	BaselineCreated bool
 	RestartRequired bool
 	AuthUnchanged   bool
+}
+
+type RestoreResult = codexRestoreResult
+
+func RestoreAppDetailed(configPath, catalogPath, baselinePath, restartPath string) (RestoreResult, error) {
+	return restoreCodexAppDetailed(configPath, catalogPath, baselinePath, restartPath)
 }
 
 type codexRestoreResult struct {

@@ -23,6 +23,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/ATruePerson/acc/claude"
 )
 
 // legacyRoutingKeys are field names from the old fallback system that must not
@@ -89,7 +91,7 @@ func main() {
 		return
 	}
 
-	cfgPath := flag.String("config", "", "path to config.json")
+	cfgPath := flag.String("config", "", "path to providers.json, config root, or legacy config.json")
 	envPath := flag.String("env", os.Getenv("HOME")+"/.config/acc/.env", "dotenv file with provider keys")
 	tuiFlag := flag.Bool("tui", false, "launch interactive TUI dashboard")
 	uiFlag := flag.Bool("ui", false, "launch web UI dashboard in Safari")
@@ -99,10 +101,12 @@ func main() {
 
 	path := *cfgPath
 	if path == "" {
-		if _, err := os.Stat("config.json"); err == nil {
+		if splitLayoutExists(".") {
+			path = providersFileName
+		} else if _, err := os.Stat("config.json"); err == nil {
 			path = "config.json"
 		} else {
-			path = os.Getenv("HOME") + "/.config/acc/config.json"
+			path = filepath.Join(os.Getenv("HOME"), ".config", "acc", providersFileName)
 		}
 	}
 
@@ -125,8 +129,8 @@ func main() {
 		auth:    auth,
 	}
 	s.cfg.Store(cfg)
-	if fi, statErr := os.Stat(path); statErr == nil {
-		s.cfgModNano.Store(fi.ModTime().UnixNano())
+	if mod, statErr := configSourcesModTime(path); statErr == nil {
+		s.cfgModNano.Store(mod)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/messages", s.handleMessages)
@@ -218,19 +222,17 @@ type server struct {
 	responses   map[string]*ResponsesResponse
 }
 
-// reloadIfChanged re-reads the config file when its modtime has advanced, so
-// edits to config.json (e.g. swapping a model) take effect on the next request
-// without restarting the proxy. A bad config is logged and ignored — the last
-// good config stays live.
+// reloadIfChanged re-reads split (or legacy) config files when any watched
+// source modtime advances. A bad config is logged and ignored — the last good
+// config stays live.
 func (s *server) reloadIfChanged() {
 	if s.cfgPath == "" {
 		return
 	}
-	fi, err := os.Stat(s.cfgPath)
+	mod, err := configSourcesModTime(s.cfgPath)
 	if err != nil {
 		return
 	}
-	mod := fi.ModTime().UnixNano()
 	if mod <= s.cfgModNano.Load() {
 		return
 	}
@@ -307,7 +309,7 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var or *OpenAIRequest
-	or, err = translateRequest(&ar, activeRoute, cfg)
+	or, err = claude.TranslateRequest(&ar, activeRoute, cfg)
 	if err != nil {
 		httpErr(w, 400, "translate: "+err.Error())
 		logit(activeRoute.Model, 400, 0, 0, 0, "")
@@ -485,7 +487,7 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		if streamReader == nil {
 			streamReader = resp.Body
 		}
-		inTokens, outTokens, reasoningOut := streamTranslate(w, streamReader, ar.Model)
+		inTokens, outTokens, reasoningOut := claude.StreamTranslate(w, streamReader, ar.Model)
 		logit(activeRoute.Model, resp.StatusCode, inTokens, outTokens, reasoningOut, or.ReasoningEffort)
 		return
 	}
@@ -497,7 +499,7 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		logit(activeRoute.Model, 502, 0, 0, 0, or.ReasoningEffort)
 		return
 	}
-	out := translateResponse(&oresp, ar.Model)
+	out := claude.TranslateResponse(&oresp, ar.Model)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(out)
 
@@ -505,7 +507,7 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if oresp.Usage != nil {
 		tokensIn = oresp.Usage.PromptTokens
 		tokensOut = oresp.Usage.CompletionTokens
-		reasoningOut = oresp.Usage.reasoningTokens()
+		reasoningOut = oresp.Usage.ReasoningTokens()
 	}
 	logit(activeRoute.Model, resp.StatusCode, tokensIn, tokensOut, reasoningOut, or.ReasoningEffort)
 }
@@ -944,55 +946,6 @@ func recoverableProvider400(body []byte) bool {
 }
 
 // ---------- Config ----------
-
-func loadConfig(path string) (*Config, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	b = expandEnv(b)
-	if err := validateNoLegacyRoutingKeys(b); err != nil {
-		return nil, err
-	}
-	var c Config
-	if err := json.Unmarshal(b, &c); err != nil {
-		return nil, err
-	}
-	if c.Port == 0 {
-		c.Port = 8787
-	}
-
-	baseDir := filepath.Dir(path)
-	setPersonaFilePath(resolvePersonaFile(baseDir))
-
-	resolved, err := resolveSystemPrepend(baseDir, c.SystemPrepend)
-	if err != nil {
-		return nil, err
-	}
-	c.SystemPrepend = resolved
-
-	for k, r := range c.Routes {
-		// Non-alias Routes keep ACC's central Second Brain persona. Alias routes
-		// may point at Claude imitation files under system_prompts/.
-		r.SystemPrepend = ""
-		c.Routes[k] = r
-	}
-	for k, r := range c.AliasRoutes {
-		resolved, err := resolveSystemPrepend(baseDir, r.SystemPrepend)
-		if err != nil {
-			return nil, fmt.Errorf("alias route %q: %w", k, err)
-		}
-		r.SystemPrepend = resolved
-		c.AliasRoutes[k] = r
-	}
-
-	for k, r := range c.Aliases {
-		r.SystemPrepend = ""
-		c.Aliases[k] = r
-	}
-
-	return &c, nil
-}
 
 func validateConfig(cfg *Config) error {
 	for slot, route := range cfg.Routes {

@@ -1,0 +1,22 @@
+{
+  "port": 9999,
+  "system_prepend": "Always respond in English unless the user explicitly writes in another language.",
+  "providers": {
+    "nvidia": {
+      "base_url": "https://integrate.api.nvidia.com/v1",
+      "api_key": "${NVIDIA_NIM_API_KEY}"
+    },
+    "gemini": {
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "api_key": "${GEMINI_API_KEY}"
+    },
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key": "${OPENROUTER_API_KEY}"
+    },
+    "opencode": {
+      "base_url": "https://opencode.ai/zen/v1",
+      "api_key": "${OPENCODE_API_KEY}"
+    }
+  }
+}

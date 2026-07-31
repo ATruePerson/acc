@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	_ "embed"
 	"flag"
 	"fmt"
 	"io"
@@ -15,6 +14,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/ATruePerson/acc/claude"
+	"github.com/ATruePerson/acc/codex"
 )
 
 // providerInfo describes a known upstream provider for the setup wizard,
@@ -52,7 +54,7 @@ func dispatch(args []string) bool {
 	case "models", "list":
 		cmdModels()
 	case "bench":
-		cmdBench()
+		claude.RunBench()
 	case "claude", "run":
 		cmdClaude(args[2:])
 	case "codex":
@@ -110,8 +112,10 @@ func accDir() string {
 	return filepath.Join(home, ".config", "acc")
 }
 
-func defaultEnvPath() string    { return filepath.Join(accDir(), ".env") }
-func defaultConfigPath() string { return filepath.Join(accDir(), "config.json") }
+func defaultEnvPath() string { return filepath.Join(accDir(), ".env") }
+
+// defaultConfigPath is the primary entry for the split config layout.
+func defaultConfigPath() string { return filepath.Join(accDir(), providersFileName) }
 
 // ---------- setup wizard ----------
 
@@ -154,15 +158,15 @@ func cmdSetup() {
 	}
 	fmt.Printf("  Saved %d key(s) to %s\n", len(keys), envPath)
 
-	cfgPath := defaultConfigPath()
-	if _, err := os.Stat(cfgPath); err == nil {
-		fmt.Printf("  Config already exists at %s — keeping it.\n", cfgPath)
+	cfgRoot := accDir()
+	if hasAnyConfig(cfgRoot) {
+		fmt.Printf("  Config already exists under %s — keeping it.\n", cfgRoot)
 	} else {
-		if err := os.WriteFile(cfgPath, []byte(defaultConfigJSON), 0644); err != nil {
-			fmt.Printf("  Could not write %s: %v\n", cfgPath, err)
+		if err := writeDefaultSplitConfig(cfgRoot); err != nil {
+			fmt.Printf("  Could not write default config under %s: %v\n", cfgRoot, err)
 			return
 		}
-		fmt.Printf("  Wrote default config to %s\n", cfgPath)
+		fmt.Printf("  Wrote default split config under %s\n", cfgRoot)
 	}
 
 	fmt.Print("\n  Testing your keys...\n\n")
@@ -282,7 +286,7 @@ func cmdModels() {
 		fmt.Printf("  anthropic/%-26s → %s (%s)\n", d.Canonical, d.Route.Model, d.Route.Provider)
 	}
 	if cfg != nil && len(cfg.Aliases) > 0 {
-		fmt.Print("\n  Your custom aliases (from config.json):\n\n")
+		fmt.Print("\n  Your custom aliases (from claude/config.json):\n\n")
 		var names []string
 		for k := range cfg.Aliases {
 			names = append(names, k)
@@ -294,12 +298,12 @@ func cmdModels() {
 		}
 	}
 	if cfg != nil && len(cfg.Models) > 0 {
-		fmt.Print("\n  Codex models (from config.json):\n\n")
-		for _, model := range codexNamedModels(cfg) {
+		fmt.Print("\n  Codex models (from codex/config.json):\n\n")
+		for _, model := range codex.NamedModels(cfg) {
 			fmt.Printf("  %-26s -> %s (%s)\n", model.ID, model.Route.Model, model.Route.Provider)
 		}
 	}
-	fmt.Print("\n  Or use the family names (opus / sonnet / haiku) — those follow config.json routes.\n\n")
+	fmt.Print("\n  Or use the family names (opus / sonnet / haiku) — those follow claude/config.json routes.\n\n")
 }
 
 // ---------- claude launcher ----------
@@ -587,8 +591,5 @@ func proxyExecutable(commandPath string) string {
 	return commandPath
 }
 
-// defaultConfigJSON is the config written by `acc setup`. Keeping it embedded
-// from config.json prevents setup and the live template from drifting apart.
-//
-//go:embed config.json
-var defaultConfigJSON string
+// defaultConfigJSON is the merged embedded split config for tests and tooling.
+var defaultConfigJSON = mergedDefaultConfigJSON()

@@ -17,7 +17,7 @@ OpenRouter, OpenCode, or another OpenAI-compatible provider.
 # Install the latest release. No Go toolchain needed.
 curl -fsSL https://raw.githubusercontent.com/ATruePerson/acc/main/scripts/install.sh | sh
 
-# Save provider keys and create ~/.config/acc/config.json.
+# Save provider keys and create the split config under ~/.config/acc/.
 acc setup
 
 # Start Claude Code through ACC.
@@ -170,14 +170,26 @@ preserving unrelated Codex providers; it does not read or move OpenCodex auth.
 
 ## Configuration
 
-ACC reads `~/.config/acc/config.json` by default. Claude aliases (`fable`,
-`opus`, `sonnet`, `haiku`) each point to one direct provider/model route with no
-automatic fallbacks. Provider errors return directly to the client — no silent
-model or provider switching. ACC hot-reloads the config file on every request;
-no restart needed for config-only changes.
+ACC reads the split config under `~/.config/acc/` by default:
 
-Provider keys belong in `~/.config/acc/.env`, never in `config.json` or Git.
-You can name any provider in `providers` as long as it exposes an
+```text
+~/.config/acc/
+  providers.json           # port, providers, global system_prepend
+  claude/config.json       # Claude Code alias_routes
+  claude/system_prompts/   # Fable, Opus, Sonnet, Haiku
+  codex/config.json        # Codex models catalog
+  system_prompts/persona.md
+  .env
+```
+
+Claude aliases (`fable`, `opus`, `sonnet`, `haiku`) each point to one direct
+provider/model route with no automatic fallbacks. Provider errors return
+directly to the client — no silent model or provider switching. ACC
+hot-reloads all three config files on every request; no restart needed for
+config-only changes.
+
+Provider keys belong in `~/.config/acc/.env`, never in JSON config files or Git.
+You can name any provider in `providers.json` as long as it exposes an
 OpenAI-compatible `/chat/completions` endpoint.
 
 Use a direct provider path to bypass family routing for one request:
@@ -233,9 +245,9 @@ fallback or model switching. These four are the only Claude aliases;
 `claude-writer` is obsolete.
 
 **Codex model IDs** (e.g. `nvidia/z-ai~sglm-5.2`, `opencode/big-pickle`). Codex
-uses exact provider-prefixed stable IDs from the `models` section of
-`config.json`. Each ID routes to exactly one provider/model with no alias lookup
-or fallback chain. Codex never uses Claude aliases.
+uses exact provider-prefixed stable IDs from `codex/config.json` `models`. Each
+ID routes to exactly one provider/model with no alias lookup or fallback chain.
+Codex never uses Claude aliases.
 
 **Direct provider path.** Any request to
 `anthropic/<provider>/<model>` (e.g. `anthropic/nvidia/z-ai/glm-5.2`) bypasses
@@ -248,10 +260,11 @@ routes. The editable source is [`system_prompts/persona.md`](system_prompts/pers
 `persona.go` only loads it and substitutes `{{backend}}`.
 
 Claude Code aliases (`fable`, `opus`, `sonnet`, `haiku`) may each set
-`system_prepend` to a file under `system_prompts/` (for example
+`system_prepend` in [`claude/config.json`](claude/config.json) to a file under
+[`claude/system_prompts/`](claude/system_prompts/) (for example
 `@system_prompts/Fable`). When an alias has that file, ACC injects it and
 **skips** the Second Brain persona for that request. You choose which alias
-follows which prompt in `config.json`.
+follows which prompt in `claude/config.json`.
 
 ## Working context
 
@@ -262,9 +275,10 @@ the main agent guide.
 
 - Source: this repository
 - Commands: `~/.local/bin/acc` and `~/.local/bin/acc-proxy`
-- Runtime config: `~/.config/acc/config.json`
+- Runtime config root: `~/.config/acc/` (`providers.json`, `claude/`, `codex/`)
 - Secrets: `~/.config/acc/.env`
-- Alias prompts: `~/.config/acc/system_prompts/` (or repo `system_prompts/`)
+- Alias prompts: `~/.config/acc/claude/system_prompts/`
+- Shared persona: `~/.config/acc/system_prompts/persona.md`
 - Codex config: `~/.codex/config.toml`
 - Request metrics: `~/acc/test_runs.jsonl`
 
@@ -286,8 +300,9 @@ catalog, request shape, or desktop behavior. Preserve the reversible
 - Codex 0.144.2 enables hosted web search by default even when a model catalog
   does not advertise it. ACC writes `web_search = "disabled"` only while its
   provider is active; restore puts the prior setting back.
-- ACC writes a Codex-compatible `model_catalog_json` from `config.json.models`.
-  The installed Codex CLI must parse this file before a release is verified.
+- ACC writes a Codex-compatible `model_catalog_json` from `codex/config.json`
+  `models`. The installed Codex CLI must parse this file before a release is
+  verified.
 - Codex stores the chosen stable model ID and reasoning effort in the task. ACC
   resolves both on every request. Never read a global "active model" to rewrite
   another task's request.
@@ -362,7 +377,7 @@ reach that port, it can use your provider keys through ACC.
 ```bash
 go install github.com/ATruePerson/acc@latest
 # Or in this repository:
-go run . -config config.json
+go run . -config providers.json
 ```
 
 If you start the gateway yourself, point Anthropic clients at it:

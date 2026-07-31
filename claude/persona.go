@@ -1,4 +1,4 @@
-package main
+package claude
 
 import (
 	"encoding/json"
@@ -24,7 +24,7 @@ const (
 	personaRuntimeGeneric    personaRuntime = "generic"
 )
 
-//go:embed system_prompts/persona.md
+//go:embed persona.md
 var embeddedPersonaMarkdown string
 
 var (

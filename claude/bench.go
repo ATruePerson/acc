@@ -1,4 +1,4 @@
-package main
+package claude
 
 import (
 	"bytes"
@@ -198,7 +198,7 @@ func callModel(ctx context.Context, httpClient *http.Client, cfg *Config, route 
 	latencyMs = time.Since(start).Milliseconds()
 
 	if status >= 400 {
-		return "", 0, 0, latencyMs, fmt.Errorf("upstream %d: %s", status, truncate(string(b), 300))
+		return "", 0, 0, latencyMs, fmt.Errorf("upstream %d: %s", status, Truncate(string(b), 300))
 	}
 
 	var oresp OpenAIResponse
@@ -599,8 +599,8 @@ const benchConcurrency = 3
 // summary table, a diff against the previous run, and a full markdown
 // report are printed/written.
 func cmdBench() {
-	loadDotenv(defaultEnvPath())
-	cfg, err := loadConfig(defaultConfigPath())
+	LoadDotenv(DefaultEnvPath())
+	cfg, err := LoadConfig(DefaultConfigPath())
 	if err != nil {
 		fmt.Printf("  No config found. Run `acc setup` first. (%v)\n", err)
 		return

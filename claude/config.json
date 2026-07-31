@@ -1,0 +1,49 @@
+{
+  "alias_routes": {
+    "fable": {
+      "provider": "openrouter",
+      "model": "poolside/laguna-s-2.1:free",
+      "reasoning_effort": "high",
+      "reasoning_locked": true,
+      "max_tokens": 32768,
+      "toolcalling": true,
+      "stream": true,
+      "system_prepend": "@system_prompts/Fable"
+    },
+    "opus": {
+      "provider": "nvidia",
+      "model": "z-ai/glm-5.2",
+      "reasoning_effort": "high",
+      "reasoning_locked": true,
+      "max_tokens": 65536,
+      "toolcalling": true,
+      "stream": true,
+      "system_prepend": "@system_prompts/Opus",
+      "extra_body": {
+        "chat_template_kwargs": {
+          "enable_thinking": true
+        },
+        "reasoning_budget": 32000
+      }
+    },
+    "sonnet": {
+      "provider": "opencode",
+      "model": "big-pickle",
+      "reasoning_effort": "max",
+      "reasoning_locked": true,
+      "max_tokens": 48000,
+      "toolcalling": true,
+      "stream": true,
+      "system_prepend": "@system_prompts/Sonnet"
+    },
+    "haiku": {
+      "provider": "nvidia",
+      "model": "stepfun-ai/step-3.7-flash",
+      "reasoning_locked": true,
+      "max_tokens": 65536,
+      "toolcalling": true,
+      "stream": true,
+      "system_prepend": "@system_prompts/Haiku"
+    }
+  }
+}

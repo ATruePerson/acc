@@ -261,16 +261,12 @@ func TestDefaultConfigIsValidAndLoads(t *testing.T) {
 }
 
 func TestDefaultConfigExposesOnlyProviderPrefixedRealModels(t *testing.T) {
-	b, err := os.ReadFile("config.json")
+	cfg, err := loadConfig(".")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cfg Config
-	if err := json.Unmarshal(b, &cfg); err != nil {
-		t.Fatal(err)
-	}
 
-	visible := codexNamedModels(&cfg)
+	visible := codexNamedModels(cfg)
 	if len(visible) == 0 {
 		t.Fatal("user-facing catalog is empty")
 	}

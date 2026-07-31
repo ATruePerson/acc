@@ -1,0 +1,66 @@
+{
+  "models": {
+    "codex-nemotron-ultra-550b": {
+      "display_name": "Nemotron Ultra 550B (NVIDIA)",
+      "description": "1M-context reasoning model for coding, planning, tool use, and long-context work.",
+      "catalog_priority": 1,
+      "provider": "nvidia",
+      "model": "nvidia/nemotron-3-ultra-550b-a55b",
+      "reasoning": {
+        "minimal": {},
+        "max": {
+          "extra_body": {
+            "chat_template_kwargs": {
+              "enable_thinking": true
+            },
+            "reasoning_budget": 32768
+          }
+        }
+      },
+      "tool_call_support": true,
+      "streaming_support": true,
+      "image_input_support": false,
+      "file_input_support": false,
+      "max_context": 1048576,
+      "max_output": 65536,
+      "enabled": true
+    },
+    "codex-laguna-s-2.1-free": {
+      "display_name": "Laguna S 2.1 (OpenRouter Free)",
+      "description": "Strong coding model that also works well for creative writing and fiction.",
+      "catalog_priority": 2,
+      "provider": "openrouter",
+      "model": "poolside/laguna-s-2.1:free",
+      "reasoning": {
+        "minimal": {},
+        "high": {
+          "effort": "high"
+        }
+      },
+      "tool_call_support": true,
+      "streaming_support": true,
+      "image_input_support": false,
+      "file_input_support": false,
+      "max_context": 1048576,
+      "max_output": 32768,
+      "enabled": true
+    },
+    "codex-step-3.7-flash": {
+      "display_name": "Step 3.7 Flash (NVIDIA)",
+      "description": "Fast, reliable multimodal model for coding, agents, and image understanding.",
+      "catalog_priority": 3,
+      "provider": "nvidia",
+      "model": "stepfun-ai/step-3.7-flash",
+      "reasoning": {
+        "minimal": {}
+      },
+      "tool_call_support": true,
+      "streaming_support": true,
+      "image_input_support": true,
+      "file_input_support": false,
+      "max_context": 262144,
+      "max_output": 16384,
+      "enabled": true
+    }
+  }
+}

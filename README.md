@@ -189,18 +189,9 @@ Use a direct provider path to bypass family routing for one request:
 For example, `anthropic/nvidia/z-ai/glm-5.2` uses the `nvidia` provider from
 your config and sends it `z-ai/glm-5.2`.
 
-Thinking budgets map to the closest `reasoning_effort` value in your config:
-
-```json
-"effort": {
-  "low":       { "budget": 2000,  "reasoning": "low" },
-  "medium":    { "budget": 6000,  "reasoning": "low" },
-  "high":      { "budget": 16000, "reasoning": "medium" },
-  "xhigh":     { "budget": 24000, "reasoning": "high" },
-  "max":       { "budget": 32000, "reasoning": "high" },
-  "ultracode": { "budget": 48000, "reasoning": "high" }
-}
-```
+Claude aliases use each route's locked `reasoning_effort` (and optional
+`extra_body.reasoning_budget`) — not a global thinking-budget table. Codex
+models use the efforts declared under `models.<id>.reasoning`.
 
 ## What it handles
 
@@ -252,11 +243,105 @@ alias and family routing and uses the named provider directly.
 
 ## Identity
 
-ACC identifies itself as `I'm Kabir's Second Brain.` It does not inject
-provider-specific imitation prompts. The current provider and model are included
-in the prompt visible to the model so they can be disclosed only when the user
-explicitly asks. Codex and Claude Code each receive their own client-specific
-adapter — neither receives the other's identity wrapper.
+ACC identifies itself as `I'm Kabir's Second Brain.` for Codex and non-alias
+routes. The editable source is [`system_prompts/persona.md`](system_prompts/persona.md);
+`persona.go` only loads it and substitutes `{{backend}}`.
+
+Claude Code aliases (`fable`, `opus`, `sonnet`, `haiku`) may each set
+`system_prepend` to a file under `system_prompts/` (for example
+`@system_prompts/Fable`). When an alias has that file, ACC injects it and
+**skips** the Second Brain persona for that request. You choose which alias
+follows which prompt in `config.json`.
+
+## Working context
+
+Durable handoff notes that are easy to forget between tasks. `AGENTS.md` remains
+the main agent guide.
+
+### Live paths
+
+- Source: this repository
+- Commands: `~/.local/bin/acc` and `~/.local/bin/acc-proxy`
+- Runtime config: `~/.config/acc/config.json`
+- Secrets: `~/.config/acc/.env`
+- Alias prompts: `~/.config/acc/system_prompts/` (or repo `system_prompts/`)
+- Codex config: `~/.codex/config.toml`
+- Request metrics: `~/acc/test_runs.jsonl`
+
+### Codex Desktop contract (experimental)
+
+The integration remains incomplete and may break when Codex changes its model
+catalog, request shape, or desktop behavior. Preserve the reversible
+`acc codex restore` path and do not describe this surface as production-ready.
+
+- `acc codex` must open the existing `/Applications/ChatGPT.app` directly with
+  macOS `open`. Never invoke the bundled
+  `/Applications/ChatGPT.app/Contents/Resources/codex app` command: when a
+  separate app bundle is absent, that command downloads another 587 MB installer
+  and creates `/Applications/Codex.app`.
+- When a command needs to start the background gateway, it prefers the sibling
+  `acc-proxy` binary so `acc-stop` / `acc-restart` can manage the process.
+- ACC backs up the existing Codex config, writes an ownership-marked direct ACC
+  Responses provider, and preserves unrelated projects, MCPs, and preferences.
+- Codex 0.144.2 enables hosted web search by default even when a model catalog
+  does not advertise it. ACC writes `web_search = "disabled"` only while its
+  provider is active; restore puts the prior setting back.
+- ACC writes a Codex-compatible `model_catalog_json` from `config.json.models`.
+  The installed Codex CLI must parse this file before a release is verified.
+- Codex stores the chosen stable model ID and reasoning effort in the task. ACC
+  resolves both on every request. Never read a global "active model" to rewrite
+  another task's request.
+
+### Codex model registry
+
+The Codex menu uses deterministic `provider/upstream-model` IDs from enabled ACC
+capabilities plus authenticated native-provider discovery. Claude aliases stay
+in the Claude Code registry and never appear in Codex. A direct Codex ID routes
+exactly to its named provider/model with no automatic fallback.
+
+Unsupported efforts return 400 before a provider call. Response headers report
+requested model/effort plus actual provider and backend model.
+
+### Plugins, Sites, and scheduled tasks
+
+- Claude Code loads ACC's local MCP bundle from `~/.config/acc/mcp.json` via
+  `--mcp-config --strict-mcp-config`. Obsidian stays a separate plugin under
+  `plugins/obsidian`.
+- Claude-3p uses
+  `~/Library/Application Support/Claude-3p/claude_desktop_config.json`;
+  `acc mcp install --claude-3p` merges ACC servers there.
+- Sites 0.1.27 is a Codex plugin: design picker is MCP; save/deploy is a Codex
+  connector. Never claim a Sites deployment was tested unless one was created.
+- Scheduled local jobs store model ID and effort but have no custom
+  `model_provider` field yet — do not advertise scheduled ACC support until
+  Codex persists the custom provider.
+
+### Native Codex lifecycle and auth
+
+Supported path: `Codex -> ACC loopback -> exact provider/model`.
+`acc codex setup/start/stop/status/doctor/restore/remove` do not execute or
+configure OpenCodex. Process ownership is recorded only when `start` launches
+ACC. Config changes are atomic, timestamp-backed up, ownership-marked, and
+exactly restorable.
+
+Native Kimi and xAI credentials live in macOS Keychain. Anthropic API keys
+remain the stable path. Existing official Claude/Grok credentials are read only
+after an explicit import command.
+
+### Verification
+
+```bash
+make test
+curl -sS http://localhost:9999/health
+tail -n 10 /Users/kabir/acc/test_runs.jsonl
+```
+
+For a live model check, send a tiny `/v1/responses` request and verify the
+`X-ACC-*` response headers plus the final JSONL row. Use a temporary Codex home
+for catalog parser tests.
+
+Third-party notices for referenced OpenCodex patterns live in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ## Security
 

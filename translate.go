@@ -42,6 +42,13 @@ func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRe
 	if cfg != nil {
 		prepend = cfg.SystemPrepend
 	}
+	if route.SystemPrepend != "" {
+		if prepend != "" {
+			prepend = prepend + "\n\n" + route.SystemPrepend
+		} else {
+			prepend = route.SystemPrepend
+		}
+	}
 	if prepend != "" {
 		sys = prepend + "\n\n" + sys
 	}
@@ -116,6 +123,11 @@ func translateRequest(ar *AnthropicRequest, route Route, cfg *Config) (*OpenAIRe
 		}
 	}
 
+	// Alias routes with an explicit system_prepend own identity (e.g. Claude
+	// imitation files). Skip ACC's Second Brain persona on those routes.
+	if strings.TrimSpace(route.SystemPrepend) != "" {
+		return or, nil
+	}
 	return requestWithACCPersona(or, route, personaRuntimeClaudeCode)
 }
 

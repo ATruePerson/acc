@@ -3,7 +3,8 @@
 `acc-proxy` is a high-performance Go gateway that intercepts Anthropic SDK requests (like Codex) and translates them into OpenAI-compatible requests, routing to cheaper or specialized upstreams (NVIDIA NIM, Gemini, OpenRouter, OpenCode).
 
 For the current Codex Desktop integration, model-family mapping, launch rules,
-and failure history, read [`ACC.md`](ACC.md) before changing `acc codex`.
+and failure history, read [`README.md`](README.md) (Working context section)
+before changing `acc codex`.
 
 > ZAI (`api.z.ai`) was removed 2026-06-28 — it is paid (error 1113 insufficient balance). `z-ai/glm-5.1` on the NVIDIA provider is a different, free thing.
 
@@ -13,7 +14,7 @@ and failure history, read [`ACC.md`](ACC.md) before changing `acc codex`.
 | :--- | :--- | :--- |
 | `main.go` | HTTP server, routers, model listings, command lifecycle | `handleMessages`, `handleModels`, `routeFor` |
 | `model_registry.go` | Codex capabilities, exact effort validation, explicit fallback chain | `responseModelChain`, `applyReasoningTarget` |
-| `persona.go` | Single ACC-owned identity without replacing platform/project instructions | `accPersona`, `requestWithACCPersona` |
+| `persona.go` / `system_prompts/persona.md` | ACC Second Brain identity (markdown source + loader) | `accPersona`, `requestWithACCPersona` |
 | `translate.go` | Protocol translation (messages, tools, images) | `translateRequest`, `translateMessage`, `translateResponse`, `bucketForBudget` |
 | `stream.go` | Real-time SSE translator for streaming requests | `streamTranslate` (extracts usage from final chunks) |
 | `tui.go` | Live terminal dashboard + persistent logger | `AddTUILog` (writes `test_runs.jsonl`), `drawDashboard` |
@@ -73,10 +74,13 @@ A route's `extra_body` is **flat-merged to the top level** of the outgoing reque
 ### 6. Routing: `models`, `routes`, and `aliases`
 
 - `models` is the Codex-visible capability registry and exact stable-ID route.
-- `routes` (`opus`/`sonnet`/`haiku`) remain reusable family definitions.
-- `aliases` remain for legacy Anthropic and OpenAI-compatible clients.
-- Route-level `system_prepend` is retired and cleared on load. Only ACC's
-  central persona plus user-owned global instructions may be injected.
+- `routes` remain reusable family definitions.
+- `alias_routes` (`fable`/`opus`/`sonnet`/`haiku`) are Claude Code aliases. Each
+  may set `system_prepend` to a file under `system_prompts/` (e.g.
+  `@system_prompts/Fable`). When set, ACC skips its Second Brain persona for
+  that alias and injects the file instead.
+- Only ACC's central persona (`system_prompts/persona.md`) plus user-owned
+  global `system_prepend` apply outside those alias files.
 - Config is hot-reloaded per request (no restart needed for config-only edits); Go source changes need a rebuild.
 
 ## Dev cheat sheet

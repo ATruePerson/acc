@@ -945,26 +945,6 @@ func recoverableProvider400(body []byte) bool {
 
 // ---------- Config ----------
 
-func loadPrependFile(baseDir, path string) (string, error) {
-	if strings.HasPrefix(path, "~/") {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			path = filepath.Join(home, path[2:])
-		}
-	} else if !filepath.IsAbs(path) {
-		// Try resolving relative to config file directory first, then Cwd
-		absPath := filepath.Join(baseDir, path)
-		if _, err := os.Stat(absPath); err == nil {
-			path = absPath
-		}
-	}
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("failed to read system_prepend file %q: %w", path, err)
-	}
-	return string(content), nil
-}
-
 func loadConfig(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -983,23 +963,26 @@ func loadConfig(path string) (*Config, error) {
 	}
 
 	baseDir := filepath.Dir(path)
-	if strings.HasPrefix(c.SystemPrepend, "@") {
-		resolved, err := loadPrependFile(baseDir, c.SystemPrepend[1:])
-		if err != nil {
-			return nil, err
-		}
-		c.SystemPrepend = resolved
+	setPersonaFilePath(resolvePersonaFile(baseDir))
+
+	resolved, err := resolveSystemPrepend(baseDir, c.SystemPrepend)
+	if err != nil {
+		return nil, err
 	}
+	c.SystemPrepend = resolved
 
 	for k, r := range c.Routes {
-		// Route-specific persona files were an ACC-owned legacy mechanism. They
-		// are intentionally retired so provider imitation prompts can never
-		// override the central Kabir's Second Brain identity.
+		// Non-alias Routes keep ACC's central Second Brain persona. Alias routes
+		// may point at Claude imitation files under system_prompts/.
 		r.SystemPrepend = ""
 		c.Routes[k] = r
 	}
 	for k, r := range c.AliasRoutes {
-		r.SystemPrepend = ""
+		resolved, err := resolveSystemPrepend(baseDir, r.SystemPrepend)
+		if err != nil {
+			return nil, fmt.Errorf("alias route %q: %w", k, err)
+		}
+		r.SystemPrepend = resolved
 		c.AliasRoutes[k] = r
 	}
 

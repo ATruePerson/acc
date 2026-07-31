@@ -53,8 +53,10 @@ type Route struct {
 	// smaller than the public model when a larger-context fallback is available.
 	MaxContext int   `json:"max_context,omitempty"`
 	Stream     *bool `json:"stream,omitempty"`
-	// SystemPrepend is accepted only so old config files still load. ACC clears
-	// it during config loading; route-specific identity prompts are retired.
+	// SystemPrepend is used by alias_routes to inject a Claude imitation (or
+	// other) identity file. Non-alias Routes and custom Aliases clear it on
+	// load so only ACC's central persona applies there. Use "@path" to load
+	// from disk relative to the config file (e.g. "@system_prompts/Fable").
 	SystemPrepend string `json:"system_prepend,omitempty"`
 	// ExtraBody is a map of arbitrary JSON fields to merge into the outgoing
 	// OpenAI-compatible request body.

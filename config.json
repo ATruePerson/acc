@@ -92,7 +92,8 @@
       "reasoning_locked": true,
       "max_tokens": 32768,
       "toolcalling": true,
-      "stream": true
+      "stream": true,
+      "system_prepend": "@system_prompts/Fable"
     },
     "opus": {
       "provider": "nvidia",
@@ -102,6 +103,7 @@
       "max_tokens": 65536,
       "toolcalling": true,
       "stream": true,
+      "system_prepend": "@system_prompts/Opus",
       "extra_body": {
         "chat_template_kwargs": {
           "enable_thinking": true
@@ -116,7 +118,8 @@
       "reasoning_locked": true,
       "max_tokens": 48000,
       "toolcalling": true,
-      "stream": true
+      "stream": true,
+      "system_prepend": "@system_prompts/Sonnet"
     },
     "haiku": {
       "provider": "nvidia",
@@ -124,33 +127,8 @@
       "reasoning_locked": true,
       "max_tokens": 65536,
       "toolcalling": true,
-      "stream": true
-    }
-  },
-  "effort": {
-    "low": {
-      "budget": 2000,
-      "reasoning": "low"
-    },
-    "medium": {
-      "budget": 6000,
-      "reasoning": "low"
-    },
-    "high": {
-      "budget": 16000,
-      "reasoning": "medium"
-    },
-    "xhigh": {
-      "budget": 24000,
-      "reasoning": "high"
-    },
-    "max": {
-      "budget": 32000,
-      "reasoning": "high"
-    },
-    "ultracode": {
-      "budget": 48000,
-      "reasoning": "high"
+      "stream": true,
+      "system_prepend": "@system_prompts/Haiku"
     }
   }
 }

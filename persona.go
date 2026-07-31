@@ -2,7 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+
+	_ "embed"
 )
 
 const (
@@ -18,6 +24,34 @@ const (
 	personaRuntimeGeneric    personaRuntime = "generic"
 )
 
+//go:embed system_prompts/persona.md
+var embeddedPersonaMarkdown string
+
+var (
+	personaFileMu   sync.Mutex
+	personaFilePath string
+)
+
+// setPersonaFilePath points ACC persona loading at an editable markdown file.
+// Empty keeps the embedded fallback.
+func setPersonaFilePath(path string) {
+	personaFileMu.Lock()
+	defer personaFileMu.Unlock()
+	personaFilePath = path
+}
+
+func personaMarkdownSource() string {
+	personaFileMu.Lock()
+	path := personaFilePath
+	personaFileMu.Unlock()
+	if path != "" {
+		if b, err := os.ReadFile(path); err == nil && len(b) > 0 {
+			return string(b)
+		}
+	}
+	return embeddedPersonaMarkdown
+}
+
 // accPersona assembles ACC's three small prompt sections. Provider, platform,
 // project, safety, tool, and user instructions remain separate and keep their
 // normal priority.
@@ -30,67 +64,52 @@ func accPersonaForRuntime(provider, model string, runtime personaRuntime) string
 	if backend == "" {
 		backend = "the backend selected by ACC for this request"
 	}
-	return accPersonaStart + "\n" + accCoreBehavior(backend) + "\n\n" + accRuntimeAdapter(runtime) + "\n\n" + accPersonalInstructions() + "\n" + accPersonaEnd
+	core, adapter, personal := parsePersonaMarkdown(personaMarkdownSource(), runtime)
+	core = strings.ReplaceAll(core, "{{backend}}", backend)
+	return accPersonaStart + "\n" + core + "\n\n" + adapter + "\n\n" + personal + "\n" + accPersonaEnd
 }
 
-func accCoreBehavior(backend string) string {
-	return `Core behavior
-
-You are Kabir's Second Brain, a personal AI system designed to help Kabir think, learn, plan, build, research, and execute.
-
-Your identity is Kabir's Second Brain. The underlying language model is only the current reasoning engine selected by ACC.
-
-Normal identity answer: “I’m Kabir’s Second Brain.”
-
-The active backend for this request is ` + backend + `. This task is currently being powered by ` + backend + `.
-Only disclose the backend when Kabir explicitly asks which model, provider, engine, or backend is currently running. Then answer: “I’m Kabir’s Second Brain. This task is currently being powered by ` + backend + `.”
-
-Do not identify yourself as Claude, ChatGPT, GPT, Sonnet, NVIDIA NIM, OpenRouter, or another provider model during ordinary conversation. Do not claim capabilities, memories, tools, permissions, or access that are not actually available.
-
-Report errors and uncertainty honestly.`
-}
-
-func accClaudeCodeRuntime() string {
-	return `Claude Code runtime/tool adapter
-
-You are operating inside Claude Code through ACC. You are not the Anthropic Claude model unless the active backend actually is Anthropic.
-
-Use only the tools supplied with the current request and format every call exactly to its declared schema. Tool results are authoritative. Inspect files before modifying them. Never claim a tool succeeded without receiving a successful result. Continue through multi-step tool workflows until the task is complete or genuinely blocked.
-
-Avoid destructive actions unless clearly requested. Do not repeat a destructive call after execution may have started. Follow repository instructions such as AGENTS.md.`
-}
-
-func accCodexRuntime() string {
-	return `Codex runtime/tool adapter
-
-The current client is Codex operating through ACC. The underlying language model is still only the backend selected by ACC.
-
-Use only the tools supplied with the current request and format every call exactly to its declared schema. Tool results are authoritative. Inspect files before modifying them. Never claim a tool succeeded without receiving a successful result. Continue through multi-step tool workflows until the task is complete or genuinely blocked.
-
-Avoid destructive actions unless clearly requested. Do not repeat a destructive call after execution may have started. Follow repository instructions such as AGENTS.md.`
-}
-
-func accRuntimeAdapter(runtime personaRuntime) string {
+func parsePersonaMarkdown(src string, runtime personaRuntime) (core, adapter, personal string) {
+	sections := splitMarkdownSections(src)
+	core = strings.TrimSpace(sections["core behavior"])
+	personal = strings.TrimSpace(sections["personal instructions"])
 	switch runtime {
 	case personaRuntimeClaudeCode:
-		return accClaudeCodeRuntime()
+		adapter = strings.TrimSpace(sections["runtime: claude-code"])
 	case personaRuntimeGeneric:
-		return `OpenAI-compatible runtime/tool adapter
-
-The current client is using ACC's OpenAI-compatible API. Do not claim it is Codex or Claude Code.
-
-Use only the tools supplied with the current request and format every call exactly to its declared schema. Tool results are authoritative.`
+		adapter = strings.TrimSpace(sections["runtime: generic"])
 	default:
-		return accCodexRuntime()
+		adapter = strings.TrimSpace(sections["runtime: codex"])
 	}
+	return core, adapter, personal
 }
 
-func accPersonalInstructions() string {
-	return `Kabir's personal instructions
-
-Be direct, useful, grounded, and clear. Reconstruct obvious wording mistakes without making Kabir repeat himself. Explain unfamiliar technical subjects in plain language.
-
-Platform, safety, tool, project, developer, and user instructions for the current task still take priority over this ACC-owned prompt.`
+func splitMarkdownSections(src string) map[string]string {
+	out := map[string]string{}
+	lines := strings.Split(src, "\n")
+	var current string
+	var body strings.Builder
+	flush := func() {
+		if current == "" {
+			return
+		}
+		out[current] = strings.TrimSpace(body.String())
+		body.Reset()
+	}
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "## ") {
+			flush()
+			current = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(trimmed, "## ")))
+			continue
+		}
+		if current != "" {
+			body.WriteString(line)
+			body.WriteByte('\n')
+		}
+	}
+	flush()
+	return out
 }
 
 func backendLabel(provider, model string) string {
@@ -178,4 +197,67 @@ func chatJSONWithACCPersona(raw []byte, route Route) ([]byte, error) {
 	}
 	request["messages"] = append([]any{map[string]any{"role": "system", "content": persona}}, messages...)
 	return json.Marshal(request)
+}
+
+func resolvePersonaFile(baseDir string) string {
+	candidates := []string{
+		filepath.Join(baseDir, "system_prompts", "persona.md"),
+		filepath.Join("system_prompts", "persona.md"),
+	}
+	for _, path := range candidates {
+		if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
+			abs, err := filepath.Abs(path)
+			if err == nil {
+				return abs
+			}
+			return path
+		}
+	}
+	return ""
+}
+
+func resolveSystemPrepend(baseDir, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	if !strings.HasPrefix(value, "@") {
+		return value, nil
+	}
+	content, err := loadPrependFile(baseDir, value[1:])
+	if err != nil {
+		return "", err
+	}
+	return content, nil
+}
+
+func loadPrependFile(baseDir, path string) (string, error) {
+	original := path
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			path = filepath.Join(home, path[2:])
+		}
+	} else if !filepath.IsAbs(path) {
+		candidates := []string{
+			filepath.Join(baseDir, path),
+			path,
+		}
+		found := false
+		for _, candidate := range candidates {
+			if _, err := os.Stat(candidate); err == nil {
+				path = candidate
+				found = true
+				break
+			}
+		}
+		if !found {
+			return "", fmt.Errorf("failed to read system_prepend file %q: not found relative to %q", original, baseDir)
+		}
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to read system_prepend file %q: %w", original, err)
+	}
+	return string(content), nil
 }

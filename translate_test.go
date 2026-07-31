@@ -73,7 +73,7 @@ func TestSystemPromptBecomesFirstMessage(t *testing.T) {
 	}
 }
 
-func TestLegacyRoutePersonaIsNotInjected(t *testing.T) {
+func TestAliasRouteSystemPrependSkipsACCPersona(t *testing.T) {
 	ar := &AnthropicRequest{
 		Model:    "x",
 		System:   json.RawMessage(`"base"`),
@@ -85,8 +85,8 @@ func TestLegacyRoutePersonaIsNotInjected(t *testing.T) {
 	or, _ := translateRequest(ar, route, cfg)
 
 	sys := string(or.Messages[0].Content)
-	if strings.Contains(sys, "I am Claude Fable 5.") {
-		t.Fatalf("legacy route persona was injected: %s", sys)
+	if !strings.Contains(sys, "I am Claude Fable 5.") {
+		t.Fatalf("alias system_prepend was not injected: %s", sys)
 	}
 	if !strings.Contains(sys, "GLOBAL") {
 		t.Fatalf("global user instruction was dropped: %s", sys)
@@ -94,8 +94,8 @@ func TestLegacyRoutePersonaIsNotInjected(t *testing.T) {
 	if !strings.Contains(sys, "base") {
 		t.Fatalf("original system text dropped: %s", sys)
 	}
-	if !strings.Contains(sys, "Kabir's Second Brain") {
-		t.Fatalf("ACC persona missing: %s", sys)
+	if strings.Contains(sys, "Kabir's Second Brain") {
+		t.Fatalf("ACC persona should be skipped when alias system_prepend is set: %s", sys)
 	}
 }
 

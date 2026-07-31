@@ -1,4 +1,4 @@
-package main
+package codex
 
 const (
 	codexOpusID    = "opus"
@@ -6,7 +6,12 @@ const (
 	codexHaikuID   = "haiku"
 )
 
-// codexTestConfig returns a sample configuration for use in tests.
+// TestConfig returns a sample configuration for use in tests.
+func TestConfig() *Config { return codexTestConfig() }
+
+// ModelCatalogJSON returns catalog JSON for cfg without auth filtering.
+func ModelCatalogJSON(cfg *Config) []byte { return codexModelCatalogJSON(cfg) }
+
 func codexTestConfig() *Config {
 	return &Config{
 		Providers: map[string]Provider{

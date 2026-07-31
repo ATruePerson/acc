@@ -1,19 +1,15 @@
 package main
 
 import (
-	"encoding/json"
-	"os"
 	"reflect"
 	"testing"
+
+	"github.com/ATruePerson/acc/codex"
 )
 
 func TestDefaultCodexSelectorContainsOnlyChosenModels(t *testing.T) {
-	body, err := os.ReadFile("config.json")
+	cfg, err := loadConfig(".")
 	if err != nil {
-		t.Fatal(err)
-	}
-	var cfg Config
-	if err := json.Unmarshal(body, &cfg); err != nil {
 		t.Fatal(err)
 	}
 	if len(cfg.Models) != 3 {
@@ -28,7 +24,7 @@ func TestDefaultCodexSelectorContainsOnlyChosenModels(t *testing.T) {
 		}
 		_ = capability
 	}
-	models := codexNamedModels(&cfg)
+	models := codex.NamedModels(cfg)
 	var slugs []string
 	for _, model := range models {
 		slugs = append(slugs, model.ID)

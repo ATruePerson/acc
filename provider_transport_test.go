@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/ATruePerson/acc/claude"
 	"context"
 	"encoding/json"
 	"io"
@@ -16,7 +17,7 @@ func TestBuildAnthropicProviderRequestPreservesToolsAndImages(t *testing.T) {
 	req := &OpenAIRequest{
 		Model: "claude-test", MaxTokens: 321,
 		Messages: []OpenAIMessage{
-			{Role: "system", Content: jsonString("system rules")},
+			{Role: "system", Content: claude.JSONString("system rules")},
 			{Role: "user", Content: json.RawMessage(`[{"type":"text","text":"look"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]`)},
 		},
 		Tools: []OpenAITool{{Type: "function", Function: OpenAIFunction{Name: "read_file", Description: "read", Parameters: json.RawMessage(`{"type":"object"}`)}}},
@@ -61,7 +62,7 @@ func TestNormalizeAnthropicResponseProducesOpenAIShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	msg := got.Choices[0].Message
-	if decodeStringContent(msg.Content) != "done" || decodeStringContent(msg.ReasoningContent) != "why" {
+	if claude.DecodeStringContent(msg.Content) != "done" || claude.DecodeStringContent(msg.ReasoningContent) != "why" {
 		t.Fatalf("content conversion failed: %#v", msg)
 	}
 	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].Function.Name != "shell" || msg.ToolCalls[0].Function.Arguments != `{"cmd":"pwd"}` {
@@ -136,7 +137,7 @@ func TestDoProviderRequestReplaysOAuth401ExactlyOnce(t *testing.T) {
 	manager := newAuthManager(store, map[string]authDriver{"xai": driver})
 	runtime := providerRuntime{ID: "xai", BaseURL: server.URL, Adapter: providerAdapterOpenAIChat, BearerToken: "stale-token", OAuth: true}
 
-	resp, err := doProviderRequest(context.Background(), http.DefaultClient, manager, runtime, &OpenAIRequest{Model: "grok", Messages: []OpenAIMessage{{Role: "user", Content: jsonString("hi")}}})
+	resp, err := doProviderRequest(context.Background(), http.DefaultClient, manager, runtime, &OpenAIRequest{Model: "grok", Messages: []OpenAIMessage{{Role: "user", Content: claude.JSONString("hi")}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +159,7 @@ func TestDoProviderRequestDoesNotLoopOnSecondOAuth401(t *testing.T) {
 	driver := &rotatingTestDriver{}
 	manager := newAuthManager(store, map[string]authDriver{"kimi": driver})
 	runtime := providerRuntime{ID: "kimi", BaseURL: server.URL, Adapter: providerAdapterOpenAIChat, BearerToken: "stale", OAuth: true}
-	resp, err := doProviderRequest(context.Background(), http.DefaultClient, manager, runtime, &OpenAIRequest{Model: "kimi", Messages: []OpenAIMessage{{Role: "user", Content: jsonString("hi")}}})
+	resp, err := doProviderRequest(context.Background(), http.DefaultClient, manager, runtime, &OpenAIRequest{Model: "kimi", Messages: []OpenAIMessage{{Role: "user", Content: claude.JSONString("hi")}}})
 	if err != nil {
 		t.Fatal(err)
 	}

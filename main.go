@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/ATruePerson/acc/claude"
+	"github.com/ATruePerson/acc/codex"
 )
 
 // legacyRoutingKeys are field names from the old fallback system that must not
@@ -142,7 +143,9 @@ func main() {
 	})
 
 	mux.HandleFunc("/app", s.handleApp)
-	mux.HandleFunc("/dashboard", s.handleDashboard)
+	mux.HandleFunc("/app/", s.handleApp)
+	mux.HandleFunc("/dashboard", s.handleDashboardUI)
+	mux.HandleFunc("/dashboard/", s.handleDashboardUI)
 	mux.HandleFunc("/dashboard/api/logs", s.handleDashboardLogs)
 	mux.HandleFunc("/dashboard/api/clear", s.handleDashboardClear)
 	mux.HandleFunc("/dashboard/api/restart", s.handleDashboardRestart)
@@ -205,7 +208,7 @@ func newUpstreamHTTPClient() *http.Client {
 	// A dead model can stall before sending HTTP headers, which happens before
 	// the streaming first-token guard gets a chance to run. Bound that phase to
 	// the same window before reporting a stalled upstream.
-	transport.ResponseHeaderTimeout = responseHeaderTimeout
+	transport.ResponseHeaderTimeout = claude.ResponseHeaderTimeout
 	return &http.Client{Timeout: 5 * time.Minute, Transport: transport}
 }
 
@@ -289,7 +292,7 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			ReasoningOut: reasoning,
 			Budget:       budget,
 			Effort:       effort,
-			CostUSD:      costFor(routeModel, in, out, cfg),
+			CostUSD:      claude.CostFor(routeModel, in, out, cfg),
 		})
 	}
 
@@ -437,11 +440,11 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	// Time-to-first-token guard (streaming only): a route that returns 200
 	// but emits no token within firstTokenTimeout is treated as stalled.
 	if ar.Stream && resp.StatusCode < 400 {
-		reader, timedOut, streamErr := awaitFirstByte(resp.Body, firstTokenTimeout)
+		reader, timedOut, streamErr := claude.AwaitFirstByte(resp.Body, claude.FirstTokenTimeout)
 		if timedOut {
 			resp.Body.Close()
 			resp = nil
-			log.Printf("no token from %s/%s within %s", activeRoute.Provider, activeRoute.Model, firstTokenTimeout)
+			log.Printf("no token from %s/%s within %s", activeRoute.Provider, activeRoute.Model, claude.FirstTokenTimeout)
 			logit(activeRoute.Model, 504, 0, 0, 0, or.ReasoningEffort)
 			httpErr(w, 504, fmt.Sprintf("⌛ %s gave no response in time. Try again or switch models.", ar.Model))
 			return
@@ -556,7 +559,7 @@ func (s *server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := chatJSONWithACCPersona(raw, activeRoute)
+	body, err := claude.ChatJSONWithACCPersona(raw, activeRoute)
 	if err != nil {
 		httpErr(w, 400, "prepare request: "+err.Error())
 		logit(activeRoute.Model, 400, 0, 0, 0, "")
@@ -677,11 +680,11 @@ func (s *server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if meta.Stream && resp.StatusCode < 400 {
-		sr, timedOut, streamErr := awaitFirstByte(resp.Body, firstTokenTimeout)
+		sr, timedOut, streamErr := claude.AwaitFirstByte(resp.Body, claude.FirstTokenTimeout)
 		if timedOut {
 			resp.Body.Close()
 			resp = nil
-			log.Printf("openai: no token from %s/%s within %s", activeRoute.Provider, activeRoute.Model, firstTokenTimeout)
+			log.Printf("openai: no token from %s/%s within %s", activeRoute.Provider, activeRoute.Model, claude.FirstTokenTimeout)
 			logit(activeRoute.Model, 504, 0, 0, 0, "")
 			httpErr(w, 504, fmt.Sprintf("%s gave no response in time. Try again or switch models.", meta.Model))
 			return
@@ -757,7 +760,7 @@ func (s *server) handleModels(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if isCodex {
-		json.NewEncoder(w).Encode(map[string]any{"models": codexModelCatalogEntriesWithAuth(s.cfg.Load(), s.auth)})
+		json.NewEncoder(w).Encode(map[string]any{"models": codex.ModelCatalogEntriesWithAuth(s.cfg.Load(), codexAuthAdapter{s.auth})})
 	} else if isAnthropic {
 		var data []map[string]any
 		for _, id := range allow {
@@ -875,7 +878,7 @@ func (s *server) effectiveAliases() map[string]Route {
 			if !capability.Enabled {
 				continue
 			}
-			if route, err := resolveCapabilityRoute(cfg, id, capability); err == nil {
+			if route, err := codex.ResolveCapabilityRoute(cfg, id, capability); err == nil {
 				m[normalizeModelID(id)] = route
 			}
 		}
@@ -971,7 +974,7 @@ func validateConfig(cfg *Config) error {
 		if !capability.Enabled {
 			continue
 		}
-		if _, err := resolveCapabilityRoute(cfg, id, capability); err != nil {
+		if _, err := codex.ResolveCapabilityRoute(cfg, id, capability); err != nil {
 			return err
 		}
 		for effort := range capability.Reasoning {

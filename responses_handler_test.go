@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/ATruePerson/acc/claude"
+	"github.com/ATruePerson/acc/codex"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -18,9 +20,9 @@ type mockTripper struct {
 }
 
 func TestUpstreamHTTPClientTimesOutWaitingForHeaders(t *testing.T) {
-	oldTimeout := responseHeaderTimeout
-	responseHeaderTimeout = 40 * time.Millisecond
-	defer func() { responseHeaderTimeout = oldTimeout }()
+	oldTimeout := claude.ResponseHeaderTimeout
+	claude.ResponseHeaderTimeout = 40 * time.Millisecond
+	defer func() { claude.ResponseHeaderTimeout = oldTimeout }()
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(250 * time.Millisecond)
@@ -102,10 +104,10 @@ func TestTranslateFromResponsesCodexShape(t *testing.T) {
 	if len(or.Messages) != 2 || or.Messages[0].Role != "system" || or.Messages[1].Role != "user" {
 		t.Fatalf("unexpected messages: %+v", or.Messages)
 	}
-	if got := decodeStringContent(or.Messages[0].Content); got != "You are a coding agent." {
+	if got := claude.DecodeStringContent(or.Messages[0].Content); got != "You are a coding agent." {
 		t.Fatalf("system message = %q", got)
 	}
-	if got := decodeStringContent(or.Messages[1].Content); got != "hello" {
+	if got := claude.DecodeStringContent(or.Messages[1].Content); got != "hello" {
 		t.Fatalf("user message = %q", got)
 	}
 	if len(or.Tools) != 1 || or.Tools[0].Function.Name != "shell" {
@@ -119,7 +121,7 @@ func TestTranslateToResponses(t *testing.T) {
 			{
 				Message: &OpenAIMessage{
 					Role:    "assistant",
-					Content: jsonString("Hello!"),
+					Content: claude.JSONString("Hello!"),
 					ToolCalls: []OpenAIToolCall{
 						{
 							ID: "call_2",
@@ -279,7 +281,7 @@ func TestHandleResponses_nonstream(t *testing.T) {
 						{
 							Message: &OpenAIMessage{
 								Role:    "assistant",
-								Content: jsonString("Hi there!"),
+								Content: claude.JSONString("Hi there!"),
 							},
 						},
 					},
@@ -319,7 +321,7 @@ func TestHandleResponses_nonstream(t *testing.T) {
 }
 
 func TestHandleModelsCodexShape(t *testing.T) {
-	s := testServer(codexTestConfig())
+	s := testServer(codex.TestConfig())
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	req.Header.Set("User-Agent", "codex_cli_rs/0.144.2")
 	w := httptest.NewRecorder()

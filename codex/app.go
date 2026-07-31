@@ -269,6 +269,15 @@ func codexRestartPathForBaseline(baselinePath string) string {
 	return filepath.Join(filepath.Dir(baselinePath), "codex-restart-required")
 }
 
+func codexFrontGatewayURL(cfg *Config) string {
+	return fmt.Sprintf("http://127.0.0.1:%d/v1", cfg.Port)
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 func configureCodexApp(configPath, catalogPath, restorePath, baseURL, model string, cfg *Config) error {
 	return configureCodexAppWithAuth(configPath, catalogPath, restorePath, baseURL, model, cfg, nil)
 }

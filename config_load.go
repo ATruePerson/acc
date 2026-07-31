@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"embed"
+
+	accclaude "github.com/ATruePerson/acc/claude"
 )
 
 const (
@@ -26,6 +28,9 @@ var defaultClaudeConfigJSON string
 
 //go:embed codex/config.json
 var defaultCodexConfigJSON string
+
+//go:embed system_prompts/persona.md
+var embeddedPersonaMarkdown string
 
 //go:embed claude/system_prompts/*
 var embeddedClaudePrompts embed.FS
@@ -110,17 +115,17 @@ func loadSplitConfig(root string) (*Config, error) {
 	if err := decodeConfigFile(providersPath, &c); err != nil {
 		return nil, fmt.Errorf("providers: %w", err)
 	}
-	var claude partialClaudeConfig
-	if err := decodeConfigFile(claudePath, &claude); err != nil {
+	var claudeCfg partialClaudeConfig
+	if err := decodeConfigFile(claudePath, &claudeCfg); err != nil {
 		return nil, fmt.Errorf("claude: %w", err)
 	}
-	var codex partialCodexConfig
-	if err := decodeConfigFile(codexPath, &codex); err != nil {
+	var codexCfg partialCodexConfig
+	if err := decodeConfigFile(codexPath, &codexCfg); err != nil {
 		return nil, fmt.Errorf("codex: %w", err)
 	}
 
-	c.AliasRoutes = claude.AliasRoutes
-	c.Models = codex.Models
+	c.AliasRoutes = claudeCfg.AliasRoutes
+	c.Models = codexCfg.Models
 	if c.Routes == nil {
 		c.Routes = map[string]Route{}
 	}
@@ -128,9 +133,9 @@ func loadSplitConfig(root string) (*Config, error) {
 		c.Port = 8787
 	}
 
-	setPersonaFilePath(resolvePersonaFile(root))
+	accclaude.SetPersonaFilePath(accclaude.ResolvePersonaFile(root))
 
-	resolved, err := resolveSystemPrepend(root, c.SystemPrepend)
+	resolved, err := accclaude.ResolveSystemPrepend(root, c.SystemPrepend)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +143,7 @@ func loadSplitConfig(root string) (*Config, error) {
 
 	claudeDir := filepath.Join(root, "claude")
 	for k, r := range c.AliasRoutes {
-		resolved, err := resolveSystemPrepend(claudeDir, r.SystemPrepend)
+		resolved, err := accclaude.ResolveSystemPrepend(claudeDir, r.SystemPrepend)
 		if err != nil {
 			return nil, fmt.Errorf("alias route %q: %w", k, err)
 		}
@@ -182,9 +187,9 @@ func loadLegacyConfig(path string) (*Config, error) {
 	}
 
 	baseDir := filepath.Dir(path)
-	setPersonaFilePath(resolvePersonaFile(baseDir))
+	accclaude.SetPersonaFilePath(accclaude.ResolvePersonaFile(baseDir))
 
-	resolved, err := resolveSystemPrepend(baseDir, c.SystemPrepend)
+	resolved, err := accclaude.ResolveSystemPrepend(baseDir, c.SystemPrepend)
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +200,7 @@ func loadLegacyConfig(path string) (*Config, error) {
 		c.Routes[k] = r
 	}
 	for k, r := range c.AliasRoutes {
-		resolved, err := resolveSystemPrepend(baseDir, r.SystemPrepend)
+		resolved, err := accclaude.ResolveSystemPrepend(baseDir, r.SystemPrepend)
 		if err != nil {
 			return nil, fmt.Errorf("alias route %q: %w", k, err)
 		}
@@ -261,16 +266,16 @@ func mergedDefaultConfigJSON() string {
 	if err := json.Unmarshal([]byte(defaultProvidersJSON), &c); err != nil {
 		panic(err)
 	}
-	var claude partialClaudeConfig
-	if err := json.Unmarshal([]byte(defaultClaudeConfigJSON), &claude); err != nil {
+	var claudeCfg partialClaudeConfig
+	if err := json.Unmarshal([]byte(defaultClaudeConfigJSON), &claudeCfg); err != nil {
 		panic(err)
 	}
-	var codex partialCodexConfig
-	if err := json.Unmarshal([]byte(defaultCodexConfigJSON), &codex); err != nil {
+	var codexCfg partialCodexConfig
+	if err := json.Unmarshal([]byte(defaultCodexConfigJSON), &codexCfg); err != nil {
 		panic(err)
 	}
-	c.AliasRoutes = claude.AliasRoutes
-	c.Models = codex.Models
+	c.AliasRoutes = claudeCfg.AliasRoutes
+	c.Models = codexCfg.Models
 	if c.Routes == nil {
 		c.Routes = map[string]Route{}
 	}

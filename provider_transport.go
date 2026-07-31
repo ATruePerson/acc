@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/ATruePerson/acc/claude"
 	"bufio"
 	"bytes"
 	"context"
@@ -160,7 +161,7 @@ func restoreAnthropicOAuthToolName(name string) string {
 
 func openAIMessageToAnthropic(message OpenAIMessage) ([]anthropicWireMessage, error) {
 	if message.Role == "tool" {
-		content := []map[string]any{{"type": "tool_result", "tool_use_id": message.ToolCallID, "content": decodeStringContent(message.Content)}}
+		content := []map[string]any{{"type": "tool_result", "tool_use_id": message.ToolCallID, "content": claude.DecodeStringContent(message.Content)}}
 		return []anthropicWireMessage{{Role: "user", Content: content}}, nil
 	}
 	role := message.Role
@@ -301,10 +302,10 @@ func anthropicResponseToOpenAI(body []byte) ([]byte, error) {
 		}
 	}
 	if len(texts) > 0 {
-		message.Content = jsonString(strings.Join(texts, ""))
+		message.Content = claude.JSONString(strings.Join(texts, ""))
 	}
 	if len(thinking) > 0 {
-		message.ReasoningContent = jsonString(strings.Join(thinking, ""))
+		message.ReasoningContent = claude.JSONString(strings.Join(thinking, ""))
 	}
 	finish := map[string]string{"end_turn": "stop", "max_tokens": "length", "tool_use": "tool_calls"}[wire.StopReason]
 	response := OpenAIResponse{
@@ -356,9 +357,9 @@ func anthropicStreamToOpenAI(source io.ReadCloser) io.ReadCloser {
 				part, _ := event["delta"].(map[string]any)
 				switch part["type"] {
 				case "text_delta":
-					delta.Content = jsonString(stringValue(part["text"]))
+					delta.Content = claude.JSONString(stringValue(part["text"]))
 				case "thinking_delta":
-					delta.ReasoningContent = jsonString(stringValue(part["thinking"]))
+					delta.ReasoningContent = claude.JSONString(stringValue(part["thinking"]))
 				case "input_json_delta":
 					if toolIndexes[index] {
 						delta.ToolCalls = []OpenAIToolCall{{Index: index, Function: OpenAIFuncCall{Arguments: stringValue(part["partial_json"])}}}

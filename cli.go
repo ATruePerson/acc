@@ -406,7 +406,7 @@ func cmdCodexLegacy(args []string) {
 				return
 			}
 		}
-		if !isCodexModel(cfg, model) {
+		if !codex.IsModel(cfg, model) {
 			fmt.Printf("  Unknown or disabled ACC model %q. Run `acc models` to list enabled model IDs.\n", model)
 			return
 		}
@@ -425,7 +425,7 @@ func cmdCodexLegacy(args []string) {
 		path = flags.Args()[0]
 	}
 	if restore {
-		if err := restoreCodexApp(codexConfig, codexCatalog, restoreState); err != nil {
+		if err := codex.RestoreApp(codexConfig, codexCatalog, restoreState); err != nil {
 			fmt.Printf("  Could not restore Codex settings: %v\n", err)
 			return
 		}
@@ -457,7 +457,7 @@ func cmdCodexLegacy(args []string) {
 		return
 	}
 	apiBase := strings.TrimRight(base, "/") + "/v1"
-	if err := configureCodexApp(codexConfig, codexCatalog, restoreState, apiBase, model, cfg); err != nil {
+	if err := codex.ConfigureApp(codexConfig, codexCatalog, restoreState, apiBase, model, cfg); err != nil {
 		fmt.Printf("  Could not configure Codex Desktop: %v\n", err)
 		return
 	}

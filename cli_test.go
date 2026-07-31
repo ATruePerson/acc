@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/ATruePerson/acc/codex"
 )
 
 func TestCodexExperimentalNoticeIsExplicit(t *testing.T) {
@@ -85,7 +87,7 @@ func TestCodexModelCatalogHasNamedModels(t *testing.T) {
 			DisplayName string `json:"display_name"`
 		} `json:"models"`
 	}
-	if err := json.Unmarshal(codexModelCatalogJSON(codexTestConfig()), &catalog); err != nil {
+	if err := json.Unmarshal(codex.ModelCatalogJSON(codex.TestConfig()), &catalog); err != nil {
 		t.Fatal(err)
 	}
 	want := []struct{ slug, display string }{
@@ -107,7 +109,7 @@ func TestCodexCatalogDoesNotAdvertiseHostedWebSearch(t *testing.T) {
 	var catalog struct {
 		Models []map[string]json.RawMessage `json:"models"`
 	}
-	if err := json.Unmarshal(codexModelCatalogJSON(codexTestConfig()), &catalog); err != nil {
+	if err := json.Unmarshal(codex.ModelCatalogJSON(codex.TestConfig()), &catalog); err != nil {
 		t.Fatal(err)
 	}
 	if len(catalog.Models) == 0 {
@@ -121,7 +123,7 @@ func TestCodexCatalogDoesNotAdvertiseHostedWebSearch(t *testing.T) {
 }
 
 func TestConfigureAndRestoreCodexApp(t *testing.T) {
-	cfg := codexTestConfig()
+	cfg := codex.TestConfig()
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	catalogPath := filepath.Join(dir, "acc-models.json")
@@ -131,7 +133,7 @@ func TestConfigureAndRestoreCodexApp(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := configureCodexApp(configPath, catalogPath, restorePath, "http://localhost:9999/v1", "nvidia/z-ai~sglm-5.2", cfg)
+	err := codex.ConfigureApp(configPath, catalogPath, restorePath, "http://localhost:9999/v1", "nvidia/z-ai~sglm-5.2", cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +161,7 @@ func TestConfigureAndRestoreCodexApp(t *testing.T) {
 	if strings.Contains(text, `model = "gpt-subscription"`) {
 		t.Fatalf("old root model was not replaced:\n%s", text)
 	}
-	if err := configureCodexApp(configPath, catalogPath, restorePath, "http://localhost:9999/v1", "opencode/big-pickle", cfg); err != nil {
+	if err := codex.ConfigureApp(configPath, catalogPath, restorePath, "http://localhost:9999/v1", "opencode/big-pickle", cfg); err != nil {
 		t.Fatal(err)
 	}
 	switched, err := os.ReadFile(configPath)
@@ -170,7 +172,7 @@ func TestConfigureAndRestoreCodexApp(t *testing.T) {
 		t.Fatalf("second launch did not switch models:\n%s", switched)
 	}
 
-	if err := restoreCodexApp(configPath, catalogPath, restorePath); err != nil {
+	if err := codex.RestoreApp(configPath, catalogPath, restorePath); err != nil {
 		t.Fatal(err)
 	}
 	restored, err := os.ReadFile(configPath)
@@ -201,11 +203,11 @@ func TestConfigureAndRestoreCodexApp(t *testing.T) {
 	if _, err := os.Stat(catalogPath); !os.IsNotExist(err) {
 		t.Fatalf("generated catalog still exists after restore: %v", err)
 	}
-	baseline, err := readCodexBaseline(restorePath)
+	baseline, err := codex.ReadBaseline(restorePath)
 	if err != nil {
 		t.Fatalf("durable baseline missing or unreadable: %v", err)
 	}
-	if err := validateCodexBaseline(baseline); err != nil {
+	if err := codex.ValidateBaseline(baseline); err != nil {
 		t.Fatalf("durable baseline invalid: %v", err)
 	}
 	if string(baseline.RawConfig.Data) != original {
@@ -214,7 +216,7 @@ func TestConfigureAndRestoreCodexApp(t *testing.T) {
 	if string(baseline.SanitizedConfig.Data) != restoredText {
 		t.Fatalf("restore did not use the stored sanitized baseline:\ngot:\n%s\nwant:\n%s", restoredText, baseline.SanitizedConfig.Data)
 	}
-	if err := restoreCodexApp(configPath, catalogPath, restorePath); err != nil {
+	if err := codex.RestoreApp(configPath, catalogPath, restorePath); err != nil {
 		t.Fatalf("repeated restore failed: %v", err)
 	}
 	repeated, err := os.ReadFile(configPath)
@@ -266,7 +268,7 @@ func TestDefaultConfigExposesOnlyProviderPrefixedRealModels(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	visible := codexNamedModels(cfg)
+	visible := codex.NamedModels(cfg)
 	if len(visible) == 0 {
 		t.Fatal("user-facing catalog is empty")
 	}

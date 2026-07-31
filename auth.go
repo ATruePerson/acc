@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ATruePerson/acc/codex"
 )
 
 const (
@@ -148,7 +150,7 @@ func (s *fileCredentialStore) Save(_ context.Context, credential authCredential)
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(path, append(b, '\n'), 0600)
+	return codex.AtomicWriteFile(path, append(b, '\n'), 0600)
 }
 
 func (s *fileCredentialStore) Delete(_ context.Context, provider string) error {

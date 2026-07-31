@@ -1,4 +1,4 @@
-package main
+package codex
 
 import (
 	"encoding/json"
@@ -7,8 +7,8 @@ import (
 )
 
 func TestCodexCatalogUsesProviderPrefixedRealModelsAndNoAliases(t *testing.T) {
-	cfg := codexTestConfig()
-	models := codexNamedModels(cfg)
+	cfg := TestConfig()
+	models := NamedModels(cfg)
 	if len(models) != 3 {
 		t.Fatalf("real catalog models = %d, want 3: %+v", len(models), models)
 	}
@@ -21,11 +21,11 @@ func TestCodexCatalogUsesProviderPrefixedRealModelsAndNoAliases(t *testing.T) {
 		if !want[model.ID] {
 			t.Fatalf("unexpected model ID %q", model.ID)
 		}
-		if encodeCodexSlug(model.Route.Provider, model.Route.Model) != model.ID {
+		if EncodeCodexSlug(model.Route.Provider, model.Route.Model) != model.ID {
 			t.Fatalf("model %q hides route %+v", model.ID, model.Route)
 		}
 	}
-	b := string(codexModelCatalogJSON(cfg))
+	b := string(ModelCatalogJSON(cfg))
 	for _, forbidden := range []string{`"slug": "opus"`, `"slug": "sonnet"`, `"slug": "haiku"`, "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} {
 		if strings.Contains(b, forbidden) {
 			t.Fatalf("Codex catalog leaked alias %q: %s", forbidden, b)
@@ -34,13 +34,13 @@ func TestCodexCatalogUsesProviderPrefixedRealModelsAndNoAliases(t *testing.T) {
 }
 
 func TestCodexCatalogKeepsSameUpstreamModelDistinctAcrossProviders(t *testing.T) {
-	cfg := codexTestConfig()
+	cfg := TestConfig()
 	cfg.Providers["other"] = Provider{BaseURL: "https://other.test", APIKey: "other-key"}
 	cfg.Models["other-glm"] = ModelCapability{
 		Provider: "other", Model: "z-ai/glm-5.2", Enabled: true, StreamingSupport: true,
 	}
 	ids := map[string]bool{}
-	for _, model := range codexNamedModels(cfg) {
+	for _, model := range NamedModels(cfg) {
 		ids[model.ID] = true
 	}
 	if !ids["nvidia/z-ai~sglm-5.2"] || !ids["other/z-ai~sglm-5.2"] {
@@ -48,21 +48,10 @@ func TestCodexCatalogKeepsSameUpstreamModelDistinctAcrossProviders(t *testing.T)
 	}
 }
 
-func TestResponsesRealModelIDRoutesExactly(t *testing.T) {
-	s := testServer(codexTestConfig())
-	chain, err := s.responseModelChain("nvidia/z-ai~sglm-5.2")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(chain) != 1 || chain[0].Route.Provider != "nvidia" || chain[0].Route.Model != "z-ai/glm-5.2" {
-		t.Fatalf("exact real-model chain = %+v", chain)
-	}
-}
-
 func TestCodexCatalogNeverSerializesProviderSecrets(t *testing.T) {
-	cfg := codexTestConfig()
+	cfg := TestConfig()
 	cfg.Providers["nvidia"] = Provider{BaseURL: "https://nvidia.test", APIKey: "top-secret-key"}
-	b, err := json.Marshal(codexModelCatalogEntries(cfg))
+	b, err := json.Marshal(ModelCatalogEntries(cfg))
 	if err != nil {
 		t.Fatal(err)
 	}

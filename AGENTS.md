@@ -10,16 +10,23 @@ before changing `acc codex`.
 
 ## Architecture
 
-| File | Responsibility | Key functions / types |
+| File / package | Responsibility | Key functions / types |
 | :--- | :--- | :--- |
 | `main.go` | HTTP server, routers, model listings, command lifecycle | `handleMessages`, `handleModels`, `routeFor` |
 | `model_registry.go` | Codex capabilities, exact effort validation, explicit fallback chain | `responseModelChain`, `applyReasoningTarget` |
+| `codex_integration.go` | Codex CLI lifecycle (`acc codex start/setup/restore`) | `cmdCodexLifecycle`, `configureNativeCodex` |
 | `config_load.go` | Split config merge (`providers` + `claude` + `codex`) | `loadConfig`, `writeDefaultSplitConfig` |
-| `persona.go` / `system_prompts/persona.md` | ACC Second Brain identity (markdown source + loader) | `accPersona`, `requestWithACCPersona` |
-| `translate.go` | Protocol translation (messages, tools, images) | `translateRequest`, `translateMessage`, `translateResponse`, `bucketForBudget` |
-| `stream.go` | Real-time SSE translator for streaming requests | `streamTranslate` (extracts usage from final chunks) |
+| `claude/` | Claude Code translation, persona, streaming, bench | `TranslateRequest`, `RequestWithACCPersona`, `StreamTranslate`, `RunBench` |
+| `claude/persona.md` | ACC Second Brain identity (embedded fallback) | loaded via `claude.SetPersonaFilePath` |
+| `codex/` | Codex app config, catalog, baseline, TOML surgery | `NamedModels`, `ConfigureApp`, `RestoreApp` |
+| `internal/types/` | Shared config + protocol schemas | `Config`, `AnthropicRequest`, `OpenAIRequest` |
+| `web/app/` | Trueox assistant UI (HTML + CSS + JS, embedded) | `index.html`, `assets/app.css`, `assets/app.js` |
+| `web/dashboard/` | Proxy gateway dashboard UI (embedded) | `index.html`, `assets/dashboard.css`, `assets/dashboard.js` |
+| `web_static.go` | `go:embed` file server for `/app/` and `/dashboard/` | `handleApp`, `handleDashboardUI` |
+| `app_ui.go` | Pointer to app UI location (handlers in `web_static.go`) | — |
+| `dashboard.go` | Dashboard JSON API (`/dashboard/api/*`) | `handleDashboardLogs`, `handleDashboardInfo` |
 | `tui.go` | Live terminal dashboard + persistent logger | `AddTUILog` (writes `test_runs.jsonl`), `drawDashboard` |
-| `types.go` | Shared config, request, response schemas | `Config`, `AnthropicRequest`, `OpenAIRequest`, `OpenAIUsage` |
+| `types.go` | Type aliases into `internal/types` | `Config`, `Route`, `OpenAIRequest` |
 | `dashboard.go` | Web dashboard HTML + JSON API endpoints | `handleDashboard`, `handleDashboardLogs` |
 
 ## Active environment & paths

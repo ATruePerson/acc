@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ATruePerson/acc/codex"
 )
 
 func TestNativeProviderAuthNeverMixesCredentials(t *testing.T) {
@@ -62,8 +64,8 @@ func TestNativeLoginDoesNotAutoSelectModels(t *testing.T) {
 		}
 	}
 	manager := newAuthManager(store, nil)
-	selected := codexNamedModels(codexTestConfig())
-	withLogin := codexNamedModelsWithAuth(codexTestConfig(), manager)
+	selected := codex.NamedModels(codex.TestConfig())
+	withLogin := codex.NamedModelsWithAuth(codex.TestConfig(), codexAuthAdapter{manager})
 	if len(withLogin) != len(selected) {
 		t.Fatalf("login expanded selector from %d to %d models", len(selected), len(withLogin))
 	}

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/ATruePerson/acc/claude"
+	"github.com/ATruePerson/acc/codex"
 	"encoding/json"
 	"net/http/httptest"
 	"strings"
@@ -24,7 +26,7 @@ func TestResponsesRequestPreservesUnknownFields(t *testing.T) {
 func TestResponseToolOutputNormalizesNativeTextPartsForChatProviders(t *testing.T) {
 	output := json.RawMessage(`[{"type":"input_text","text":"tool failed"},{"type":"output_text","text":"details"}]`)
 	content := responseToolOutputContent(output)
-	if got := decodeStringContent(content); got != "tool failed\ndetails" {
+	if got := claude.DecodeStringContent(content); got != "tool failed\ndetails" {
 		t.Fatalf("normalized tool output = %q (%s)", got, content)
 	}
 	if strings.Contains(string(content), "input_text") {
@@ -33,7 +35,7 @@ func TestResponseToolOutputNormalizesNativeTextPartsForChatProviders(t *testing.
 }
 
 func TestPreviousResponseIDExpandsLocalConversation(t *testing.T) {
-	s := testServer(codexTestConfig())
+	s := testServer(codex.TestConfig())
 	priorContent := json.RawMessage(`[{"type":"output_text","text":"prior answer","annotations":[]}]`)
 	s.rememberResponse(&ResponsesResponse{
 		ID: "resp_local",
@@ -49,14 +51,14 @@ func TestPreviousResponseIDExpandsLocalConversation(t *testing.T) {
 	if err := s.applyPreviousResponse(req); err != nil {
 		t.Fatal(err)
 	}
-	or, _, err := translateFromResponsesWithTools(req, Route{Provider: "nvidia", Model: "z-ai/glm-5.2"}, codexTestConfig())
+	or, _, err := translateFromResponsesWithTools(req, Route{Provider: "nvidia", Model: "z-ai/glm-5.2"}, codex.TestConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(or.Messages) != 2 || or.Messages[0].Role != "assistant" || or.Messages[1].Role != "user" {
 		t.Fatalf("continuation messages = %+v, want prior assistant and current user", or.Messages)
 	}
-	if got := decodeStringContent(or.Messages[0].Content); got != "prior answer" {
+	if got := claude.DecodeStringContent(or.Messages[0].Content); got != "prior answer" {
 		t.Fatalf("prior assistant content = %q", got)
 	}
 }
@@ -64,8 +66,8 @@ func TestPreviousResponseIDExpandsLocalConversation(t *testing.T) {
 func TestResponsesReasoningSurvivesTranslation(t *testing.T) {
 	upstream := &OpenAIResponse{Choices: []OpenAIChoice{{Message: &OpenAIMessage{
 		Role:             "assistant",
-		ReasoningContent: jsonString("short plan"),
-		Content:          jsonString("answer"),
+		ReasoningContent: claude.JSONString("short plan"),
+		Content:          claude.JSONString("answer"),
 	}}}}
 	resp := translateToResponses(upstream, "nvidia/z-ai~sglm-5.2")
 	if len(resp.Output) != 2 || resp.Output[0].Type != "reasoning" || resp.Output[1].Type != "message" {

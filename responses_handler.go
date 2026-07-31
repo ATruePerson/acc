@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/ATruePerson/acc/claude"
 )
 
 // translateFromResponses converts a Responses API request into an OpenAI request.
@@ -60,7 +62,7 @@ func translateFromResponsesWithTools(req *ResponsesRequest, route Route, cfg *Co
 		}
 	}
 	if system != "" {
-		or.Messages = append(or.Messages, OpenAIMessage{Role: "system", Content: jsonString(system)})
+		or.Messages = append(or.Messages, OpenAIMessage{Role: "system", Content: claude.JSONString(system)})
 	}
 
 	// Determine reasoning effort
@@ -86,7 +88,7 @@ func translateFromResponsesWithTools(req *ResponsesRequest, route Route, cfg *Co
 			// Simple string input
 			or.Messages = append(or.Messages, OpenAIMessage{
 				Role:    "user",
-				Content: jsonString(inputStr),
+				Content: claude.JSONString(inputStr),
 			})
 		} else {
 			var items []ResponsesItem
@@ -122,7 +124,7 @@ func translateFromResponsesWithTools(req *ResponsesRequest, route Route, cfg *Co
 					if summary.Len() > 0 {
 						or.Messages = append(or.Messages, OpenAIMessage{
 							Role:             "assistant",
-							ReasoningContent: jsonString(summary.String()),
+							ReasoningContent: claude.JSONString(summary.String()),
 						})
 					}
 				case "function_call":
@@ -214,7 +216,7 @@ func translateFromResponsesWithTools(req *ResponsesRequest, route Route, cfg *Co
 func responsesContentToChat(raw json.RawMessage) (json.RawMessage, error) {
 	var text string
 	if err := json.Unmarshal(raw, &text); err == nil {
-		return jsonString(text), nil
+		return claude.JSONString(text), nil
 	}
 
 	var parts []struct {
@@ -264,7 +266,7 @@ func responsesContentToChat(raw json.RawMessage) (json.RawMessage, error) {
 		}
 	}
 	if len(out) == 1 && out[0].Type == "text" {
-		return jsonString(out[0].Text), nil
+		return claude.JSONString(out[0].Text), nil
 	}
 	encoded, err := json.Marshal(out)
 	return encoded, err
@@ -295,14 +297,14 @@ func translateToResponsesWithTools(or *OpenAIResponse, model string, translation
 	if len(or.Choices) > 0 {
 		ch := or.Choices[0]
 		if ch.Message != nil {
-			if reasoning := decodeStringContent(ch.Message.ReasoningContent); reasoning != "" {
+			if reasoning := claude.DecodeStringContent(ch.Message.ReasoningContent); reasoning != "" {
 				resp.Output = append(resp.Output, ResponsesItem{
 					ID: "rs_" + randID(), Type: "reasoning", Status: "completed",
 					Summary: []ResponsesSummary{{Type: "summary_text", Text: reasoning}},
 				})
 			}
 			// If there's content, add message item
-			txt := decodeStringContent(ch.Message.Content)
+			txt := claude.DecodeStringContent(ch.Message.Content)
 			if txt != "" {
 				content, _ := json.Marshal([]map[string]any{{
 					"type": "output_text", "text": txt, "annotations": []any{},
@@ -380,7 +382,7 @@ func (s *server) executeUpstream(
 		return nil, resolvedModel{}, runtimeErr
 	}
 
-	requestForRoute, err := requestWithACCPersona(or, currentRoute)
+	requestForRoute, err := claude.RequestWithACCPersona(or, currentRoute)
 	if err != nil {
 		httpErr(w, 500, "prepare request: "+err.Error())
 		return nil, resolvedModel{}, err
@@ -495,11 +497,11 @@ func (s *server) executeUpstream(
 	// Time-to-first-token guard (streaming only): a route that returns 200
 	// but emits no token within firstTokenTimeout is treated as stalled.
 	if requestForRoute.Stream && resp != nil && resp.StatusCode < 400 {
-		reader, timedOut, streamErr := awaitFirstByte(resp.Body, firstTokenTimeout)
+		reader, timedOut, streamErr := claude.AwaitFirstByte(resp.Body, claude.FirstTokenTimeout)
 		if timedOut {
 			resp.Body.Close()
 			resp = nil
-			log.Printf("no token from %s/%s within %s", currentRoute.Provider, currentRoute.Model, firstTokenTimeout)
+			log.Printf("no token from %s/%s within %s", currentRoute.Provider, currentRoute.Model, claude.FirstTokenTimeout)
 			logit(currentRoute.Model, 504, 0, 0, requestForRoute.ReasoningEffort)
 			httpErr(w, 504, fmt.Sprintf("⌛ %s gave no response in time. Try again or switch models.", currentRoute.Model))
 			return nil, resolvedModel{}, fmt.Errorf("upstream timeout")
@@ -713,7 +715,7 @@ func streamTranslateResponsesWithCompletion(w http.ResponseWriter, body io.Reade
 		}
 
 		// Text delta
-		if txt := decodeStringContent(ch.Delta.Content); txt != "" {
+		if txt := claude.DecodeStringContent(ch.Delta.Content); txt != "" {
 			ensureMessageCreated()
 			accumulatedText += txt
 			send("response.output_text.delta", map[string]any{
@@ -725,7 +727,7 @@ func streamTranslateResponsesWithCompletion(w http.ResponseWriter, body io.Reade
 				"delta":         txt,
 			})
 		}
-		if reasoning := decodeStringContent(ch.Delta.ReasoningContent); reasoning != "" {
+		if reasoning := claude.DecodeStringContent(ch.Delta.ReasoningContent); reasoning != "" {
 			ensureReasoningCreated()
 			reasoningText += reasoning
 			send("response.reasoning_summary_text.delta", map[string]any{
@@ -947,7 +949,7 @@ func (s *server) handleResponses(w http.ResponseWriter, r *http.Request) {
 			TokensOut: out,
 			Budget:    0,
 			Effort:    effort,
-			CostUSD:   costFor(routeModel, in, out, cfg),
+			CostUSD:   claude.CostFor(routeModel, in, out, cfg),
 		})
 	}
 	if err := s.applyPreviousResponse(&req); err != nil {

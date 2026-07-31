@@ -1,6 +1,11 @@
 package claude
 
-import "net/http"
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"time"
+)
 
 // PersonaRuntimeCodex selects the Codex-specific persona adapter section.
 const PersonaRuntimeCodex = personaRuntimeCodex
@@ -47,6 +52,11 @@ func ExactProviderReasoningEffort(provider, effort string) (string, error) {
 	return exactProviderReasoningEffort(provider, effort)
 }
 
+// AwaitFirstByte blocks until the first byte is readable from src or d passes.
+func AwaitFirstByte(src io.Reader, d time.Duration) (io.Reader, bool, error) {
+	return awaitFirstByte(src, d)
+}
+
 // StreamTranslate proxies an upstream SSE stream into Anthropic SSE events.
 func StreamTranslate(w http.ResponseWriter, body interface{ Read([]byte) (int, error) }, model string) (int, int, int) {
 	return streamTranslate(w, body, model)
@@ -55,6 +65,30 @@ func StreamTranslate(w http.ResponseWriter, body interface{ Read([]byte) (int, e
 // TranslateResponse converts a non-streaming OpenAI response into Anthropic format.
 func TranslateResponse(or *OpenAIResponse, model string) map[string]any {
 	return translateResponse(or, model)
+}
+
+// JSONString marshals a string into json.RawMessage.
+func JSONString(s string) json.RawMessage { return jsonString(s) }
+
+// DecodeStringContent extracts plain text from a string-or-blocks content field.
+func DecodeStringContent(raw json.RawMessage) string { return decodeStringContent(raw) }
+
+// TranslateMessage converts one Anthropic message into OpenAI messages.
+func TranslateMessage(m AnthropicMessage) ([]OpenAIMessage, error) {
+	return translateMessage(m)
+}
+
+// BucketForBudget maps an Anthropic thinking budget to a reasoning effort name.
+func BucketForBudget(budget int, cfg *Config) string { return bucketForBudget(budget, cfg) }
+
+// ChatJSONWithACCPersona injects ACC persona into a raw chat-completions JSON body.
+func ChatJSONWithACCPersona(raw []byte, route Route) ([]byte, error) {
+	return chatJSONWithACCPersona(raw, route)
+}
+
+// CostFor estimates USD cost for a model invocation from configured pricing.
+func CostFor(model string, in, out int, cfg *Config) float64 {
+	return costFor(model, in, out, cfg)
 }
 
 // RunBench executes the full persona benchmark matrix.

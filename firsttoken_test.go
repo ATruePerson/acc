@@ -5,13 +5,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ATruePerson/acc/claude"
 )
 
 // fast path: data is already available, so awaitFirstByte returns a reader that
 // replays every byte (nothing lost) and does not report a timeout.
 func TestAwaitFirstByteFast(t *testing.T) {
 	src := strings.NewReader("data: {\"hello\":1}\n\n")
-	r, timedOut, err := awaitFirstByte(src, 2*time.Second)
+	r, timedOut, err := claude.AwaitFirstByte(src, 2*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -34,7 +36,7 @@ func TestAwaitFirstByteTimeout(t *testing.T) {
 	defer pw.Close()
 
 	start := time.Now()
-	r, timedOut, err := awaitFirstByte(pr, 50*time.Millisecond)
+	r, timedOut, err := claude.AwaitFirstByte(pr, 50*time.Millisecond)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -58,7 +60,7 @@ func TestAwaitFirstByteJustInTime(t *testing.T) {
 		pw.Write([]byte("x"))
 		pw.Close()
 	}()
-	r, timedOut, err := awaitFirstByte(pr, 500*time.Millisecond)
+	r, timedOut, err := claude.AwaitFirstByte(pr, 500*time.Millisecond)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

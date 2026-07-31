@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/ATruePerson/acc/claude"
 	"bytes"
 	"context"
 	"errors"
@@ -28,7 +29,7 @@ func TestExecuteUpstreamReturnsProvider400Error(t *testing.T) {
 
 	_, _, err := s.executeUpstream(
 		context.Background(),
-		&OpenAIRequest{Model: primary.Model, Messages: []OpenAIMessage{{Role: "user", Content: jsonString("hi")}}},
+		&OpenAIRequest{Model: primary.Model, Messages: []OpenAIMessage{{Role: "user", Content: claude.JSONString("hi")}}},
 		[]resolvedModel{
 			{ID: "primary", Route: primary},
 		},
@@ -111,7 +112,7 @@ func TestExecuteUpstreamReturnsRateLimitError(t *testing.T) {
 
 	_, _, err := s.executeUpstream(
 		context.Background(),
-		&OpenAIRequest{Model: route.Model, Messages: []OpenAIMessage{{Role: "user", Content: jsonString("hi")}}},
+		&OpenAIRequest{Model: route.Model, Messages: []OpenAIMessage{{Role: "user", Content: claude.JSONString("hi")}}},
 		[]resolvedModel{{ID: "route", Route: route}},
 		cfg,
 		func(string, int, int, int, string) {},
@@ -141,7 +142,7 @@ func TestExecuteUpstreamReturnsServerError(t *testing.T) {
 
 	_, _, err := s.executeUpstream(
 		context.Background(),
-		&OpenAIRequest{Model: route.Model, Messages: []OpenAIMessage{{Role: "user", Content: jsonString("hi")}}},
+		&OpenAIRequest{Model: route.Model, Messages: []OpenAIMessage{{Role: "user", Content: claude.JSONString("hi")}}},
 		[]resolvedModel{{ID: "route", Route: route}},
 		cfg,
 		func(string, int, int, int, string) {},

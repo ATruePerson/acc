@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/ATruePerson/acc/claude"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -238,11 +239,11 @@ func customToolInput(arguments string) (string, error) {
 
 func responseToolOutputContent(output json.RawMessage) json.RawMessage {
 	if len(output) == 0 || string(output) == "null" {
-		return jsonString("")
+		return claude.JSONString("")
 	}
 	var text string
 	if json.Unmarshal(output, &text) == nil {
-		return jsonString(text)
+		return claude.JSONString(text)
 	}
 	var parts []struct {
 		Type string `json:"type"`
@@ -257,13 +258,13 @@ func responseToolOutputContent(output json.RawMessage) json.RawMessage {
 			}
 		}
 		if len(texts) > 0 {
-			return jsonString(strings.Join(texts, "\n"))
+			return claude.JSONString(strings.Join(texts, "\n"))
 		}
 	}
 	// Chat Completions tool content must be a string or provider-supported part
 	// array. Stringify unknown structured output instead of forwarding native
 	// Responses part names such as input_text, which providers reject.
-	return jsonString(string(output))
+	return claude.JSONString(string(output))
 }
 
 func appendChatToolCall(messages *[]OpenAIMessage, toolCall OpenAIToolCall) {

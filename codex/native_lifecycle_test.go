@@ -1,4 +1,4 @@
-package main
+package codex
 
 import (
 	"encoding/json"
@@ -9,7 +9,7 @@ import (
 )
 
 func TestCodexGatewayPointsDirectlyToACC(t *testing.T) {
-	got := codexFrontGatewayURL(&Config{Port: 8080})
+	got := FrontGatewayURL(&Config{Port: 8080})
 	if got != "http://127.0.0.1:8080/v1" {
 		t.Fatalf("gateway = %q", got)
 	}
@@ -129,12 +129,4 @@ func TestValidateCodexCatalogRejectsAliasesDuplicatesAndAmbiguousIDs(t *testing.
 	}
 }
 
-func TestInvalidOwnershipFileCannotKillAProcess(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "ownership.json")
-	if err := os.WriteFile(path, []byte(`{"pid":1,"executable":""}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if stopped, err := stopOwnedCodexProcess(path); err == nil || stopped {
-		t.Fatalf("stopped=%v err=%v", stopped, err)
-	}
-}
+// ownership kill test lives in main (stopOwnedCodexProcess is package main).

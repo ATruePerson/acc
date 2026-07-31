@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/ATruePerson/acc/claude"
+	"github.com/ATruePerson/acc/codex"
 	"encoding/json"
 	"os"
 	"strings"
@@ -28,7 +30,7 @@ func TestImageBlockTranslates(t *testing.T) {
 		Model:    "claude-opus-4-8",
 		Messages: []AnthropicMessage{{Role: "user", Content: json.RawMessage(content)}},
 	}
-	or, err := translateRequest(ar, Route{Model: "glm-4.6"}, testCfg())
+	or, err := claude.TranslateRequest(ar, Route{Model: "glm-4.6"}, testCfg())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,10 +55,10 @@ func TestImageBlockTranslates(t *testing.T) {
 
 func TestEffortBucket(t *testing.T) {
 	cfg := testCfg()
-	if got := bucketForBudget(2000, cfg); got != "low" {
+	if got := claude.BucketForBudget(2000, cfg); got != "low" {
 		t.Fatalf("2000 -> %s, want low", got)
 	}
-	if got := bucketForBudget(32000, cfg); got != "high" {
+	if got := claude.BucketForBudget(32000, cfg); got != "high" {
 		t.Fatalf("32000 -> %s, want high", got)
 	}
 }
@@ -67,7 +69,7 @@ func TestSystemPromptBecomesFirstMessage(t *testing.T) {
 		System:   json.RawMessage(`"you are helpful"`),
 		Messages: []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}},
 	}
-	or, _ := translateRequest(ar, Route{Model: "x"}, testCfg())
+	or, _ := claude.TranslateRequest(ar, Route{Model: "x"}, testCfg())
 	if or.Messages[0].Role != "system" {
 		t.Fatalf("first msg role %s, want system", or.Messages[0].Role)
 	}
@@ -82,7 +84,7 @@ func TestAliasRouteSystemPrependSkipsACCPersona(t *testing.T) {
 	cfg := testCfg()
 	cfg.SystemPrepend = "GLOBAL"
 	route := Route{Model: "x", SystemPrepend: "I am Claude Fable 5."}
-	or, _ := translateRequest(ar, route, cfg)
+	or, _ := claude.TranslateRequest(ar, route, cfg)
 
 	sys := string(or.Messages[0].Content)
 	if !strings.Contains(sys, "I am Claude Fable 5.") {
@@ -105,14 +107,14 @@ func TestAnthropicTranslationUsesOnlyClaudeRuntimePersona(t *testing.T) {
 		System:   json.RawMessage(`"Claude platform instruction"`),
 		Messages: []AnthropicMessage{{Role: "user", Content: json.RawMessage(`"hello"`)}},
 	}
-	or, err := translateRequest(ar, Route{Provider: "opencode", Model: "big-pickle"}, testCfg())
+	or, err := claude.TranslateRequest(ar, Route{Provider: "opencode", Model: "big-pickle"}, testCfg())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(or.Messages) == 0 {
 		t.Fatal("translated request has no system message")
 	}
-	system := decodeStringContent(or.Messages[0].Content)
+	system := claude.DecodeStringContent(or.Messages[0].Content)
 	if !strings.Contains(system, "Claude Code runtime/tool adapter") || strings.Contains(system, "Codex runtime/tool adapter") {
 		t.Fatalf("Anthropic request has the wrong runtime adapter:\n%s", system)
 	}
@@ -135,7 +137,7 @@ func TestRouteOverridesTemperatureAndMaxTokens(t *testing.T) {
 		Temperature: &tempVal,
 		MaxTokens:   500,
 	}
-	or, _ := translateRequest(ar, route, testCfg())
+	or, _ := claude.TranslateRequest(ar, route, testCfg())
 
 	if or.MaxTokens != 500 {
 		t.Errorf("got MaxTokens %d, want 500", or.MaxTokens)
@@ -147,7 +149,7 @@ func TestRouteOverridesTemperatureAndMaxTokens(t *testing.T) {
 
 func TestToolResultBecomesToolMessage(t *testing.T) {
 	content := `[{"type":"tool_result","tool_use_id":"call_1","content":"42"}]`
-	msgs, err := translateMessage(AnthropicMessage{Role: "user", Content: json.RawMessage(content)})
+	msgs, err := claude.TranslateMessage(AnthropicMessage{Role: "user", Content: json.RawMessage(content)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +163,7 @@ func TestToolResultAndTextOrder(t *testing.T) {
 		{"type":"tool_result","tool_use_id":"call_1","content":"42"},
 		{"type":"text","text":"continue"}
 	]`
-	msgs, err := translateMessage(AnthropicMessage{Role: "user", Content: json.RawMessage(content)})
+	msgs, err := claude.TranslateMessage(AnthropicMessage{Role: "user", Content: json.RawMessage(content)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,12 +245,8 @@ func TestFamilyAliasesUseConfiguredRoutesExactly(t *testing.T) {
 }
 
 func TestConfiguredAliasRoutesKeepProviderDiversityAndMaximumReasoning(t *testing.T) {
-	raw, err := os.ReadFile("config.json")
+	cfg, err := loadConfig(".")
 	if err != nil {
-		t.Fatal(err)
-	}
-	var cfg Config
-	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatal(err)
 	}
 	if len(cfg.Aliases) != 0 {
@@ -282,15 +280,22 @@ func TestConfiguredAliasRoutesKeepProviderDiversityAndMaximumReasoning(t *testin
 		t.Fatalf("opus does not enable NVIDIA thinking: %v", opus.ExtraBody)
 	}
 
-	var defaults Config
-	if err := json.Unmarshal([]byte(defaultConfigJSON), &defaults); err != nil {
+	rawClaude, err := os.ReadFile("claude/config.json")
+	if err != nil {
 		t.Fatal(err)
 	}
-	for _, family := range []string{"opus", "sonnet", "haiku"} {
-		configured, _ := json.Marshal(cfg.AliasRoutes[family])
-		setupDefault, _ := json.Marshal(defaults.AliasRoutes[family])
+	var onDisk, embedded partialClaudeConfig
+	if err := json.Unmarshal(rawClaude, &onDisk); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(defaultClaudeConfigJSON), &embedded); err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range []string{"opus", "sonnet", "haiku", "fable"} {
+		configured, _ := json.Marshal(onDisk.AliasRoutes[family])
+		setupDefault, _ := json.Marshal(embedded.AliasRoutes[family])
 		if string(configured) != string(setupDefault) {
-			t.Errorf("default %s alias route differs from config.json\nconfig: %s\ndefault: %s", family, configured, setupDefault)
+			t.Errorf("default %s alias route differs from claude/config.json\nconfig: %s\ndefault: %s", family, configured, setupDefault)
 		}
 	}
 }
@@ -298,7 +303,7 @@ func TestConfiguredAliasRoutesKeepProviderDiversityAndMaximumReasoning(t *testin
 func TestReasoningLockedKeepsProviderMaximum(t *testing.T) {
 	ar := &AnthropicRequest{Thinking: &Thinking{BudgetTokens: 32000}}
 	route := Route{Provider: "opencode", Model: "big-pickle", ReasoningEffort: "max", ReasoningLocked: true}
-	or, err := translateRequest(ar, route, testCfg())
+	or, err := claude.TranslateRequest(ar, route, testCfg())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +312,7 @@ func TestReasoningLockedKeepsProviderMaximum(t *testing.T) {
 	}
 
 	route.ReasoningLocked = false
-	or, err = translateRequest(ar, route, testCfg())
+	or, err = claude.TranslateRequest(ar, route, testCfg())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +334,7 @@ func TestValidateConfigChecksAliasRouteProviders(t *testing.T) {
 }
 
 func TestCodexAliasesFollowConfiguredFamilies(t *testing.T) {
-	cfg := codexTestConfig()
+	cfg := codex.TestConfig()
 	s := testServer(cfg)
 	tests := []struct {
 		id, wantProvider, wantModel string
@@ -354,10 +359,10 @@ func TestCostFor(t *testing.T) {
 		"paid/model": {InputPer1M: 2.0, OutputPer1M: 6.0},
 	}}
 	// 1M in @ $2 + 1M out @ $6 = $8
-	if got := costFor("paid/model", 1_000_000, 1_000_000, cfg); got != 8.0 {
+	if got := claude.CostFor("paid/model", 1_000_000, 1_000_000, cfg); got != 8.0 {
 		t.Fatalf("cost = %v, want 8.0", got)
 	}
-	if got := costFor("free/model", 1_000_000, 1_000_000, cfg); got != 0 {
+	if got := claude.CostFor("free/model", 1_000_000, 1_000_000, cfg); got != 0 {
 		t.Fatalf("unpriced model cost = %v, want 0", got)
 	}
 }
@@ -493,13 +498,13 @@ func TestExactProviderReasoningEffort(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		got, err := exactProviderReasoningEffort(tc.provider, tc.effort)
+		got, err := claude.ExactProviderReasoningEffort(tc.provider, tc.effort)
 		if (err != nil) != tc.wantErr {
-			t.Errorf("exactProviderReasoningEffort(%q, %q) error = %v, wantErr %v", tc.provider, tc.effort, err, tc.wantErr)
+			t.Errorf("claude.ExactProviderReasoningEffort(%q, %q) error = %v, wantErr %v", tc.provider, tc.effort, err, tc.wantErr)
 			continue
 		}
 		if got != tc.expected {
-			t.Errorf("exactProviderReasoningEffort(%q, %q) = %q, want %q", tc.provider, tc.effort, got, tc.expected)
+			t.Errorf("claude.ExactProviderReasoningEffort(%q, %q) = %q, want %q", tc.provider, tc.effort, got, tc.expected)
 		}
 	}
 }
@@ -517,7 +522,7 @@ func TestGeminiThoughtSignature(t *testing.T) {
 	}
 
 	// If provider is gemini, thought_signature must be injected as "skip_thought_signature_validator"
-	or, err := translateRequest(ar, Route{Provider: "gemini", Model: "gemini-model"}, testCfg())
+	or, err := claude.TranslateRequest(ar, Route{Provider: "gemini", Model: "gemini-model"}, testCfg())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -550,7 +555,7 @@ func TestGeminiThoughtSignature(t *testing.T) {
 			{Role: "user", Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"call_abc__thought__SIG_999","content":"success"}]`)},
 		},
 	}
-	or3, err := translateRequest(arWithThought, Route{Provider: "gemini", Model: "gemini-model"}, testCfg())
+	or3, err := claude.TranslateRequest(arWithThought, Route{Provider: "gemini", Model: "gemini-model"}, testCfg())
 	if err != nil {
 		t.Fatal(err)
 	}

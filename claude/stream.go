@@ -12,16 +12,16 @@ import (
 	"time"
 )
 
-// firstTokenTimeout is how long a route has to emit its first response byte
-// before the proxy treats it as stalled. A reasoning model
-// that goes silent (stalled / overloaded) trips this; a model that streams
-// promptly does not. Package var so tests can shorten it.
-var firstTokenTimeout = 15 * time.Second
+// FirstTokenTimeout is how long a route has to emit its first response byte
+// before the proxy treats it as stalled.
+var FirstTokenTimeout = 15 * time.Second
 
-// responseHeaderTimeout is how long to wait for the upstream's HTTP response
-// headers before giving up. This is separate from firstTokenTimeout because
-// slow reasoning models (GLM-5.2) can take >15s to even begin responding.
-var responseHeaderTimeout = 30 * time.Second
+var firstTokenTimeout = FirstTokenTimeout
+
+// ResponseHeaderTimeout is how long to wait for the upstream HTTP response headers.
+var ResponseHeaderTimeout = 30 * time.Second
+
+var responseHeaderTimeout = ResponseHeaderTimeout
 
 // awaitFirstByte blocks until the first byte is readable from src or d passes.
 // On success it returns a reader that re-emits that first byte followed by the

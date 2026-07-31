@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/ATruePerson/acc/codex"
 )
 
 const providerModelCacheVersion = 1
@@ -124,7 +126,7 @@ func writeProviderModelCache(path string, cache providerModelCache) error {
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(path, append(body, '\n'), 0600)
+	return codex.AtomicWriteFile(path, append(body, '\n'), 0600)
 }
 
 func refreshProviderModelCache(ctx context.Context, client *http.Client, cfg *Config, auth *authManager, providerID string) error {

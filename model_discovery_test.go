@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ATruePerson/acc/codex"
 )
 
 func TestDiscoverProviderModelsUsesProviderAuthAndRealIDs(t *testing.T) {
@@ -93,15 +95,15 @@ func TestCachedNativeCatalogOverridesStaticSeedDeterministically(t *testing.T) {
 }
 
 func TestAuthenticatedDiscoveryDoesNotExpandCodexSelector(t *testing.T) {
-	cfg := codexTestConfig()
-	selected := codexNamedModels(cfg)
+	cfg := codex.TestConfig()
+	selected := codex.NamedModels(cfg)
 
 	store := newMemoryCredentialStore()
 	if err := store.Save(context.Background(), authCredential{Provider: "xai", AccessToken: "token"}); err != nil {
 		t.Fatal(err)
 	}
 	auth := newAuthManager(store, nil)
-	withAuth := codexNamedModelsWithAuth(cfg, auth)
+	withAuth := codex.NamedModelsWithAuth(cfg, codexAuthAdapter{auth})
 
 	if len(withAuth) != len(selected) {
 		t.Fatalf("authenticated discovery expanded selector from %d to %d models", len(selected), len(withAuth))

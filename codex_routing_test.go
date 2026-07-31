@@ -1,13 +1,13 @@
 package main
 
 import (
-	"encoding/json"
-	"os"
 	"testing"
+
+	"github.com/ATruePerson/acc/codex"
 )
 
 func TestRouteForUsesExactRequestedCodexModel(t *testing.T) {
-	s := testServer(codexTestConfig())
+	s := testServer(codex.TestConfig())
 
 	cases := []struct {
 		selected string
@@ -32,14 +32,14 @@ func TestRouteForUsesExactRequestedCodexModel(t *testing.T) {
 }
 
 func TestRouteForRejectsUnregisteredCodexModel(t *testing.T) {
-	s := testServer(codexTestConfig())
+	s := testServer(codex.TestConfig())
 	if _, err := s.routeFor("gpt-5.6-unknown"); err == nil {
 		t.Fatal("expected unregistered Codex model to be rejected")
 	}
 }
 
 func TestResponseModelChainAcceptsProviderModelIDs(t *testing.T) {
-	s := testServer(codexTestConfig())
+	s := testServer(codex.TestConfig())
 	cases := []struct {
 		model string
 	}{
@@ -61,7 +61,7 @@ func TestResponseModelChainAcceptsProviderModelIDs(t *testing.T) {
 }
 
 func TestResponseModelChainRejectsBareCodexModelIDs(t *testing.T) {
-	s := testServer(codexTestConfig())
+	s := testServer(codex.TestConfig())
 	for _, bare := range []string{"sol", "terra", "luna", "unknown"} {
 		t.Run(bare, func(t *testing.T) {
 			_, err := s.responseModelChain(bare)
@@ -73,7 +73,7 @@ func TestResponseModelChainRejectsBareCodexModelIDs(t *testing.T) {
 }
 
 func TestResponseModelChainReturnsExactlyOneModel(t *testing.T) {
-	cfg := codexTestConfig()
+	cfg := codex.TestConfig()
 	s := testServer(cfg)
 	chain, err := s.responseModelChain("nvidia/z-ai~sglm-5.2")
 	if err != nil {
@@ -85,15 +85,11 @@ func TestResponseModelChainReturnsExactlyOneModel(t *testing.T) {
 }
 
 func TestConfiguredSelectedCodexModelsRouteExactly(t *testing.T) {
-	raw, err := os.ReadFile("config.json")
+	cfg, err := loadConfig(".")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cfg Config
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		t.Fatal(err)
-	}
-	s := testServer(&cfg)
+	s := testServer(cfg)
 	want := map[string]struct {
 		provider string
 		model    string
@@ -118,5 +114,16 @@ func TestConfiguredSelectedCodexModelsRouteExactly(t *testing.T) {
 			t.Fatalf("%s image support = %v, want %v", selected, chain[0].Capability.ImageInputSupport, expected.images)
 		}
 		_ = chain
+	}
+}
+
+func TestResponsesRealModelIDRoutesExactly(t *testing.T) {
+	s := testServer(codex.TestConfig())
+	chain, err := s.responseModelChain("nvidia/z-ai~sglm-5.2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chain) != 1 || chain[0].Route.Provider != "nvidia" || chain[0].Route.Model != "z-ai/glm-5.2" {
+		t.Fatalf("exact real-model chain = %+v", chain)
 	}
 }

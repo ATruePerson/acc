@@ -7,6 +7,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/ATruePerson/acc/codex"
 )
 
 const (
@@ -110,7 +112,7 @@ func providerConfigured(cfg *Config, auth *authManager, providerID string) bool 
 	return err == nil
 }
 
-func nativeCodexModels(cfg *Config, auth *authManager) []codexNamedModel {
+func nativeCodexModels(cfg *Config, auth *authManager) []codex.NamedModel {
 	cache, err := readProviderModelCache(providerModelCachePath())
 	if err != nil {
 		cache = providerModelCache{Providers: map[string]providerModelCacheEntry{}}
@@ -118,13 +120,13 @@ func nativeCodexModels(cfg *Config, auth *authManager) []codexNamedModel {
 	return nativeCodexModelsFromCache(cfg, auth, cache)
 }
 
-func nativeCodexModelsFromCache(cfg *Config, auth *authManager, cache providerModelCache) []codexNamedModel {
+func nativeCodexModelsFromCache(cfg *Config, auth *authManager, cache providerModelCache) []codex.NamedModel {
 	ids := make([]string, 0, len(nativeProviderDefinitions))
 	for id := range nativeProviderDefinitions {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	var models []codexNamedModel
+	var models []codex.NamedModel
 	for _, providerID := range ids {
 		if !providerConfigured(cfg, auth, providerID) {
 			continue
@@ -145,7 +147,7 @@ func nativeCodexModelsFromCache(cfg *Config, auth *authManager, cache providerMo
 				Enabled: true, StreamingSupport: true, ToolCallSupport: model.Tools, ImageInputSupport: model.Images,
 				MaxContext: model.Context, MaxOutput: model.MaxOutput, Reasoning: reasoning,
 			}
-			models = append(models, codexNamedModel{
+			models = append(models, codex.NamedModel{
 				ID: providerID + "/" + model.ID, Display: capability.DisplayName,
 				Capability: capability, Route: Route{Provider: providerID, Model: model.ID, Reasoning: reasoning, MaxTokens: model.MaxOutput},
 			})

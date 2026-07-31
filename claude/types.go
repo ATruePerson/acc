@@ -3,6 +3,7 @@ package claude
 import "github.com/ATruePerson/acc/internal/types"
 
 type (
+	Provider           = types.Provider
 	Config            = types.Config
 	Route             = types.Route
 	AnthropicRequest  = types.AnthropicRequest
@@ -14,11 +15,14 @@ type (
 	OpenAIRequest     = types.OpenAIRequest
 	OpenAIMessage     = types.OpenAIMessage
 	OpenAIContentPart = types.OpenAIContentPart
+	OpenAIImageURL      = types.OpenAIImageURL
+	OpenAIFile          = types.OpenAIFile
 	OpenAITool        = types.OpenAITool
 	OpenAIToolCall    = types.OpenAIToolCall
 	OpenAIFunction    = types.OpenAIFunction
 	OpenAIFuncCall    = types.OpenAIFuncCall
 	OpenAIExtraContent = types.OpenAIExtraContent
+	OpenAIGoogleExtra  = types.OpenAIGoogleExtra
 	OpenAIResponse    = types.OpenAIResponse
 	OpenAIUsage       = types.OpenAIUsage
 	StreamOptions     = types.StreamOptions

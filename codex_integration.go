@@ -15,6 +15,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/ATruePerson/acc/codex"
 )
 
 type codexProcessOwnership struct {
@@ -28,7 +30,7 @@ func codexFrontGatewayURL(cfg *Config) string {
 }
 
 func codexPaths() (configPath, catalogPath, restorePath string, err error) {
-	codexDir, err := codexHomeDir()
+	codexDir, err := codex.HomeDir()
 	if err != nil {
 		return "", "", "", err
 	}
@@ -58,7 +60,7 @@ func loadCodexRuntime() (*Config, *authManager, error) {
 }
 
 func defaultCodexModelFor(cfg *Config, auth *authManager) (string, error) {
-	models := codexNamedModelsWithAuth(cfg, auth)
+	models := codex.NamedModelsWithAuth(cfg, codexAuthAdapter{auth})
 	if len(models) == 0 {
 		return "", fmt.Errorf("no real Codex models are available")
 	}
@@ -77,7 +79,7 @@ func configureNativeCodex(cfg *Config, auth *authManager, model string) error {
 	if err != nil {
 		return err
 	}
-	return configureCodexAppWithAuth(configPath, catalogPath, restorePath, codexFrontGatewayURL(cfg), model, cfg, auth)
+	return codex.ConfigureAppWithAuth(configPath, catalogPath, restorePath, codexFrontGatewayURL(cfg), model, cfg, codexAuthAdapter{auth})
 }
 
 func refreshAvailableProviderCatalogs(cfg *Config, auth *authManager) []string {
@@ -100,7 +102,7 @@ func refreshAvailableProviderCatalogs(cfg *Config, auth *authManager) []string {
 func codexIntegrationStatus(cfg *Config, auth *authManager) map[string]any {
 	configPath, _, restorePath, _ := codexPaths()
 	config, _ := os.ReadFile(configPath)
-	routing := inspectCodexRouting(string(config))
+	routing := codex.InspectRouting(string(config))
 	processRunning := ownedCodexProcessRunning(codexPIDPath())
 	return map[string]any{
 		"mode":                  routing.Mode,
@@ -108,7 +110,7 @@ func codexIntegrationStatus(cfg *Config, auth *authManager) map[string]any {
 		"codex_endpoint":        routing.Endpoint,
 		"active_model_provider": routing.Provider,
 		"active_catalog":        routing.Catalog,
-		"subscription_baseline": codexBaselineStatus(restorePath, string(config)),
+		"subscription_baseline": codex.BaselineStatus(restorePath, string(config)),
 		"restart_chatgpt":       ternary(codexRestartRequired(codexRestartPath()), "Yes", "No"),
 	}
 }
@@ -153,7 +155,7 @@ func codexRestartRequired(path string) bool {
 		}
 	}
 	if !latest.IsZero() && latest.After(info.ModTime()) {
-		_ = clearCodexRestartRequired(path)
+		_ = codex.ClearRestartRequired(path)
 		return false
 	}
 	return true
@@ -253,7 +255,7 @@ func cmdCodexLifecycle(args []string) {
 			return
 		}
 	}
-	if !isCodexModelWithAuth(cfg, auth, model) {
+	if !codex.IsModelWithAuth(cfg, codexAuthAdapter{auth}, model) {
 		fmt.Printf("  Unknown or unavailable real model %q. Run `acc models`.\n", model)
 		return
 	}
@@ -262,7 +264,7 @@ func cmdCodexLifecycle(args []string) {
 		fmt.Printf("  Could not locate Codex settings: %v\n", err)
 		return
 	}
-	tx, err := beginConfigureCodexApp(configPath, catalogPath, restorePath, codexRestartPath(), codexFrontGatewayURL(cfg), model, cfg, auth)
+	tx, err := codex.BeginConfigureApp(configPath, catalogPath, restorePath, codexRestartPath(), codexFrontGatewayURL(cfg), model, cfg, codexAuthAdapter{auth})
 	if err != nil {
 		fmt.Printf("  Could not configure Codex: %v\n", err)
 		return
@@ -291,7 +293,7 @@ func cmdCodexLifecycle(args []string) {
 		}
 		fmt.Println("  " + message + " Pre-command Codex files were restored.")
 	}
-	if err := validateCodexLoopbackBaseURL(codexFrontGatewayURL(cfg)); err != nil {
+	if err := codex.ValidateLoopbackBaseURL(codexFrontGatewayURL(cfg)); err != nil {
 		fail("ACC endpoint is not loopback-only.")
 		return
 	}
@@ -301,9 +303,9 @@ func cmdCodexLifecycle(args []string) {
 	}
 	configBody, configErr := os.ReadFile(configPath)
 	catalogBody, catalogErr := os.ReadFile(catalogPath)
-	routing := inspectCodexRouting(string(configBody))
-	validCatalog, _ := validateCodexCatalog(catalogBody)
-	if configErr != nil || catalogErr != nil || routing.Mode != "ACC" || routing.Provider != "acc" || !validCatalog || !catalogHasCodexModel(catalogBody, model) {
+	routing := codex.InspectRouting(string(configBody))
+	validCatalog, _ := codex.ValidateCatalog(catalogBody)
+	if configErr != nil || catalogErr != nil || routing.Mode != "ACC" || routing.Provider != "acc" || !validCatalog || !codex.CatalogHasModel(catalogBody, model) {
 		fail("ACC configuration verification failed.")
 		return
 	}
@@ -332,7 +334,7 @@ func runCodexDoctor(out io.Writer, cfg *Config, auth *authManager) bool {
 		configErr = nil
 		config = nil
 	}
-	routing := inspectCodexRouting(string(config))
+	routing := codex.InspectRouting(string(config))
 	ok := true
 	check := func(name string, pass bool, detail string) {
 		mark := "OK"
@@ -341,10 +343,10 @@ func runCodexDoctor(out io.Writer, cfg *Config, auth *authManager) bool {
 		}
 		fmt.Fprintf(out, "  %-4s %-26s %s\n", mark, name, detail)
 	}
-	check("Codex config syntax", configErr == nil && validateCodexConfigText(string(config)) == nil, configPath)
+	check("Codex config syntax", configErr == nil && codex.ValidateConfigText(string(config)) == nil, configPath)
 	check("active routing mode", routing.Mode == "ACC" || routing.Mode == "Subscription", routing.Mode)
 	check("legacy OpenCodex routing", !routing.ActiveOpenCodex, "active port 10100/provider routing absent")
-	loopbackOK := routing.Mode != "ACC" || validateCodexLoopbackBaseURL(routing.Endpoint) == nil
+	loopbackOK := routing.Mode != "ACC" || codex.ValidateLoopbackBaseURL(routing.Endpoint) == nil
 	check("loopback binding", loopbackOK, routing.Endpoint)
 
 	base := fmt.Sprintf("http://127.0.0.1:%d", cfg.Port)
@@ -353,9 +355,9 @@ func runCodexDoctor(out io.Writer, cfg *Config, auth *authManager) bool {
 	if routing.Mode == "ACC" {
 		check("ACC endpoint", running, base)
 		check("Responses compatibility", running && responsesEndpointReady(base), base+"/v1/responses")
-		activeCatalog := resolveCodexPath(routing.Catalog, configPath)
+		activeCatalog := codex.ResolveCodexPath(routing.Catalog, configPath)
 		catalog, catalogErr := os.ReadFile(activeCatalog)
-		validCatalog, catalogDetail := validateCodexCatalog(catalog)
+		validCatalog, catalogDetail := codex.ValidateCatalog(catalog)
 		check("real-model catalog", catalogErr == nil && validCatalog, catalogDetail)
 		check("ACC process ownership", owned, codexPIDPath())
 	} else {
@@ -365,7 +367,7 @@ func runCodexDoctor(out io.Writer, cfg *Config, auth *authManager) bool {
 		check("ACC process ownership", !owned, "no owned process expected")
 	}
 	check("stream/tool translation", codexTransportSelfTest(), "local deterministic conversion")
-	baseline := codexBaselineStatus(restorePath, string(config))
+	baseline := codex.BaselineStatus(restorePath, string(config))
 	check("subscription baseline", baseline == "Valid" || baseline == "Recoverable", baseline)
 	check("port ownership", routing.Mode != "ACC" || running && owned, strconv.Itoa(cfg.Port))
 	storeReady := auth != nil && auth.store != nil
@@ -384,42 +386,6 @@ func runCodexDoctor(out io.Writer, cfg *Config, auth *authManager) bool {
 	return ok
 }
 
-func validateCodexCatalog(body []byte) (bool, string) {
-	var catalog struct {
-		Models []struct {
-			Slug string `json:"slug"`
-		} `json:"models"`
-	}
-	if len(body) == 0 || json.Unmarshal(body, &catalog) != nil {
-		return false, "missing or malformed JSON"
-	}
-	seenSlugs := map[string]bool{}
-	seenModels := map[string]bool{}
-	for _, model := range catalog.Models {
-		lower := strings.ToLower(model.Slug)
-		if seenSlugs[model.Slug] || lower == "opus" || lower == "sonnet" || lower == "haiku" {
-			return false, "duplicate, ambiguous, or forbidden model ID: " + model.Slug
-		}
-		provider, upstreamModel, ok := decodeCodexSlug(model.Slug)
-		if !ok {
-			return false, "malformed slug (must contain exactly one slash with valid encoding): " + model.Slug
-		}
-		if provider == "" || upstreamModel == "" {
-			return false, "empty provider or upstream model in slug: " + model.Slug
-		}
-		modelKey := provider + "\x00" + upstreamModel
-		if seenModels[modelKey] {
-			return false, "duplicate encoded model (two different slugs decode to same provider/model): " + model.Slug
-		}
-		seenSlugs[model.Slug] = true
-		seenModels[modelKey] = true
-	}
-	if len(seenSlugs) == 0 {
-		return false, "catalog has no models"
-	}
-	return true, fmt.Sprintf("%d unique provider-prefixed models", len(seenSlugs))
-}
-
 func codexTransportSelfTest() bool {
 	req := &ResponsesRequest{Model: "test", Input: json.RawMessage(`"hello"`), Stream: true, Tools: []ResponsesTool{{Type: "function", Name: "read", Parameters: json.RawMessage(`{"type":"object"}`)}}}
 	or, _, err := translateFromResponsesWithTools(req, Route{Provider: "test", Model: "real"}, &Config{})
@@ -431,12 +397,12 @@ func restoreCodexSettings() error {
 	return err
 }
 
-func restoreCodexSettingsDetailed() (codexRestoreResult, error) {
+func restoreCodexSettingsDetailed() (codex.RestoreResult, error) {
 	configPath, catalogPath, restorePath, err := codexPaths()
 	if err != nil {
-		return codexRestoreResult{}, err
+		return codex.RestoreResult{}, err
 	}
-	return restoreCodexAppDetailed(configPath, catalogPath, restorePath, codexRestartPath())
+	return codex.RestoreAppDetailed(configPath, catalogPath, restorePath, codexRestartPath())
 }
 
 func removeNativeCodexSettings() error {
@@ -511,7 +477,7 @@ func startOwnedCodexProcess(base string) (codexProcessOwnership, bool, error) {
 	}
 	ownership := codexProcessOwnership{PID: pid, Executable: executable, StartedAt: time.Now().UTC()}
 	encoded, _ := json.MarshalIndent(ownership, "", "  ")
-	if err := atomicWriteFile(path, append(encoded, '\n'), 0600); err != nil {
+	if err := codex.AtomicWriteFile(path, append(encoded, '\n'), 0600); err != nil {
 		_ = syscall.Kill(pid, syscall.SIGTERM)
 		return codexProcessOwnership{}, false, fmt.Errorf("record ACC process ownership: %w", err)
 	}

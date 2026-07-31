@@ -198,7 +198,7 @@ func callModel(ctx context.Context, httpClient *http.Client, cfg *Config, route 
 	latencyMs = time.Since(start).Milliseconds()
 
 	if status >= 400 {
-		return "", 0, 0, latencyMs, fmt.Errorf("upstream %d: %s", status, Truncate(string(b), 300))
+		return "", 0, 0, latencyMs, fmt.Errorf("upstream %d: %s", status, truncateBench(string(b), 300))
 	}
 
 	var oresp OpenAIResponse
@@ -591,6 +591,16 @@ func writeMarkdownReport(runID string, jobs []benchJob, results []benchJobResult
 // reasonable time, and the judge (Gemini, a different provider) doesn't share
 // the limit so it adds no pressure.
 const benchConcurrency = 3
+
+func truncateBench(s string, n int) string {
+	if Truncate != nil {
+		return Truncate(s, n)
+	}
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
 
 // cmdBench runs the full cross-matrix benchmark: every benchTarget against
 // every benchPrompt, capped at benchConcurrency jobs in flight at once.

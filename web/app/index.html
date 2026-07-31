@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ACC Assistant — Trueox macOS Agent</title>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/lucide@0.344.0/dist/umd/lucide.min.js"></script>
+  <link rel="stylesheet" href="/app/assets/app.css">
+</head>
+<body>
+
+  <div class="app-container">
+    
+    <!-- Collapsible Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="brand">
+          <div class="brand-logo">
+            <i data-lucide="cpu"></i>
+          </div>
+          <span class="brand-title">ACC Client</span>
+        </div>
+      </div>
+
+      <button class="btn-new-chat" id="btn-new-chat">
+        <i data-lucide="plus"></i> New Chat
+      </button>
+
+      <div class="history-container">
+        <h3 class="history-title">Recent Conversations</h3>
+        <ul class="history-list" id="history-list">
+          <!-- Populated by JavaScript -->
+        </ul>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="connection-status">
+          <span class="status-dot offline" id="status-dot"></span>
+          <span id="status-text">Connecting...</span>
+        </div>
+        <button class="btn-settings" id="btn-settings-trigger" title="Trueox Settings">
+          <i data-lucide="sliders"></i>
+        </button>
+      </div>
+    </aside>
+
+    <!-- Main Chat Window -->
+    <main class="main-chat">
+      <header class="chat-header">
+        <div class="chat-header-info">
+          <div class="provider-model-badge">
+            <i data-lucide="sparkles"></i>
+            <span id="current-badge-text">gemini / gemini-2.5-flash-lite</span>
+          </div>
+        </div>
+
+        <div class="header-actions">
+          <button class="btn-action-icon" id="btn-toggle-tools" title="Toggle native macOS tools panel">
+            <i data-lucide="terminal"></i>
+          </button>
+        </div>
+      </header>
+
+      <!-- Messages Viewport -->
+      <div class="messages-viewport" id="messages-viewport">
+        <!-- Empty welcome screen -->
+        <div class="welcome-screen" id="welcome-screen">
+          <div class="welcome-logo">
+            <i data-lucide="terminal"></i>
+          </div>
+          <h2>I'm Trueox macOS Assistant</h2>
+          <p>Your agent controller. Type a prompt to run agent loops, execute local AppleScripts, speak aloud, and control your Mac.</p>
+          
+          <div class="suggestions-grid">
+            <div class="suggestion-card" onclick="prefillPrompt('Tell me what app is active right now and say hello!')">
+              <i data-lucide="eye" class="suggestion-icon"></i>
+              <span class="suggestion-title">Active App & Hello</span>
+              <span class="suggestion-desc">Inspect which macOS app is open and speak hello aloud.</span>
+            </div>
+            <div class="suggestion-card" onclick="prefillPrompt('Create a reminder with title \'Drink water!\' in 5 seconds')">
+              <i data-lucide="bell" class="suggestion-icon"></i>
+              <span class="suggestion-title">Schedule macOS Reminder</span>
+              <span class="suggestion-desc">Add tasks directly into your native Apple Reminders app.</span>
+            </div>
+            <div class="suggestion-card" onclick="prefillPrompt('Run a custom script to open Safari and speak \'Done\' out loud')">
+              <i data-lucide="code" class="suggestion-icon"></i>
+              <span class="suggestion-title">Custom AppleScript Run</span>
+              <span class="suggestion-desc">Execute high-context custom system commands.</span>
+            </div>
+            <div class="suggestion-card" onclick="prefillPrompt('Say out loud: \'ACC gateway successfully loaded!\'')">
+              <i data-lucide="volume-2" class="suggestion-icon"></i>
+              <span class="suggestion-title">Speak Native Voice</span>
+              <span class="suggestion-desc">Stream and vocalize messages using native Mac TTS.</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Input Dock -->
+      <div class="input-dock">
+        <!-- Offline warning banner -->
+        <div class="offline-banner" id="offline-banner">
+          <i data-lucide="alert-triangle"></i>
+          <span>Trueox backend offline on <strong>localhost:8000</strong>. Run <code>python app.py</code> in the Trueox folder.</span>
+        </div>
+
+        <div class="input-box-wrapper">
+          <textarea class="input-textarea" id="chat-input" placeholder="How can Trueox help you on this Mac today?"></textarea>
+          
+          <div class="input-controls">
+            <div class="input-controls-left">
+              <!-- Provider Selection -->
+              <div class="selector-container">
+                <label>Provider</label>
+                <select class="select-dropdown" id="select-provider">
+                  <option value="gemini" selected>Gemini</option>
+                  <option value="groq">Groq</option>
+                  <option value="openrouter">OpenRouter</option>
+                  <option value="nvidia">NVIDIA NIM</option>
+                  <option value="zai">ZAI</option>
+                  <option value="opencode">OpenCode</option>
+                  <option value="ollama">Ollama</option>
+                </select>
+              </div>
+
+              <!-- Model Selection -->
+              <div class="selector-container">
+                <label>Model Override</label>
+                <select class="select-dropdown" id="select-model">
+                  <option value="default" selected>Default Model</option>
+                  <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
+                  <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+                  <option value="llama-3.3-70b-versatile">llama-3.3-70b</option>
+                  <option value="deepseek-r1">deepseek-r1</option>
+                  <option value="claude-3-5-sonnet">claude-3-5-sonnet</option>
+                </select>
+              </div>
+            </div>
+
+            <button class="btn-send" id="btn-send" disabled>
+              <i data-lucide="arrow-up" style="width: 18px; height: 18px;"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Sliding Native Tools Right Sidebar -->
+    <aside class="tools-drawer collapsed" id="tools-drawer">
+      <div class="drawer-header">
+        <h3><i data-lucide="terminal"></i> Native Mac Controls</h3>
+        <button class="btn-action-icon" id="btn-close-tools" style="border:none;">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+
+      <div class="drawer-content">
+        <!-- Speak Text Widget -->
+        <div class="tool-widget-card">
+          <h4><i data-lucide="volume-2"></i> Speak Text out loud</h4>
+          <input type="text" class="tool-input" id="tts-widget-input" placeholder="Text to say..." value="ACC connected successfully.">
+          <button class="btn-execute-widget" id="btn-run-tts">
+            <i data-lucide="play" style="width:12px;height:12px;"></i> Speak Aloud
+          </button>
+          <div class="widget-console" id="tts-widget-console">> Idle</div>
+        </div>
+
+        <!-- Get Active App Widget -->
+        <div class="tool-widget-card">
+          <h4><i data-lucide="app-window"></i> Get Active macOS App</h4>
+          <button class="btn-execute-widget" id="btn-run-active-app">
+            <i data-lucide="refresh-cw" style="width:12px;height:12px;"></i> Inspect Active App
+          </button>
+          <div class="widget-console" id="app-widget-console">> Idle</div>
+        </div>
+
+        <!-- Custom AppleScript executor widget -->
+        <div class="tool-widget-card">
+          <h4><i data-lucide="file-code"></i> Run Custom AppleScript</h4>
+          <textarea class="tool-textarea" id="applescript-widget-code" placeholder="-- Enter AppleScript code here&#10;tell application &quot;Finder&quot; to activate"></textarea>
+          <button class="btn-execute-widget" id="btn-run-applescript">
+            <i data-lucide="terminal" style="width:12px;height:12px;"></i> Execute AppleScript
+          </button>
+          <div class="widget-console" id="applescript-widget-console" style="min-height: 80px;">> Idle</div>
+        </div>
+      </div>
+    </aside>
+
+  </div>
+
+  <!-- Settings Overlay Modal -->
+  <div class="settings-overlay" id="settings-overlay">
+    <div class="settings-modal">
+      <div class="settings-header">
+        <h3><i data-lucide="sliders"></i> Trueox Settings Sync</h3>
+        <button class="btn-close-modal" id="btn-settings-close">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      
+      <div class="settings-body">
+        <div class="offline-banner" id="settings-offline-warning" style="display:flex; margin-bottom:0;">
+          <i data-lucide="alert-circle"></i>
+          <span>Keys are saved directly to Trueox .env. Server must be online.</span>
+        </div>
+
+        <div class="setting-group">
+          <label>GEMINI_API_KEY</label>
+          <input type="password" class="tool-input" id="key-gemini" placeholder="AIzaSy...">
+        </div>
+        <div class="setting-group">
+          <label>GROQ_API_KEY</label>
+          <input type="password" class="tool-input" id="key-groq" placeholder="gsk_...">
+        </div>
+        <div class="setting-group">
+          <label>OPENROUTER_API_KEY</label>
+          <input type="password" class="tool-input" id="key-openrouter" placeholder="sk-or-v1-...">
+        </div>
+        <div class="setting-group">
+          <label>NVIDIA_NIM_API_KEY</label>
+          <input type="password" class="tool-input" id="key-nvidia" placeholder="nvapi-...">
+        </div>
+        <div class="setting-group">
+          <label>ZAI_API_KEY</label>
+          <input type="password" class="tool-input" id="key-zai" placeholder="z-ai-key-...">
+        </div>
+        <div class="setting-group">
+          <label>OPENCODE_API_KEY</label>
+          <input type="password" class="tool-input" id="key-opencode" placeholder="oc-key-...">
+        </div>
+      </div>
+
+      <div class="settings-footer">
+        <button class="btn-modal btn-modal-cancel" id="btn-settings-load">
+          Load from Trueox
+        </button>
+        <button class="btn-modal btn-modal-save" id="btn-settings-save">
+          Save Settings
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Toast Container -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <script src="/app/assets/app.js"></script>
+</body>
+</html>

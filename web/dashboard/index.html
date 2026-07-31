@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>▲ ACC Proxy Gateway Dashboard</title>
+  <meta name="description" content="Interactive dashboard for controlling and monitoring the ACC proxy gateway">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/lucide@0.344.0/dist/umd/lucide.min.js"></script>
+  <link rel="stylesheet" href="/dashboard/assets/dashboard.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="brand">
+        <i data-lucide="triangle" class="logo-icon" size="28"></i>
+        <div>
+          <h1>ACC PROXY GATEWAY</h1>
+          <p>Local Intelligent Router & Translator</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button id="clearBtn" class="btn btn-clear">
+          <i data-lucide="trash-2" size="16"></i>
+          Clear Logs
+        </button>
+        <button id="restartBtn" class="btn btn-restart">
+          <i data-lucide="refresh-cw" size="16"></i>
+          Restart Proxy
+        </button>
+      </div>
+    </header>
+
+    <div class="stats-grid">
+      <div class="card">
+        <div class="card-icon online">
+          <i data-lucide="activity" size="20"></i>
+        </div>
+        <div class="card-content">
+          <h3>Gateway Status</h3>
+          <p>Online</p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-icon port">
+          <i data-lucide="radio" size="20"></i>
+        </div>
+        <div class="card-content">
+          <h3>Proxy Port</h3>
+          <p id="portVal">9999</p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-icon uptime">
+          <i data-lucide="clock" size="20"></i>
+        </div>
+        <div class="card-content">
+          <h3>Uptime</h3>
+          <p id="uptimeVal">0s</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-title">
+      <i data-lucide="git-branch" size="16"></i>
+      Active Models & Routing Systems
+    </div>
+
+    <div class="routes-panel">
+      <div class="routes-grid">
+        <div class="route-card">
+          <div class="route-header">
+            <span class="route-source">opencode/big-pickle</span>
+            <span class="route-badge opencode">opencode</span>
+          </div>
+          <div class="route-arrow">│</div>
+          <div class="route-dest">
+            <i data-lucide="corner-down-right" size="14" class="route-dest-icon"></i>
+            <span>big-pickle</span>
+          </div>
+          <span class="effort-badge">
+            <i data-lucide="sparkles" size="11"></i> High Effort
+          </span>
+        </div>
+
+        <div class="route-card">
+          <div class="route-header">
+            <span class="route-source">claude_step_3.7_flash</span>
+            <span class="route-badge nvidia">nvidia</span>
+          </div>
+          <div class="route-arrow">│</div>
+          <div class="route-dest">
+            <i data-lucide="corner-down-right" size="14" class="route-dest-icon"></i>
+            <span>step-3.7-flash</span>
+          </div>
+          <span class="effort-badge">
+            <i data-lucide="sparkles" size="11"></i> Max Effort
+          </span>
+        </div>
+
+        <div class="route-card">
+          <div class="route-header">
+            <span class="route-source">claude_K_2</span>
+            <span class="route-badge nvidia">nvidia</span>
+          </div>
+          <div class="route-arrow">│</div>
+          <div class="route-dest">
+            <i data-lucide="corner-down-right" size="14" class="route-dest-icon"></i>
+            <span>kimi-k2.6</span>
+          </div>
+          <span class="effort-badge">
+            <i data-lucide="sparkles" size="11"></i> High Effort
+          </span>
+        </div>
+
+        <div class="route-card">
+          <div class="route-header">
+            <span class="route-source">claude_M_2.6</span>
+            <span class="route-badge opencode">opencode</span>
+          </div>
+          <div class="route-arrow">│</div>
+          <div class="route-dest">
+            <i data-lucide="corner-down-right" size="14" class="route-dest-icon"></i>
+            <span>mimo-v2.5-free</span>
+          </div>
+          <span class="effort-badge">
+            <i data-lucide="sparkles" size="11"></i> High Effort
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <div class="section-title">
+      <i data-lucide="terminal" size="16"></i>
+      Live Request Streams
+    </div>
+
+    <div class="logs-panel">
+      <div class="logs-container" id="logsContainer">
+        <!-- Javascript renders table contents here -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Overlay Modal for Restarting -->
+  <div class="overlay" id="restartOverlay">
+    <div class="modal">
+      <div class="spinner"></div>
+      <h2>Restarting Proxy Gateway</h2>
+      <p>Please wait while the service compiles and re-binds...</p>
+    </div>
+  </div>
+
+  <script src="/dashboard/assets/dashboard.js"></script>
+</body>
+</html>

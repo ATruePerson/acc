@@ -1,4 +1,4 @@
-package main
+package codex
 
 import (
 	"crypto/sha256"
@@ -19,7 +19,7 @@ type codexAuthFingerprint struct {
 
 var codexWriteFile = atomicWriteFile
 
-func beginConfigureCodexApp(configPath, catalogPath, baselinePath, restartPath, baseURL, model string, cfg *Config, auth *authManager) (*codexConfigTransaction, error) {
+func beginConfigureCodexApp(configPath, catalogPath, baselinePath, restartPath, baseURL, model string, cfg *Config, auth AuthManager) (*codexConfigTransaction, error) {
 	if !isCodexModelWithAuth(cfg, auth, model) {
 		return nil, fmt.Errorf("unknown Codex model %q", model)
 	}

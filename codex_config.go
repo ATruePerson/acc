@@ -201,10 +201,10 @@ func codexManagedProviderBlock(block codexTOMLBlock) bool {
 }
 
 func sanitizeCodexSubscriptionConfig(original string) string {
-	return sanitizeCodexConfig(original, false)
+	return sanitizeCodexConfig(original, false, true)
 }
 
-func sanitizeCodexConfig(original string, removeWebSearch bool) string {
+func sanitizeCodexConfig(original string, removeWebSearch bool, stripRootACCBlock bool) string {
 	blocks := splitCodexTOMLBlocks(original)
 	var out strings.Builder
 	for index, block := range blocks {
@@ -221,8 +221,22 @@ func sanitizeCodexConfig(original string, removeWebSearch bool) string {
 			continue
 		}
 		inOwned := false
+		skipOwned := stripRootACCBlock
 		for _, line := range block.Lines {
 			trimmed := strings.TrimSpace(line)
+			if skipOwned {
+				switch trimmed {
+				case accCodexRootBegin:
+					inOwned = true
+					continue
+				case accCodexRootEnd:
+					inOwned = false
+					continue
+				}
+				if inOwned {
+					continue
+				}
+			}
 			switch trimmed {
 			case accCodexRootBegin:
 				inOwned = true
@@ -269,7 +283,7 @@ func codexNewline(text string) string {
 func renderCodexACCConfig(original, catalogPath, baseURL, model, effort string) string {
 	// ACC temporarily owns web_search while active. The durable subscription
 	// baseline keeps the user's original value and restore puts it back.
-	sanitized := sanitizeCodexConfig(original, true)
+	sanitized := sanitizeCodexConfig(original, true, true)
 	newline := codexNewline(original)
 	blocks := splitCodexTOMLBlocks(sanitized)
 	root := ""

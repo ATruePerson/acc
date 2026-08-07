@@ -176,6 +176,50 @@ func TestToolResultAndTextOrder(t *testing.T) {
 	}
 }
 
+func TestThinkingRoundTrip(t *testing.T) {
+	msgs, err := translateMessage(AnthropicMessage{
+		Role:    "assistant",
+		Content: json.RawMessage(`[{"type":"thinking","thinking":"plan"},{"type":"text","text":"done"}]`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || decodeStringContent(msgs[0].ReasoningContent) != "plan" {
+		t.Fatalf("thinking was not preserved: %+v", msgs)
+	}
+
+	out := translateResponse(&OpenAIResponse{Choices: []OpenAIChoice{{Message: &OpenAIMessage{
+		Content: jsonString("done"), ReasoningContent: jsonString("plan"),
+	}}}}, "model")
+	content := out["content"].([]map[string]any)
+	if content[0]["type"] != "thinking" || content[1]["type"] != "text" {
+		t.Fatalf("thinking was not emitted before text: %+v", content)
+	}
+}
+
+func TestToolTurnGetsReasoningMarkerWhenThinkingWasOmitted(t *testing.T) {
+	msgs, err := translateMessage(AnthropicMessage{
+		Role:    "assistant",
+		Content: json.RawMessage(`[{"type":"tool_use","id":"call_1","name":"Read","input":{}}]`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || decodeStringContent(msgs[0].ReasoningContent) != "acc" {
+		t.Fatalf("missing tool-turn reasoning marker: %+v", msgs)
+	}
+}
+
+func TestProviderReasoningAliasRoundTrip(t *testing.T) {
+	out := translateResponse(&OpenAIResponse{Choices: []OpenAIChoice{{Message: &OpenAIMessage{
+		Content: jsonString("done"), Reasoning: jsonString("plan"),
+	}}}}, "model")
+	content := out["content"].([]map[string]any)
+	if content[0]["type"] != "thinking" || content[0]["thinking"] != "plan" {
+		t.Fatalf("provider reasoning alias was not preserved: %+v", content)
+	}
+}
+
 func TestConfigAliasOverridesAndExtends(t *testing.T) {
 	s := testServer(&Config{
 		Providers: map[string]Provider{

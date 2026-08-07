@@ -271,7 +271,7 @@ func (s *server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	or, err = translateRequest(&ar, activeRoute, cfg)
+	or, err := translateRequest(&ar, activeRoute, cfg)
 	if err != nil {
 		httpErr(w, 400, "translate: "+err.Error())
 		logit(activeRoute.Model, 400, 0, 0, 0, "")
@@ -913,7 +913,16 @@ func loadPrependFile(baseDir, path string) (string, error) {
 func loadConfig(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		if !os.IsNotExist(err) {
+			return nil, err
+		}
+		// Current installs may keep provider, Claude, and Codex settings in
+		// separate files. Merge that layout in memory so no duplicate config
+		// or secret-bearing compatibility file is needed.
+		b, err = loadSplitConfig(filepath.Dir(path))
+		if err != nil {
+			return nil, err
+		}
 	}
 	b = expandEnv(b)
 	var c Config
@@ -960,6 +969,24 @@ func loadConfig(path string) (*Config, error) {
 	}
 
 	return &c, nil
+}
+
+func loadSplitConfig(root string) ([]byte, error) {
+	merged := make(map[string]json.RawMessage)
+	for _, name := range []string{"providers.json", filepath.Join("claude", "config.json"), filepath.Join("codex", "config.json")} {
+		b, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil {
+			return nil, err
+		}
+		var section map[string]json.RawMessage
+		if err := json.Unmarshal(expandEnv(b), &section); err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		for key, value := range section {
+			merged[key] = value
+		}
+	}
+	return json.Marshal(merged)
 }
 
 func validateConfig(cfg *Config) error {

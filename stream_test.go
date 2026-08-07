@@ -32,3 +32,36 @@ func TestStreamTextTranslation(t *testing.T) {
 		}
 	}
 }
+
+func TestStreamThinkingTranslation(t *testing.T) {
+	openaiSSE := strings.Join([]string{
+		`data: {"choices":[{"delta":{"reasoning_content":"plan"}}]}`,
+		`data: {"choices":[{"delta":{"content":"done"}}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+	}, "\n\n")
+
+	w := httptest.NewRecorder()
+	streamTranslate(w, strings.NewReader(openaiSSE), "model")
+	out := w.Body.String()
+	for _, want := range []string{`"type":"thinking_delta"`, `"thinking":"plan"`, `"signature":"acc"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in stream output:\n%s", want, out)
+		}
+	}
+}
+
+func TestStreamProviderReasoningAlias(t *testing.T) {
+	openaiSSE := strings.Join([]string{
+		`data: {"choices":[{"delta":{"reasoning":"plan"}}]}`,
+		`data: {"choices":[{"delta":{"content":"done"}}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+	}, "\n\n")
+
+	w := httptest.NewRecorder()
+	streamTranslate(w, strings.NewReader(openaiSSE), "model")
+	if !strings.Contains(w.Body.String(), `"thinking":"plan"`) {
+		t.Fatalf("provider reasoning alias was not streamed:\n%s", w.Body.String())
+	}
+}

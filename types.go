@@ -63,7 +63,10 @@ type Route struct {
 	// An empty target intentionally omits reasoning_effort (Minimal).
 	Reasoning map[string]ReasoningTarget `json:"reasoning,omitempty"`
 	// Toolcalling indicates whether the route supports tool calls.
-	Toolcalling *bool   `json:"toolcalling,omitempty"`
+	Toolcalling *bool `json:"toolcalling,omitempty"`
+	// Fallbacks remains deserializable for old benchmark fixtures; live routing
+	// does not traverse it.
+	Fallbacks []Route `json:"fallbacks,omitempty"`
 }
 
 type ModelCapability struct {
@@ -82,13 +85,17 @@ type ModelCapability struct {
 
 	Reasoning map[string]ReasoningTarget `json:"reasoning,omitempty"`
 
-	ToolCallSupport   bool     `json:"tool_call_support"`
-	StreamingSupport  bool     `json:"streaming_support"`
-	ImageInputSupport bool     `json:"image_input_support"`
-	FileInputSupport  bool     `json:"file_input_support"`
-	MaxContext        int      `json:"max_context"`
-	MaxOutput         int      `json:"max_output"`
-	Enabled           bool     `json:"enabled"`
+	ToolCallSupport     bool     `json:"tool_call_support"`
+	StreamingSupport    bool     `json:"streaming_support"`
+	ImageInputSupport   bool     `json:"image_input_support"`
+	FileInputSupport    bool     `json:"file_input_support"`
+	MaxContext          int      `json:"max_context"`
+	MaxOutput           int      `json:"max_output"`
+	Enabled             bool     `json:"enabled"`
+	FallbackModel       string   `json:"fallback_model,omitempty"`
+	FallbackModels      []string `json:"fallback_models,omitempty"`
+	ImageModel          string   `json:"image_model,omitempty"`
+	ImageFallbackModels []string `json:"image_fallback_models,omitempty"`
 }
 
 type ReasoningTarget struct {
@@ -129,6 +136,9 @@ type AnthropicBlock struct {
 	Type string `json:"type"`
 	// text
 	Text string `json:"text,omitempty"`
+	// thinking
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
 	// image
 	Source *ImageSource `json:"source,omitempty"`
 	// tool_use
@@ -173,12 +183,15 @@ type StreamOptions struct {
 }
 
 type OpenAIMessage struct {
-	Role             string           `json:"role"`
-	Content          json.RawMessage  `json:"content,omitempty"` // string OR []part
-	ReasoningContent json.RawMessage  `json:"reasoning_content,omitempty"`
-	Refusal          string           `json:"refusal,omitempty"`
-	ToolCalls        []OpenAIToolCall `json:"tool_calls,omitempty"`
-	ToolCallID       string           `json:"tool_call_id,omitempty"`
+	Role             string          `json:"role"`
+	Content          json.RawMessage `json:"content,omitempty"` // string OR []part
+	ReasoningContent json.RawMessage `json:"reasoning_content,omitempty"`
+	// Reasoning is emitted by some OpenAI-compatible providers instead of
+	// reasoning_content. Keep it on the wire adapter so it can be replayed.
+	Reasoning  json.RawMessage  `json:"reasoning,omitempty"`
+	Refusal    string           `json:"refusal,omitempty"`
+	ToolCalls  []OpenAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
 }
 
 type OpenAIContentPart struct {

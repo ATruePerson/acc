@@ -72,8 +72,10 @@ func streamTranslate(w http.ResponseWriter, body io.Reader, model string) (int, 
 	})
 
 	textOpen := false
+	reasoningOpen := false
 	nextIndex := 0
 	textIndex := -1
+	reasoningIndex := -1
 	// map openai tool_call index -> anthropic block index
 	toolBlocks := map[int]int{}
 	stopReason := "end_turn"
@@ -85,6 +87,14 @@ func streamTranslate(w http.ResponseWriter, body io.Reader, model string) (int, 
 		if textOpen {
 			send("content_block_stop", map[string]any{"type": "content_block_stop", "index": textIndex})
 			textOpen = false
+		}
+	}
+	closeReasoning := func() {
+		if reasoningOpen {
+			send("content_block_delta", map[string]any{"type": "content_block_delta", "index": reasoningIndex,
+				"delta": map[string]any{"type": "signature_delta", "signature": "acc"}})
+			send("content_block_stop", map[string]any{"type": "content_block_stop", "index": reasoningIndex})
+			reasoningOpen = false
 		}
 	}
 
@@ -132,8 +142,24 @@ func streamTranslate(w http.ResponseWriter, body io.Reader, model string) (int, 
 			continue
 		}
 
+		if reasoning := messageReasoningContent(ch.Delta); reasoning != "" {
+			if !reasoningOpen {
+				closeText()
+				reasoningIndex = nextIndex
+				nextIndex++
+				send("content_block_start", map[string]any{
+					"type": "content_block_start", "index": reasoningIndex,
+					"content_block": map[string]any{"type": "thinking", "thinking": "", "signature": ""},
+				})
+				reasoningOpen = true
+			}
+			send("content_block_delta", map[string]any{"type": "content_block_delta", "index": reasoningIndex,
+				"delta": map[string]any{"type": "thinking_delta", "thinking": reasoning}})
+		}
+
 		// text delta
 		if txt := decodeStringContent(ch.Delta.Content); txt != "" {
+			closeReasoning()
 			if !textOpen {
 				textIndex = nextIndex
 				nextIndex++
@@ -153,6 +179,7 @@ func streamTranslate(w http.ResponseWriter, body io.Reader, model string) (int, 
 		for _, tc := range ch.Delta.ToolCalls {
 			bi, ok := toolBlocks[tc.Index]
 			if !ok {
+				closeReasoning()
 				closeText()
 				bi = nextIndex
 				nextIndex++
@@ -186,6 +213,7 @@ func streamTranslate(w http.ResponseWriter, body io.Reader, model string) (int, 
 		log.Printf("stream scan error: %v", err)
 	}
 
+	closeReasoning()
 	closeText()
 	for _, bi := range toolBlocks {
 		send("content_block_stop", map[string]any{"type": "content_block_stop", "index": bi})

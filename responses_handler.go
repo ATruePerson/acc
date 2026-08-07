@@ -295,7 +295,7 @@ func translateToResponsesWithTools(or *OpenAIResponse, model string, translation
 	if len(or.Choices) > 0 {
 		ch := or.Choices[0]
 		if ch.Message != nil {
-			if reasoning := decodeStringContent(ch.Message.ReasoningContent); reasoning != "" {
+			if reasoning := messageReasoningContent(ch.Message); reasoning != "" {
 				resp.Output = append(resp.Output, ResponsesItem{
 					ID: "rs_" + randID(), Type: "reasoning", Status: "completed",
 					Summary: []ResponsesSummary{{Type: "summary_text", Text: reasoning}},
@@ -394,6 +394,7 @@ func (s *server) executeUpstream(
 		requestForRoute.TopP = currentRoute.TopP
 	}
 	requestForRoute.MaxTokens = boundedOutputTokens(or.MaxTokens, currentRoute.MaxTokens)
+	requestedReasoningEffort := or.ReasoningEffort
 	requestForRoute.ReasoningEffort = ""
 	effortExtra, err := applyReasoningTarget(requestForRoute, activeRoute, requestedReasoningEffort)
 	if err != nil {
@@ -718,7 +719,7 @@ func streamTranslateResponsesWithCompletion(w http.ResponseWriter, body io.Reade
 				"delta":         txt,
 			})
 		}
-		if reasoning := decodeStringContent(ch.Delta.ReasoningContent); reasoning != "" {
+		if reasoning := messageReasoningContent(ch.Delta); reasoning != "" {
 			ensureReasoningCreated()
 			reasoningText += reasoning
 			send("response.reasoning_summary_text.delta", map[string]any{

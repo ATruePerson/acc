@@ -135,6 +135,7 @@ func translateMessage(m AnthropicMessage) ([]OpenAIMessage, error) {
 
 	var parts []OpenAIContentPart
 	var toolCalls []OpenAIToolCall
+	var reasoning []string
 	var out []OpenAIMessage
 
 	for _, b := range blocks {
@@ -149,6 +150,8 @@ func translateMessage(m AnthropicMessage) ([]OpenAIMessage, error) {
 					ImageURL: &OpenAIImageURL{URL: url},
 				})
 			}
+		case "thinking":
+			reasoning = append(reasoning, b.Thinking)
 		case "tool_use":
 			id := b.ID
 			var thoughtSig string
@@ -180,13 +183,23 @@ func translateMessage(m AnthropicMessage) ([]OpenAIMessage, error) {
 	}
 
 	// assistant/user text+image message
-	if len(parts) > 0 || len(toolCalls) > 0 {
+	if len(parts) > 0 || len(toolCalls) > 0 || len(reasoning) > 0 {
 		msg := OpenAIMessage{Role: m.Role, ToolCalls: toolCalls}
 		if len(parts) == 1 && parts[0].Type == "text" {
 			msg.Content = jsonString(parts[0].Text) // simple string form
 		} else if len(parts) > 0 {
 			raw, _ := json.Marshal(parts)
 			msg.Content = raw
+		}
+		// Reasoning models reject a follow-up tool turn when the assistant
+		// message has tool_calls but no reasoning_content. Claude can omit the
+		// thinking block on a replay, so keep the request valid with ACC's
+		// protocol marker. Real reasoning, when present, always wins above.
+		if len(reasoning) == 0 && m.Role == "assistant" && len(toolCalls) > 0 {
+			reasoning = append(reasoning, "acc")
+		}
+		if len(reasoning) > 0 {
+			msg.ReasoningContent = jsonString(strings.Join(reasoning, ""))
 		}
 		out = append(out, msg)
 	}
@@ -202,6 +215,9 @@ func translateResponse(or *OpenAIResponse, model string) map[string]any {
 	if len(or.Choices) > 0 {
 		ch := or.Choices[0]
 		if ch.Message != nil {
+			if reasoning := messageReasoningContent(ch.Message); reasoning != "" {
+				content = append(content, map[string]any{"type": "thinking", "thinking": reasoning, "signature": "acc"})
+			}
 			if txt := decodeStringContent(ch.Message.Content); txt != "" {
 				content = append(content, map[string]any{"type": "text", "text": txt})
 			}
@@ -306,7 +322,32 @@ func decodeStringContent(raw json.RawMessage) string {
 	if err := json.Unmarshal(raw, &s); err == nil {
 		return s
 	}
+	var parts []struct {
+		Text     string `json:"text"`
+		Thinking string `json:"thinking"`
+	}
+	if err := json.Unmarshal(raw, &parts); err == nil {
+		var out strings.Builder
+		for _, part := range parts {
+			if part.Text != "" {
+				out.WriteString(part.Text)
+			} else if part.Thinking != "" {
+				out.WriteString(part.Thinking)
+			}
+		}
+		return out.String()
+	}
 	return ""
+}
+
+func messageReasoningContent(message *OpenAIMessage) string {
+	if message == nil {
+		return ""
+	}
+	if reasoning := decodeStringContent(message.ReasoningContent); reasoning != "" {
+		return reasoning
+	}
+	return decodeStringContent(message.Reasoning)
 }
 
 func bucketForBudget(budget int, cfg *Config) string {
